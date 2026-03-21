@@ -1,0 +1,69 @@
+-- Print the next mission waypoint to GCS.
+--
+-- This script looks at the current navigation mission index, finds the next
+-- mission item that has a location, and prints its coordinates.
+
+local UPDATE_PERIOD_MS = 1000
+
+local last_reported_index = -1
+
+local function send_info(text)
+    gcs:send_text(0, text)
+end
+
+local function mission_item_to_text(item)
+    local lat_deg = item:x() / 10000000.0
+    local lon_deg = item:y() / 10000000.0
+    local alt_m = item:z()
+
+    return string.format(
+        "Next WP idx=%d cmd=%d lat=%.7f lon=%.7f alt=%.1f",
+        item:seq(),
+        item:command(),
+        lat_deg,
+        lon_deg,
+        alt_m
+    )
+end
+
+local function find_next_waypoint()
+    local total = mission:num_commands()
+    if total == nil or total <= 1 then
+        return nil, "no mission loaded"
+    end
+
+    local current_index = mission:get_current_nav_index()
+    if current_index == nil then
+        return nil, "current nav index unavailable"
+    end
+
+    for index = current_index + 1, total - 1 do
+        local item = mission:get_item(index)
+        if item ~= nil and mission:cmd_has_location(item:command()) then
+            return item, nil
+        end
+    end
+
+    return nil, "no next waypoint"
+end
+
+local function update()
+    local item, err = find_next_waypoint()
+
+    if item == nil then
+        if last_reported_index ~= -2 then
+            last_reported_index = -2
+            send_info("Next WP: " .. err)
+        end
+        return update, UPDATE_PERIOD_MS
+    end
+
+    if item:seq() ~= last_reported_index then
+        last_reported_index = item:seq()
+        send_info(mission_item_to_text(item))
+    end
+
+    return update, UPDATE_PERIOD_MS
+end
+
+return update()

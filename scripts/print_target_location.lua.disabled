@@ -1,0 +1,71 @@
+-- Print the current GPS target location to GCS.
+--
+-- Preference order:
+-- 1. Follow target location, if the follow library has a valid target estimate
+-- 2. Vehicle target location, if the current mode exposes one
+
+local UPDATE_PERIOD_MS = 1000
+
+local last_signature = nil
+
+local function send_info(text)
+    gcs:send_text(0, text)
+end
+
+local function location_signature(prefix, loc)
+    return string.format(
+        "%s:%d:%d:%d",
+        prefix,
+        loc:lat(),
+        loc:lng(),
+        math.floor(loc:alt() + 0.5)
+    )
+end
+
+local function location_to_text(prefix, loc)
+    return string.format(
+        "%s lat=%.7f lon=%.7f alt=%.1f",
+        prefix,
+        loc:lat() / 10000000.0,
+        loc:lng() / 10000000.0,
+        loc:alt()
+    )
+end
+
+local function get_current_target_location()
+    if follow:have_target() then
+        local follow_loc = follow:get_target_location_and_velocity()
+        if follow_loc ~= nil then
+            return "Follow target", follow_loc
+        end
+    end
+
+    local vehicle_target = vehicle:get_target_location()
+    if vehicle_target ~= nil then
+        return "Vehicle target", vehicle_target
+    end
+
+    return nil, nil
+end
+
+local function update()
+    local label, target_loc = get_current_target_location()
+
+    if target_loc == nil then
+        if last_signature ~= "none" then
+            last_signature = "none"
+            send_info("Target location unavailable")
+        end
+        return update, UPDATE_PERIOD_MS
+    end
+
+    local signature = location_signature(label, target_loc)
+    if signature ~= last_signature then
+        last_signature = signature
+        send_info(location_to_text(label, target_loc))
+    end
+
+    return update, UPDATE_PERIOD_MS
+end
+
+return update()
