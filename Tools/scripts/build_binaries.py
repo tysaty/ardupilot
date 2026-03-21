@@ -15,18 +15,19 @@ import optparse
 import os
 import re
 import shutil
-import time
 import string
 import subprocess
 import sys
+import time
 import traceback
+
+import board_list
+import build_binaries_history
+import gen_stable
 
 # local imports
 import generate_manifest
-import gen_stable
-import build_binaries_history
 
-import board_list
 from board_list import AP_PERIPH_BOARDS
 
 
@@ -648,7 +649,7 @@ is bob we will attempt to checkout bob-AVR'''
                            "blimp")
 
     def generate_manifest(self):
-        '''generate manigest files for GCS to download'''
+        '''generate manifest files for GCS to download'''
         self.progress("Generating manifest")
         base_url = 'https://firmware.ardupilot.org'
         generator = generate_manifest.ManifestGenerator(self.binaries,

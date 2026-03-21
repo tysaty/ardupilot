@@ -1017,8 +1017,8 @@ bool Compass::register_compass(int32_t dev_id, uint8_t& instance)
 
 #if COMPASS_MAX_UNREG_DEV
     // Set extra dev id
-    if (_unreg_compass_count >= COMPASS_MAX_UNREG_DEV) {
-        AP_HAL::panic("Too many compass instances");
+    if (_unreg_compass_count >= ARRAY_SIZE(extra_dev_id)) {
+        return false;
     }
 
     for (uint8_t i=0; i<COMPASS_MAX_UNREG_DEV; i++) {
@@ -1034,9 +1034,7 @@ bool Compass::register_compass(int32_t dev_id, uint8_t& instance)
             return false;
         }
     }
-#else
-    AP_HAL::panic("Too many compass instances");
-#endif
+#endif  // COMPASS_MAX_UNREG_DEV
 
     return false;
 }
@@ -1131,16 +1129,15 @@ void Compass::_probe_external_i2c_compasses(void)
         RETURN_IF_NO_SPACE;
     }
 
-#if AP_COMPASS_INTERNAL_BUS_PROBING_ENABLED
-    if (AP_BoardConfig::get_board_type() != AP_BoardConfig::PX4_BOARD_MINDPXV2 &&
-        AP_BoardConfig::get_board_type() != AP_BoardConfig::PX4_BOARD_AEROFC) {
+#if AP_COMPASS_HMC5843_INTERNAL_BUS_PROBING_ENABLED
+    if (AP_BoardConfig::get_board_type() != AP_BoardConfig::PX4_BOARD_AEROFC) {
         // internal i2c bus
         FOREACH_I2C_INTERNAL(i) {
             probe_i2c_dev(DRIVER_HMC5843, AP_Compass_HMC5843::probe, i, HAL_COMPASS_HMC5843_I2C_ADDR, all_external, all_external?ROTATION_ROLL_180:ROTATION_YAW_270);
             RETURN_IF_NO_SPACE;
         }
     }
-#endif  // AP_COMPASS_INTERNAL_BUS_PROBING_ENABLED
+#endif  // AP_COMPASS_KMC5843_INTERNAL_BUS_PROBING_ENABLED
 #endif  // AP_COMPASS_HMC5843_ENABLED
 
 #if AP_COMPASS_QMC5883L_ENABLED

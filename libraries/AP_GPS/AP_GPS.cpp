@@ -111,6 +111,8 @@ static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D == (uint32_t)GPS_FIX_T
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_DGPS == (uint32_t)GPS_FIX_TYPE_DGPS, "FIX_DGPS incorrect");
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_RTK_FLOAT == (uint32_t)GPS_FIX_TYPE_RTK_FLOAT, "FIX_RTK_FLOAT incorrect");
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_RTK_FIXED == (uint32_t)GPS_FIX_TYPE_RTK_FIXED, "FIX_RTK_FIXED incorrect");
+static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_STATIC == (uint32_t)GPS_FIX_TYPE_STATIC, "GPS_FIX_TYPE_STATIC incorrect");
+static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_PPP == (uint32_t)GPS_FIX_TYPE_PPP, "GPS_FIX_TYPE_PPP incorrect");
 #endif
 
 // ensure that our own enum-class status is equivalent to the
@@ -122,6 +124,10 @@ static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D == (uint8_t)AP_GPS_Fix
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_DGPS == (uint8_t)AP_GPS_FixType::DGPS, "FIX_DGPS incorrect");
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_RTK_FLOAT == (uint8_t)AP_GPS_FixType::RTK_FLOAT, "FIX_RTK_FLOAT incorrect");
 static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_3D_RTK_FIXED == (uint8_t)AP_GPS_FixType::RTK_FIXED, "FIX_RTK_FIXED incorrect");
+static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_STATIC == (uint8_t)AP_GPS_FixType::STATIC, "STATIC incorrect");
+static_assert((uint32_t)AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_PPP == (uint8_t)AP_GPS_FixType::PPP, "PPP incorrect");
+
+
 
 AP_GPS *AP_GPS::_singleton;
 
@@ -203,7 +209,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     // @Param: _AUTO_CONFIG
     // @DisplayName: Automatic GPS configuration
     // @Description: Controls if the autopilot should automatically configure the GPS based on the parameters and default settings
-    // @Values: 0:Disables automatic configuration,1:Enable automatic configuration for Serial GPSes only,2:Enable automatic configuration for DroneCAN as well
+    // @Values: 0:Disables automatic configuration,1:Enable automatic configuration for Serial GPSes only,2:Enable automatic configuration for DroneCAN as well,3:Clear all configurations not set by ardupilot (UBlox only)
     // @User: Advanced
     AP_GROUPINFO("_AUTO_CONFIG", 13, AP_GPS, _auto_config, 1),
 
@@ -239,7 +245,7 @@ const AP_Param::GroupInfo AP_GPS::var_info[] = {
     // @Param: _DRV_OPTIONS
     // @DisplayName: driver options
     // @Description: Additional backend specific options
-    // @Bitmask: 0:Use UART2 for moving baseline on ublox,1:Use base station for GPS yaw on SBF,2:Use baudrate 115200 on ublox,3:Use dedicated CAN port b/w GPSes for moving baseline,4:Use ellipsoid height instead of AMSL, 5:Override GPS satellite health of L5 band from L1 health, 6:Enable RTCM full parse even for a single channel, 7:Disable automatic full RTCM parsing when RTCM seen on more than one channel
+    // @Bitmask: 0:Use UART2 for moving baseline on ublox,1:Use base station for GPS yaw on SBF,2:Use baudrate 115200 on ublox,3:Use dedicated CAN port b/w GPSes for moving baseline,4:Use ellipsoid height instead of AMSL, 5:Override GPS satellite health of L5 band from L1 health, 6:Enable RTCM full parse even for a single channel, 7:Disable automatic full RTCM parsing when RTCM seen on more than one channel, 8:Force UBlox Config Get/Set for configuration then automatic configuration for Serial GPSes only
     // @User: Advanced
     AP_GROUPINFO("_DRV_OPTIONS", 22, AP_GPS, _driver_options, 0),
 
@@ -320,6 +326,11 @@ void AP_GPS::init()
 {
     // set the default for the first GPS according to define:
     params[0].type.set_default(HAL_GPS1_TYPE_DEFAULT);
+
+    // PARAMETER_CONVERSION - Added: Jan-2026
+    for (uint8_t i=0; i<GPS_MAX_RECEIVERS; i++) {
+        params[i].gnss_mode.convert_parameter_width(AP_PARAM_INT8);
+    }
 
     convert_parameters();
 
@@ -1299,6 +1310,11 @@ bool AP_GPS::get_first_external_instance(uint8_t& instance) const
 void AP_GPS::handle_external(const AP_ExternalAHRS::gps_data_message_t &pkt, const uint8_t instance)
 {
     if (get_type(instance) == GPS_TYPE_EXTERNAL_AHRS && drivers[instance] != nullptr) {
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (pkt.longitude == 0 && pkt.latitude == 0) {
+        AP_HAL::panic("Invalid location passed to AP_GPS::handle_external");
+    }
+#endif
         drivers[instance]->handle_external(pkt);
     }
 }

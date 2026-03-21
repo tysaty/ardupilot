@@ -37,10 +37,6 @@
 
 #define UNIX_OFFSET_MSEC (17000ULL * 86400ULL + 52ULL * 10ULL * AP_MSEC_PER_WEEK - GPS_LEAPSECONDS_MILLIS)
 
-#ifndef GPS_MOVING_BASELINE
-#define GPS_MOVING_BASELINE GPS_MAX_RECEIVERS>1
-#endif
-
 #if GPS_MOVING_BASELINE
 #include "MovingBase.h"
 #endif // GPS_MOVING_BASELINE
@@ -68,6 +64,7 @@ class AP_GPS
     friend class AP_GPS_UBLOX;
     friend class AP_GPS_Backend;
     friend class AP_GPS_DroneCAN;
+    friend class AP_GPS_UBLOX_CFGv2;
 
 public:
     AP_GPS();
@@ -128,7 +125,7 @@ public:
         Params(void);
 
         AP_Enum<GPS_Type> type;
-        AP_Int8 gnss_mode;
+        AP_Int16 gnss_mode;
         AP_Int16 rate_ms;   // this parameter should always be accessed using get_rate_ms()
         AP_Vector3f antenna_offset;
         AP_Int16 delay_ms;
@@ -154,6 +151,8 @@ public:
         GPS_OK_FIX_3D_DGPS = 4,      ///< Receiving valid messages and 3D lock with differential improvements
         GPS_OK_FIX_3D_RTK_FLOAT = 5, ///< Receiving valid messages and 3D RTK Float
         GPS_OK_FIX_3D_RTK_FIXED = 6, ///< Receiving valid messages and 3D RTK Fixed
+        GPS_OK_FIX_TYPE_STATIC = 7,     ///< Receiving valid messages and static fixed, typically used for base stations
+        GPS_OK_FIX_TYPE_PPP = 8,        ///< Receiving valid messages and PPP, 3D position.
     };
 
     // GPS navigation engine settings. Not all GPS receivers support
@@ -312,6 +311,10 @@ public:
             return '5';
         case AP_GPS::GPS_OK_FIX_3D_RTK_FIXED:
             return '6';
+        case AP_GPS::GPS_OK_FIX_TYPE_STATIC:
+            return '7';
+        case AP_GPS::GPS_OK_FIX_TYPE_PPP:
+            return '8';
         }
         // should never reach here; compiler flags guarantees this.
         return '?';
@@ -629,11 +632,12 @@ protected:
         GPSL5HealthOverride = (1U << 5),
         AlwaysRTCMDecode = (1U << 6),
         DisableRTCMDecode = (1U << 7),
+        ForceUBXConfigV2 = (1U << 8U)
     };
 
     // check if an option is set
     bool option_set(const DriverOptions option) const {
-        return (uint8_t(_driver_options.get()) & uint8_t(option)) != 0;
+        return (uint16_t(_driver_options.get()) & uint16_t(option)) != 0;
     }
 
 private:
@@ -772,6 +776,7 @@ private:
         GPS_AUTO_CONFIG_DISABLE = 0,
         GPS_AUTO_CONFIG_ENABLE_SERIAL_ONLY  = 1,
         GPS_AUTO_CONFIG_ENABLE_ALL = 2,
+        GPS_AUTO_CLEAR_CONFIG_UBLOX_SERIAL_ONLY = 3,  // then acts like GPS_AUTO_CONFIG_ENABLE_SERIAL_ONLY
     };
 
     enum class GPSAutoSwitch {

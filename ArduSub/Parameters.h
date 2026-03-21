@@ -192,7 +192,7 @@ public:
 
         // Misc Sub settings
         k_param_log_bitmask = 165,
-        k_param_angle_max = 167,
+        k_param_angle_max = 167,    // remove
         k_param_rangefinder_gain, // deprecated
         k_param_wp_yaw_behavior = 170,
         k_param_xtrack_angle_limit, // Angle limit for crosstrack correction in Auto modes (degrees)
@@ -405,9 +405,6 @@ public:
     // control over servo output ranges
     SRV_Channels servo_channels;
 
-    AP_Float backup_origin_lat;
-    AP_Float backup_origin_lon;
-    AP_Float backup_origin_alt;
     AP_Float surface_nobaro_thrust;
     Actuators actuators;
 
@@ -423,7 +420,7 @@ static const struct AP_Param::defaults_table_struct defaults_table[] = {
                                 uint32_t(AP_Arming::Check::BATTERY))
                                ) & ((1U<<24)-1)}, // keep within float range but disable future checks
     { "CIRCLE_RATE",         2.0f},
-    { "ATC_ACCEL_Y_MAX",     110000.0f},
+    { "ATC_ACC_Y_MAX",       1100.0f},
     { "ATC_RATE_Y_MAX",      180.0f},
     { "RC3_TRIM",            1500},
     { "COMPASS_OFFS_MAX",    1000},
@@ -442,7 +439,7 @@ static const struct AP_Param::defaults_table_struct defaults_table[] = {
     { "MOT_PWM_MIN",         1100},
     { "MOT_PWM_MAX",         1900},
     { "PSC_JERK_D",          50.0f},
-    { "WPNAV_SPEED",         100.0f},
+    { "WP_SPD",              1.0f},
     { "PILOT_SPEED_UP",      100.0f},
     { "PSC_NE_VEL_P",         6.0f},
     { "EK3_SRC1_VELZ",       0},

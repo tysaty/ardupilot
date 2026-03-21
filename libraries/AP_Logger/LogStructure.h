@@ -153,6 +153,8 @@ const struct MultiplierStructure log_Multipliers[] = {
 #include <AP_Mission/LogStructure.h>
 #include <AP_Servo_Telem/LogStructure.h>
 
+#include <AP_RTC/AP_RTC_config.h>
+
 // structure used to define logging format
 // It is packed on ChibiOS to save flash space; however, this causes problems
 // when building the SITL on an Apple M1 CPU (and is also slower) so we do not
@@ -453,6 +455,25 @@ struct PACKED log_Mode {
     uint8_t mode_num;
     uint8_t mode_reason;
 };
+
+#if AP_RTC_LOGGING_ENABLED
+// @LoggerMessage: RTC
+// @Description: RTC (Unix time) information
+// @Field: TimeUS: Time since system startup
+// @Field: Epoch: current unix epoch time*1000000 (ie. microseconds since Jan 1 1970)
+// @Field: SourceType: source of RTC data
+// @FieldValueEnum: SourceType: AP_RTC::source_type
+struct PACKED log_RTC {
+    LOG_PACKET_HEADER;
+    uint64_t time_us;
+    uint64_t epoch_us;
+    uint8_t  source_type;
+};
+#define LOG_RTC_MESSAGE \
+    { LOG_RTC_MSG, sizeof(log_RTC), "RTC", "QQB", "TimeUS,Epoch,SourceType", "ss-", "FF-" },
+#else
+#define LOG_RTC_MESSAGE
+#endif  // AP_RTC_LOGGING_ENABLED
 
 /*
   rangefinder - support for 4 sensors
@@ -855,6 +876,8 @@ struct PACKED log_VER {
 // @Description: Proportional/Integral/Derivative gain values for North/South velocity
 // @LoggerMessage: PIDE
 // @Description: Proportional/Integral/Derivative gain values for East/West velocity
+// @LoggerMessage: PIDW
+// @Description: Proportional/Integral/Derivative gain values for wheel rate
 // @Field: TimeUS: Time since system startup
 // @Field: Tar: desired value
 // @Field: Act: achieved value
@@ -1192,6 +1215,7 @@ LOG_STRUCTURE_FROM_MOUNT \
       "MAG", "QBhhhhhhhhhBI",    "TimeUS,I,MagX,MagY,MagZ,OfsX,OfsY,OfsZ,MOX,MOY,MOZ,Health,S", "s#GGGGGGGGG-s", "F-CCCCCCCCC-F", true }, \
     { LOG_MODE_MSG, sizeof(log_Mode), \
       "MODE", "QMBB",         "TimeUS,Mode,ModeNum,Rsn", "s---", "F---" }, \
+LOG_RTC_MESSAGE \
     { LOG_RFND_MSG, sizeof(log_RFND), \
       "RFND", "QBfBBb", "TimeUS,Instance,Dist,Stat,Orient,Quality", "s#m--%", "F-0---", true }, \
     { LOG_DMS_MSG, sizeof(log_DMS), \
@@ -1223,6 +1247,8 @@ LOG_STRUCTURE_FROM_SERVO_TELEM \
       "PIDN", PID_FMT,  PID_LABELS, PID_UNITS, PID_MULTS , true }, \
     { LOG_PIDE_MSG, sizeof(log_PID), \
       "PIDE", PID_FMT,  PID_LABELS, PID_UNITS, PID_MULTS , true }, \
+    { LOG_PIDW_MSG, sizeof(log_PID), \
+      "PIDW", PID_FMT,  PID_LABELS, PID_UNITS, PID_MULTS , true }, \
 LOG_STRUCTURE_FROM_LANDING \
 LOG_STRUCTURE_FROM_INERTIALSENSOR \
 LOG_STRUCTURE_FROM_DAL \
@@ -1237,7 +1263,7 @@ LOG_STRUCTURE_FROM_FENCE \
     { LOG_DF_FILE_STATS, sizeof(log_DSF), \
       "DSF", "QIHIIII", "TimeUS,Dp,Blk,Bytes,FMn,FMx,FAv", "s--b---", "F--0---" }, \
     { LOG_RALLY_MSG, sizeof(log_Rally), \
-      "RALY", "QBBLLhB", "TimeUS,Tot,Seq,Lat,Lng,Alt,Flags", "s--DUm-", "F--GGB-" },  \
+      "RALY", "QBBLLhB", "TimeUS,Tot,Seq,Lat,Lng,Alt,Flags", "s--DUm-", "F--GG0-" },  \
     { LOG_MAV_MSG, sizeof(log_MAV),   \
       "MAV", "QBHHHBHHI",   "TimeUS,chan,txp,rxp,rxdp,flags,ss,tf,mgs", "s#----s-s", "F-000-C-C" },   \
 LOG_STRUCTURE_FROM_VISUALODOM \
@@ -1307,6 +1333,7 @@ enum LogMessages : uint8_t {
     LOG_PIDS_MSG,
     LOG_PIDN_MSG,
     LOG_PIDE_MSG,
+    LOG_PIDW_MSG,
     LOG_IDS_FROM_LANDING,
     LOG_MAG_MSG,
     LOG_ARSP_MSG,
@@ -1317,6 +1344,9 @@ enum LogMessages : uint8_t {
     LOG_UNIT_MSG,
     LOG_MULT_MSG,
     LOG_RALLY_MSG,
+#if AP_RTC_LOGGING_ENABLED
+    LOG_RTC_MSG,
+#endif  // AP_RTC_LOGGING_ENABLED
 
     // LOG_MODE_MSG is used as a check for duplicates. Do not add between this and LOG_FORMAT_MSG
     LOG_MODE_MSG,

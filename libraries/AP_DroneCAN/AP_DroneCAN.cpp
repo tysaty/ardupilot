@@ -1145,6 +1145,12 @@ void AP_DroneCAN::gnss_send_fix()
         pkt.mode = UAVCAN_EQUIPMENT_GNSS_FIX2_MODE_RTK;
         pkt.sub_mode = UAVCAN_EQUIPMENT_GNSS_FIX2_SUB_MODE_RTK_FIXED;
         break;
+    case AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_STATIC:
+    case AP_GPS::GPS_Status::GPS_OK_FIX_TYPE_PPP:
+        pkt.status = UAVCAN_EQUIPMENT_GNSS_FIX2_STATUS_3D_FIX;
+        pkt.mode = UAVCAN_EQUIPMENT_GNSS_FIX2_MODE_PPP; // Static is not representable in DroneCAN.
+        pkt.sub_mode = UAVCAN_EQUIPMENT_GNSS_FIX2_SUB_MODE_RTK_FIXED; // There is no submode for static or PPP
+        break;
     }
 
     pkt.covariance.len = 6;
@@ -1408,7 +1414,7 @@ void AP_DroneCAN::handle_actuator_status(const CanardRxTransfer& transfer, const
                          AP_Servo_Telem::TelemetryData::Types::DUTY_CYCLE
     };
 
-    servo_telem->update_telem_data(msg.actuator_id, telem_data);
+    servo_telem->update_telem_data(msg.actuator_id - 1, telem_data);
 }
 #endif
 
@@ -1440,7 +1446,7 @@ void AP_DroneCAN::handle_himark_servoinfo(const CanardRxTransfer& transfer, cons
                          AP_Servo_Telem::TelemetryData::Types::STATUS
     };
 
-    servo_telem->update_telem_data(msg.servo_id, telem_data);
+    servo_telem->update_telem_data(msg.servo_id - 1, telem_data);
 }
 #endif // AP_DRONECAN_HIMARK_SERVO_SUPPORT
 
@@ -1465,7 +1471,7 @@ void AP_DroneCAN::handle_actuator_status_Volz(const CanardRxTransfer& transfer, 
                          AP_Servo_Telem::TelemetryData::Types::MOTOR_TEMP
     };
 
-    servo_telem->update_telem_data(msg.actuator_id, telem_data);
+    servo_telem->update_telem_data(msg.actuator_id - 1, telem_data);
 }
 #endif
 

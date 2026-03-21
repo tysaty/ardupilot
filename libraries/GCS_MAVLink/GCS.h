@@ -381,7 +381,8 @@ public:
     void send_home_position() const;
     void send_gps_global_origin() const;
     virtual void send_attitude_target() {};
-    virtual void send_position_target_global_int() { };
+    void send_position_target_global_int();
+    virtual bool get_target_location(Location &loc) const { return false; }
     virtual void send_position_target_local_ned() { };
     void send_servo_output_raw();
     void send_accelcal_vehicle_position(uint32_t position);
@@ -1348,8 +1349,8 @@ private:
     uint32_t _sysid_gcs_last_seen_time_ms;
 
     void service_statustext(void);
-#if HAL_MEM_CLASS <= HAL_MEM_CLASS_192 || CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    static const uint8_t _status_capacity = 7;
+#if HAL_MEM_CLASS <= HAL_MEM_CLASS_192
+    static const uint8_t _status_capacity = 10;
 #else
     static const uint8_t _status_capacity = 30;
 #endif

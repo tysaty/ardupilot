@@ -13,17 +13,16 @@ import pathlib
 import sys
 import time
 
+from pymavlink import mavextra
+from pymavlink import mavutil
+
 import vehicle_test_suite
 
 from pysim import util
 from pysim import vehicleinfo
-
 from vehicle_test_suite import AutoTestTimeoutException
 from vehicle_test_suite import NotAchievedException
 from vehicle_test_suite import PreconditionFailedException
-
-from pymavlink import mavextra
-from pymavlink import mavutil
 
 # get location of scripts
 testdir = os.path.dirname(os.path.realpath(__file__))
@@ -1834,15 +1833,15 @@ Brakes have negligible effect (with=%0.2fm without=%0.2fm delta=%0.2fm)
         # Trigger telemetry loss with failsafe enabled. Verify
         # failsafe triggers to RTL. Restore telemetry, verify failsafe
         # clears, and change modes.
-        # TODO not implemented
-        # self.start_subtest("GCS failsafe recovery test: FS_GCS_ENABLE=1")
-        # self.setGCSfailsafe(1)
-        # self.set_heartbeat_rate(0)
-        # self.wait_mode("RTL")
-        # self.set_heartbeat_rate(self.speedup)
-        # self.wait_statustext("GCS Failsafe Cleared", timeout=60)
-        # self.change_mode("MANUAL")
-        # self.end_subtest("Completed GCS failsafe recovery test")
+        self.start_subtest("GCS failsafe recovery test: FS_GCS_ENABLE=1")
+        self.setGCSfailsafe(1)
+        go_somewhere()
+        self.set_heartbeat_rate(0)
+        self.wait_mode("RTL")
+        self.set_heartbeat_rate(self.speedup)
+        self.wait_statustext("GCS Failsafe Cleared", timeout=60)
+        self.change_mode("MANUAL")
+        self.end_subtest("Completed GCS failsafe recovery test")
 
         # Trigger telemetry loss with failsafe enabled. Verify failsafe triggers and RTL completes
         self.start_subtest("GCS failsafe RTL with no options test: FS_GCS_ENABLE=1")
@@ -2622,7 +2621,7 @@ Brakes have negligible effect (with=%0.2fm without=%0.2fm delta=%0.2fm)
 
     def check_rally_items_same(self, want, got, epsilon=None):
         check_atts = ['mission_type', 'command', 'x', 'y', 'z', 'seq', 'param1']
-        return self.check_mission_items_same(check_atts, want, got, epsilon=epsilon)
+        return self.check_mission_items_same('rally', check_atts, want, got, epsilon=epsilon)
 
     def click_three_in(self, mavproxy, target_system=1, target_component=1):
         mavproxy.send('rally clear\n')
@@ -5860,6 +5859,47 @@ Brakes have negligible effect (with=%0.2fm without=%0.2fm delta=%0.2fm)
         self.context_pop()
         self.reboot_sitl()
 
+    def PositionTargetGlobalIntAltFrame(self):
+        '''Test that POSITION_TARGET_GLOBAL_INT sends AMSL altitude'''
+        # Use MAV_CMD_NAV_LOITER_TURNS to trigger SubMode::Circle in AUTO
+        # mode with a 0m altitude in MAV_FRAME_GLOBAL_RELATIVE_ALT_INT.
+        # At the SITL start location (~1584m AMSL) the correct AMSL altitude
+        # is ~1584m, not 0m.
+        home_alt_amsl = SITL_START_LOCATION.alt  # ~1583.7m
+
+        home_loc = self.home_position_as_mav_location()
+        # NAV_LOITER_TURNS: param1=number of turns, param3=radius in metres
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 10, 0, 0),
+            self.create_MISSION_ITEM_INT(
+                mavutil.mavlink.MAV_CMD_NAV_LOITER_TURNS,
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                p1=100,  # number of turns (large to keep rover circling)
+                p3=500,  # radius in metres
+                x=int(home_loc.lat * 1e7),
+                y=int(home_loc.lng * 1e7),
+                z=0,     # 0m relative to home
+            ),
+        ])
+        self.set_current_waypoint(0, check_afterwards=False)
+
+        self.change_mode('AUTO')
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+
+        # Wait for the rover to reach and begin the circle waypoint
+        self.wait_current_waypoint(2, timeout=60)
+
+        self.delay_sim_time(10)
+
+        # Check that POSITION_TARGET_GLOBAL_INT reports the correct AMSL
+        # altitude
+        self.assert_received_message_field_values("POSITION_TARGET_GLOBAL_INT", {
+            "alt": home_alt_amsl,
+        }, epsilon=10)
+
+        self.disarm_vehicle()
+
     def MAVProxyParam(self):
         '''Test MAVProxy parameter handling'''
         mavproxy = self.start_mavproxy()
@@ -6009,6 +6049,121 @@ Brakes have negligible effect (with=%0.2fm without=%0.2fm delta=%0.2fm)
         want_range = 10
         if abs(m.distance - want_range) > 0.5:
             raise NotAchievedException("Expected %fm got %fm" % (want_range, m.distance))
+
+    def AIS(self):
+        '''Test AIS receiver'''
+        self.customise_SITL_commandline([
+            "--serial5=sim:AIS",
+        ])
+        self.set_parameters({
+            "SERIAL5_PROTOCOL": 40,
+            "SERIAL5_BAUD": 38,
+            "AIS_TYPE": 1,
+        })
+        self.reboot_sitl()
+
+        # Set SIM parameter after reboot when AIS sim is loaded
+        self.set_parameter("SIM_AIS_COUNT", 5)
+
+        self.delay_sim_time(10)
+
+        m = self.assert_receive_message('AIS_VESSEL', timeout=60)
+
+        if m.MMSI == 0:
+            raise NotAchievedException("Invalid MMSI")
+
+        self.progress("Received AIS vessel MMSI=%u" % m.MMSI)
+
+    def AISMultipleVessels(self):
+        '''Test tracking multiple AIS vessels'''
+        self.customise_SITL_commandline([
+            "--serial5=sim:AIS",
+        ])
+        self.set_parameters({
+            "SERIAL5_PROTOCOL": 40,
+            "SERIAL5_BAUD": 38,
+            "AIS_TYPE": 1,
+        })
+        self.reboot_sitl()
+
+        # Test with 1 vessel
+        self.set_parameter("SIM_AIS_COUNT", 1)
+        m = self.assert_receive_message('AIS_VESSEL', timeout=30)
+        if m.MMSI == 0:
+            raise NotAchievedException("No vessel with count=1")
+        self.progress("Received vessel with count=1")
+
+        # Test with 3 vessels
+        self.set_parameter("SIM_AIS_COUNT", 3)
+        vessels_seen = set()
+        start_time = self.get_sim_time()
+        while len(vessels_seen) < 3:
+            if self.get_sim_time() - start_time > 60:
+                raise NotAchievedException(
+                    "Only saw %d vessels, expected 3" % len(vessels_seen)
+                )
+            m = self.assert_receive_message('AIS_VESSEL', timeout=10)
+            vessels_seen.add(m.MMSI)
+        self.progress("Tracked 3 unique vessels")
+
+        # Test with 5 vessels
+        self.set_parameter("SIM_AIS_COUNT", 5)
+        vessels_seen = set()
+        start_time = self.get_sim_time()
+        while len(vessels_seen) < 5:
+            if self.get_sim_time() - start_time > 90:
+                raise NotAchievedException(
+                    "Only saw %d vessels, expected 5" % len(vessels_seen)
+                )
+            m = self.assert_receive_message('AIS_VESSEL', timeout=10)
+            vessels_seen.add(m.MMSI)
+
+        self.progress("Successfully tracked vessels with counts 1, 3, and 5")
+
+    def AISDataValidation(self):
+        '''Test AIS vessel data validity'''
+        self.customise_SITL_commandline([
+            "--serial5=sim:AIS",
+        ])
+        self.set_parameters({
+            "SERIAL5_PROTOCOL": 40,
+            "SERIAL5_BAUD": 38,
+            "AIS_TYPE": 1,
+        })
+        self.reboot_sitl()
+
+        self.set_parameter("SIM_AIS_COUNT", 3)
+
+        m = self.assert_receive_message('AIS_VESSEL', timeout=60)
+
+        # Validate MMSI
+        if m.MMSI == 0:
+            raise NotAchievedException("Invalid MMSI: must be non-zero")
+
+        # Validate latitude (-90 to +90 degrees)
+        lat_deg = m.lat / 1e7
+        if abs(lat_deg) > 90:
+            raise NotAchievedException("Invalid latitude: %f" % lat_deg)
+
+        # Validate longitude (-180 to +180 degrees)
+        lon_deg = m.lon / 1e7
+        if abs(lon_deg) > 180:
+            raise NotAchievedException("Invalid longitude: %f" % lon_deg)
+
+        # Validate heading is reasonable (allow up to 65535 for unavailable)
+        if m.heading > 65535:
+            raise NotAchievedException("Invalid heading: %u" % m.heading)
+
+        # Validate COG is reasonable (allow up to 65535 for unavailable)
+        if m.COG > 65535:
+            raise NotAchievedException("Invalid COG: %u" % m.COG)
+
+        # Validate velocity (max ~100 knots = 10000 in 0.01 knot units)
+        if m.velocity > 10000 and m.velocity != 65535:
+            raise NotAchievedException("Invalid velocity: %u" % m.velocity)
+
+        self.progress("AIS data validation passed: MMSI=%u lat=%.6f lon=%.6f" %
+                      (m.MMSI, lat_deg, lon_deg))
 
     def DepthFinder(self):
         '''Test multiple depthfinders for boats'''
@@ -6903,8 +7058,6 @@ Brakes have negligible effect (with=%0.2fm without=%0.2fm delta=%0.2fm)
         self.correct_wp_seq_numbers(fence)
         self.check_fence_upload_download(fence)
 
-        self.delay_sim_time(1000)
-
     def ManyMAVLinkConnections(self):
         '''test testing >8 MAVLink connections'''
         self.set_parameters({
@@ -7214,8 +7367,12 @@ return update()
             self.SetpointGlobalVel,
             self.AccelCal,
             self.RangeFinder,
+            self.AIS,
+            self.AISMultipleVessels,
+            self.AISDataValidation,
             self.AP_Proximity_MAV,
             self.EndMissionBehavior,
+            self.PositionTargetGlobalIntAltFrame,
             self.FlashStorage,
             self.FRAMStorage,
             self.DepthFinder,

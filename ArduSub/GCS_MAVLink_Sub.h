@@ -18,6 +18,7 @@ protected:
 
     MAV_RESULT handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg) override;
     MAV_RESULT handle_command_int_do_reposition(const mavlink_command_int_t &packet);
+    void handle_manual_control_axes(const mavlink_manual_control_t &packet, const uint32_t tnow) override;
 
     // override sending of scaled_pressure3 to send on-board temperature:
     void send_scaled_pressure3() override;
@@ -56,6 +57,15 @@ private:
     MAV_RESULT handle_MAV_CMD_DO_MOTOR_TEST(const mavlink_command_int_t &packet);
     MAV_RESULT handle_MAV_CMD_NAV_LOITER_UNLIM(const mavlink_command_int_t &packet);
     MAV_RESULT handle_MAV_CMD_NAV_LAND(const mavlink_command_int_t &packet);
+
+#if AP_RANGEFINDER_ENABLED
+    // send WATER_DEPTH - metres and temperature
+    void send_water_depth();
+    // state variable for the last rangefinder we sent a WATER_DEPTH
+    // message for.  We cycle through the rangefinder backends to
+    // limit the amount of telemetry bandwidth we consume.
+    uint8_t last_WATER_DEPTH_index;
+#endif // AP_RANGEFINDER_ENABLED
 
 #if HAL_HIGH_LATENCY2_ENABLED
     int16_t high_latency_target_altitude() const override;

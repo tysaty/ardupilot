@@ -34,13 +34,11 @@ void ModeAcro_Heli::run()
     // for operational checks. Also, unlike multicopters we do not set throttle (i.e. collective pitch) to zero
     // so the swash servos move.
 
-    if (!motors->armed()) {
-        // Motors should be Stopped
-        motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::SHUT_DOWN);
-    } else {
-        // heli will not let the spool state progress to THROTTLE_UNLIMITED until motor interlock is enabled
-        motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
-    }
+    // Request throttle unlimited. The setter enforces safety constraints:
+    // - Disarmed: held at SHUT_DOWN until armed
+    // - Armed without interlock: limited to GROUND_IDLE (swash can move, rotor stopped)
+    // - Armed with interlock: THROTTLE_UNLIMITED granted
+    motors->set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
     switch (motors->get_spool_state()) {
     case AP_Motors::SpoolState::SHUT_DOWN:
@@ -144,7 +142,7 @@ void ModeAcro_Heli::virtual_flybar( float &roll_out_rads, float &pitch_out_rads,
     rate_ef_level_rads.z = 0;
 
     // convert earth-frame leak rates to body-frame leak rates
-    attitude_control->euler_rate_to_ang_vel(attitude_control->get_attitude_target_quat(), rate_ef_level_rads, rate_bf_level_rads);
+    attitude_control->euler_derivative_to_body(attitude_control->get_attitude_target_quat(), rate_ef_level_rads, rate_bf_level_rads);
 
     // combine earth frame rate corrections with rate requests
     roll_out_rads += rate_bf_level_rads.x;
