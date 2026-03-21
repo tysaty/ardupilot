@@ -1,0 +1,30 @@
+-- weave_test.lua
+-- Minimal example to verify Lua scripting works in ArduPilot
+
+local UPDATE_PERIOD_MS = 5000   -- run every 5 seconds
+
+function update()
+
+    -- Get armed state
+    local armed = arming:is_armed()
+
+    -- Get current mode number
+    local mode = vehicle:get_mode()
+
+    -- Send text to GCS (severity 6 = INFO)
+    gcs:send_text(6,
+        string.format(
+            "Lua running | Armed: %s | Mode: %d",
+            tostring(armed),
+            mode
+        )
+    )
+
+    return update, UPDATE_PERIOD_MS
+end
+
+-- Startup message
+gcs:send_text(6, "Lua script loaded successfully!")
+
+-- Schedule first run
+return update()

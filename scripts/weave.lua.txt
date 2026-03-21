@@ -1,0 +1,215 @@
+-- Smooth weaving path shaping for fixed-wing - auto/guided mode
+
+local MODE_AUTO = 10
+local MODE_GUIDED = 15
+
+local UPDATE_MS = 100
+
+local PARAM_TABLE_KEY = 87
+local PARAM_TABLE_PREFIX = "WEAVE_"
+local last_update_s = nil
+local last_offset_m = 0.0
+local last_mode = -1
+local last_nav_index = -1
+local last_weave_msg_ms = 0
+local rel_heading_rad = 0.0
+local lateral_offset_m = 0.0
+local lobe_side = 1
+local lobe_stage = 1
+
+local function wrap_360(angle_deg)
+    local r = math.fmod(angle_deg, 360.0)
+    if r < 0 then
+        r = r + 360.0
+    end
+    return r
+end
+
+local function bind_param(name)
+    local p = Parameter()
+    assert(p:init(name), string.format("could not find %s parameter", name))
+    return p
+end
+
+local function bind_add_param(name, idx, default_value)
+    assert(param:add_param(PARAM_TABLE_KEY, idx, name, default_value),
+           string.format("could not add param %s", name))
+    return bind_param(PARAM_TABLE_PREFIX .. name)
+end
+
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 4),
+       "could not add WEAVE param table")
+
+WEAVE_ENABLE = bind_add_param("ENABLE", 1, 1)  -- 0=off, 1=on
+WEAVE_AMP_M = bind_add_param("AMP_M", 2, 60)   -- lateral amplitude in meters
+WEAVE_WLEN_M = bind_add_param("WLEN_M", 3, 300) -- wavelength in meters
+WEAVE_MIN_GS = bind_add_param("MIN_GS", 4, 8)  -- minimum GS for phase advance
+
+local function reset_state()
+    last_offset_m = 0.0
+    last_update_s = nil
+    rel_heading_rad = 0.0
+    lateral_offset_m = 0.0
+    lobe_side = 1
+    lobe_stage = 1
+end
+
+local function get_turn_sign(stage, side)
+    if stage == 1 then
+        return side
+    end
+    if stage == 2 then
+        return -side
+    end
+    return side
+end
+
+local function get_stage_limit_rad(stage, side)
+    if stage == 1 then
+        return side > 0 and 1 or -1
+    end
+    if stage == 2 then
+        return side > 0 and -1 or 1
+    end
+    return 0
+end
+
+local function integrate_dubins_lobe(ds_m, radius_m, max_heading_rad)
+    local remaining = ds_m
+
+    while remaining > 0.001 do
+        local turn_sign = get_turn_sign(lobe_stage, lobe_side)
+        local k = turn_sign / radius_m
+        local stage_limit = get_stage_limit_rad(lobe_stage, lobe_side) * max_heading_rad
+        local dist_to_limit = (stage_limit - rel_heading_rad) / k
+
+        local step = remaining
+        local reached_limit = false
+        if dist_to_limit >= 0.0 and dist_to_limit < remaining then
+            step = dist_to_limit
+            reached_limit = true
+        end
+
+        local new_heading = rel_heading_rad + k * step
+        -- Integrate lateral displacement in centerline frame.
+        lateral_offset_m = lateral_offset_m + (math.cos(rel_heading_rad) - math.cos(new_heading)) / k
+        rel_heading_rad = new_heading
+        remaining = remaining - step
+
+        if reached_limit then
+            if lobe_stage < 3 then
+                lobe_stage = lobe_stage + 1
+            else
+                -- Completed one lobe (one side). Snap to centerline and mirror.
+                lobe_stage = 1
+                lobe_side = -lobe_side
+                rel_heading_rad = 0.0
+                lateral_offset_m = 0.0
+            end
+        end
+    end
+end
+
+local function update()
+    if WEAVE_ENABLE:get() < 1 then
+        reset_state()
+        return update, UPDATE_MS
+    end
+
+    if not arming:is_armed() or not vehicle:get_likely_flying() then
+        reset_state()
+        return update, UPDATE_MS
+    end
+
+    local mode = vehicle:get_mode()
+    if mode ~= MODE_AUTO and mode ~= MODE_GUIDED then
+        reset_state()
+        last_mode = mode
+        return update, UPDATE_MS
+    end
+
+    local target = vehicle:get_target_location()
+    local pos = ahrs:get_location()
+    if not target or not pos then
+        return update, UPDATE_MS
+    end
+
+    local now_s = millis():tofloat() * 0.001
+    if not last_update_s then
+        last_update_s = now_s
+        last_mode = mode
+        return update, UPDATE_MS
+    end
+
+    local dt_s = now_s - last_update_s
+    last_update_s = now_s
+    if dt_s <= 0 then
+        return update, UPDATE_MS
+    end
+    if dt_s > 0.5 then
+        dt_s = 0.5
+    end
+
+    local nav_index = mission:get_current_nav_index()
+    if mode ~= last_mode or (nav_index and nav_index ~= last_nav_index) then
+        reset_state()
+    end
+    last_mode = mode
+    if nav_index then
+        last_nav_index = nav_index
+    end
+
+    local gsv = ahrs:groundspeed_vector()
+    if not gsv then
+        return update, UPDATE_MS
+    end
+
+    local gs_mps = math.max(gsv:length(), WEAVE_MIN_GS:get())
+    local amplitude_m = math.max(WEAVE_AMP_M:get(), 5.0)
+    local wavelength_m = math.max(WEAVE_WLEN_M:get(), 60.0)
+    local max_heading_rad = 2.0 * math.atan(4.0 * amplitude_m / wavelength_m)
+    max_heading_rad = math.max(math.rad(10.0), math.min(max_heading_rad, math.rad(80.0)))
+    local radius_m = amplitude_m / (2.0 * (1.0 - math.cos(max_heading_rad)))
+
+    integrate_dubins_lobe(gs_mps * dt_s, radius_m, max_heading_rad)
+    local desired_offset_m = lateral_offset_m
+
+    -- Estimate the unmodified centerline target by removing last cycle's
+    -- lateral offset first, then apply the new offset.
+    local bearing_to_target_deg = wrap_360(math.deg(pos:get_bearing(target)))
+    local right_bearing_deg = wrap_360(bearing_to_target_deg + 90.0)
+
+    local center_target = target:copy()
+    if math.abs(last_offset_m) > 0.01 then
+        center_target:offset_bearing(right_bearing_deg, -last_offset_m)
+    end
+
+    bearing_to_target_deg = wrap_360(math.deg(pos:get_bearing(center_target)))
+    right_bearing_deg = wrap_360(bearing_to_target_deg + 90.0)
+
+    local new_target = center_target:copy()
+    new_target:offset_bearing(right_bearing_deg, desired_offset_m)
+
+    vehicle:update_target_location(target, new_target)
+    last_offset_m = desired_offset_m
+
+    local now_ms = millis():toint()
+    if now_ms - last_weave_msg_ms > 2000 then
+        gcs:send_text(6, string.format("weave active: offset=%.1fm", desired_offset_m))
+        last_weave_msg_ms = now_ms
+    end
+
+    return update, UPDATE_MS
+end
+
+local function protected_wrapper()
+    local ok, err = pcall(update)
+    if not ok then
+        gcs:send_text(0, "weave.lua error: " .. err)
+        return protected_wrapper, 1000
+    end
+    return protected_wrapper, UPDATE_MS
+end
+
+gcs:send_text(0, "weave.lua loaded")
+return protected_wrapper()
