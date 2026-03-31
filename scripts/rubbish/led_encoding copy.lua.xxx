@@ -1,0 +1,100 @@
+-- Encoding script
+-- this code recieves data from the current ship
+-- converts the code to binary, appends the binary
+-- adds additional hamming encoding to the update
+
+-- my work so far
+
+-- Configuration
+local field_bits = 32
+-- hamming code bits
+local hc_data_bits
+-- update every 100 ms
+local UPDATE_PERIOD_MS = 100
+
+-- print text
+local function rcv_info()
+    local loc = ahrs:get_location()
+    -- nil case
+    if loc == nil then
+        return nil
+    end
+    -- lat lon units degE7
+    -- alt units cm
+    return {
+        lat_degE7 = loc:lat(),
+        lon_degE7 = loc:lng(),
+        alt_cm = loc:alt(),
+    }
+end
+
+-- convert to binary
+function numberToBinary(n, numberbits)
+    -- initialising bits
+    local bits = numberbits
+    local res = ""
+    -- zero case
+    if n == 0 then 
+        return res
+    end
+    -- conversion
+    for i = bits - 1, 0, -1 do
+        local bit = (n >> i) & 1
+        res = res .. tostring(bit)
+    end
+    return res
+end
+
+-- add hamming code 
+function addHammingCode(data, HCbits)
+    -- assuem data is astring
+    local d = {}
+    for i=1, HCbits do 
+        d[i] = tonumber(data:sub(i,i)) 
+    end
+    -- Hamming 7,4 Positions: p1 p2 d1 p3 d2 d3 d4
+    -- Parity bit calculation (Even Parity)
+    local p1 = d[1] ~ d[2] ~ d[4]
+    local p2 = d[1] ~ d[3] ~ d[4]
+    local p3 = d[2] ~ d[3] ~ d[4]
+    -- Return encoded string: p1 p2 d1 p3 d2 d3 d4
+    return tostring(p1) .. tostring(p2) .. d[1] .. 
+           tostring(p3) .. d[2] .. d[3] .. d[4]
+end
+
+-- full hamming code - concat the full list
+local function hamming74_encode_bits(bits, HCbits)
+    local out = {}
+    for i = 1, #bits, 4 do
+        local nibble = bits:sub(i, i + 3)
+        if #nibble < 4 then
+            nibble = nibble .. string.rep("0", 4 - #nibble)
+        end
+        out[#out + 1] = addHammingCode(nibble, HCbits)
+    end
+    return table.concat(out)
+end
+
+-- voltage on and off
+
+
+local finalstring = ""
+
+local function update()
+    -- recieve info
+    local info = rcv_info()
+    if info == nil then
+        return update, UPDATE_PERIOD_MS
+    end
+    local lat = info.lat_degE7
+    local lon = info.lon_degE7
+    local alt = info.alt_cm
+    -- convert to binary and append
+    local LLA_binary = numberToBinary(lat, 32) .. numberToBinary(lon, 32) .. numberToBinary(alt, 32)
+    -- convert to Hamming encoding
+    finalstring = hamming74_encode_bits(LLA_binary, 4)
+
+    return update, UPDATE_PERIOD_MS
+end
+
+return update()
