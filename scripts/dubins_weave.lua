@@ -299,6 +299,7 @@ local function update()
     -- local position
     local pos = ahrs:get_position()
     -- local wp = vehicle:get_target_location()  
+
     -- Dubins geometry
     local points = generate_LSR(
         dubins.xi, dubins.yi, dubins.psi_i,
@@ -307,6 +308,7 @@ local function update()
         math.rad(5), 5.0
     )
 
+    --no points case, update for 100ms
     if #points == 0 then
         return update, 100
     end
