@@ -8,6 +8,9 @@ local ALT_FRAME_ABSOLUTE = 0
 local grav = 9.807
 local PHI_MAX_RAD = math.rad(45)
 
+
+-- get the kangaroo bus from the control lua
+
 -- Section 2: Current state values - vehicle configuration 
 local function process_imu_sample(sample)
     local pos = ahrs:get_position()
@@ -279,50 +282,47 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     return points
 end
 
-
--- establish a control loop in 
--- need to keep path active... with a state machine
--- path index...
-
-
+-- commented out 5 April
 -- MAIN
 
-local REPORT_INTERVAL_MS = 2000
-local last_report_ms = millis()
+-- local REPORT_INTERVAL_MS = 2000
+-- local last_report_ms = millis()
 
-local function update()
-    -- getting target
-    local target = chase_target()
-    if target == nil then
-        return update, 100
-    end
-    -- local position
-    local pos = ahrs:get_position()
-    -- local wp = vehicle:get_target_location()  
+-- local function update()
+--     -- getting target
+--     local target = chase_target()
+--     if target == nil then
+--         return update, 100
+--     end
+--     -- local position
+--     local pos = ahrs:get_position()
+--     -- local wp = vehicle:get_target_location()  
 
-    -- Dubins geometry
-    local points = generate_LSR(
-        dubins.xi, dubins.yi, dubins.psi_i,
-        dubins.xf, dubins.yf, dubins.psi_f,
-        dubins.rho,
-        math.rad(5), 5.0
-    )
+--     -- Dubins geometry
+--     local points = generate_LSR(
+--         dubins.xi, dubins.yi, dubins.psi_i,
+--         dubins.xf, dubins.yf, dubins.psi_f,
+--         dubins.rho,
+--         math.rad(5), 5.0
+--     )
 
-    --no points case, update for 100ms
-    if #points == 0 then
-        return update, 100
-    end
+--     --no points case, update for 100ms
+--     if #points == 0 then
+--         return update, 100
+--     end
 
-    --throttle messaging to 2000 ms
-    local now_ms = millis()
+--     --throttle messaging to 2000 ms
+--     local now_ms = millis()
 
-    --update this part for an error check
-    -- if distance and now_ms - last_report_ms >= REPORT_INTERVAL_MS then
-    --     last_report_ms = now_ms
-    --     gcs:send_text(6, string.format("Dubins distance: %.1f m", distance))
-    -- end
+--     --update this part for an error check
+--     -- if distance and now_ms - last_report_ms >= REPORT_INTERVAL_MS then
+--     --     last_report_ms = now_ms
+--     --     gcs:send_text(6, string.format("Dubins distance: %.1f m", distance))
+--     -- end
 
-    return update, 100
-end
+--     return update, 100
+-- end
 
-return update()
+--return update()
+
+return { build_state = build_state, generate_lsr = generate_LSR, build_path = build_path }
