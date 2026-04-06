@@ -42,8 +42,6 @@ function fly_to_dubins_point(point)
     -- set altittude to the target_loc value
     target_loc:set_alt_m(target_alt_m, 0)
 
-    -- update messaging
-    gcs:send_text(6, string.format("Travelling on Dubins Path x=%f, y =%f", north_m, east_m))
     -- set location
     return vehicle:set_target_location(target_loc)
 end
@@ -148,13 +146,13 @@ function update()
         -- update next point in dubins weave, fly to the point, reach the ooint, move onto next
         if point and fly_to_dubins_point(point) and dubins_point_reached(point) then
             dubins_point_index = dubins_point_index + 1
-            local now_ms = millis():toint()
-            if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
-                last_report_ms = now_ms
-                gcs:send_text(6, "Travelling on Dubins Path")
-            end
         end
-
+        -- reporting in mavlink
+        local now_ms = millis():toint()
+        if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
+            last_report_ms = now_ms
+            gcs:send_text(6, string.format("Dubins idx=%d/%d", dubins_point_index or 0, #dubins_points_active))
+        end
         -- if the index is greater than the number of active points, i.e. end loop and go to next step
         if dubins_point_index > #dubins_points_active then
             controller_busy = false
@@ -163,7 +161,7 @@ function update()
             update_build()
         end
     end
-    
+
     return update, 100
 end
 

@@ -10,31 +10,6 @@ local PHI_MAX_RAD = math.rad(45)
 
 local math_helpers = require("math_helpers")
 
--- get the kangaroo bus from the control lua
-local function build_path(kangaroo_state)
-    -- handling 0 case
-    if kangaroo_state == nil or kangaroo_state.loc == nil then
-        return nil
-    end
-    -- current position of plane
-    local pos = ahrs:get_position()
-    local vel = ahrs:get_velocity_NED()
-    local yaw = ahrs:get_yaw_rad()
-    if pos == nil or vel == nil or yaw == nil then
-        return nil
-    end
-    -- distance from kangaroo
-    local rel_ne = pos:get_distance_NE(kangaroo_state.loc)
-    if rel_ne == nil then
-        return nil
-    end
-    -- velocity 
-    local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
-    local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
-
-    return generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), math.atan(kangaroo_state.ve, kangaroo_state.vn), rho, math.rad(5), 5.0)
-end
-
 -- Section 2: Current state values - vehicle configuration 
 -- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
 local function process_imu_sample(sample)
@@ -106,6 +81,7 @@ local function chase_target()
 end
 
 --  states for dubins calculations
+-- build_state is not used in the control.lua file - only here for working
 local function build_state(sample)
     local current_state = process_imu_sample(sample)
     local target = chase_target()
@@ -124,10 +100,9 @@ local function build_state(sample)
         xi = 0.0,
         yi = 0.0,
         psi_i = current_state.psi,
-        -- don'tknow where I got this
         xf = rel_ne:x(),
         yf = rel_ne:y(),
-        -- heading is a bit of a tba - this is an apprximation 
+        -- heading is a bit of a tba - this is an apprximation ...
         psi_f = current_state.pos:get_bearing(target),
         -- tba if this is right
         rho = min_turn_radius(math.max(current_state.Vt, 1.0), PHI_MAX_RAD, grav)
@@ -281,8 +256,43 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     return points
 end
 
+-- generate LSL
+
+
+-- generate RSL
+
+
+-- generate RSR
+
+
+
+-- get the target location from the kangaroo bus (consumed in control.lua)
+local function build_path(kangaroo_state)
+    -- handling 0 case
+    if kangaroo_state == nil or kangaroo_state.loc == nil then
+        return nil
+    end
+    -- current position of plane
+    local pos = ahrs:get_position()
+    local vel = ahrs:get_velocity_NED()
+    local yaw = ahrs:get_yaw_rad()
+    if pos == nil or vel == nil or yaw == nil then
+        return nil
+    end
+    -- distance from kangaroo
+    local rel_ne = pos:get_distance_NE(kangaroo_state.loc)
+    if rel_ne == nil then
+        return nil
+    end
+    -- velocity 
+    local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
+    local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
+
+    return generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), math.atan(kangaroo_state.ve, kangaroo_state.vn), rho, math.rad(5), 5.0)
+end
+
 return { 
-    build_path = build_path, 
     build_state = build_state, 
-    generate_lsr = generate_LSR
+    generate_lsr = generate_LSR,
+    build_path = build_path
 }
