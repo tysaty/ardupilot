@@ -40,4 +40,26 @@ function M.wrap_360(angle)
     return res
 end
 
+local PI = math.pi
+
+-- pi wrapping
+function M.wrap_pi(i)
+    while i > PI do
+        i = i - 2.0 * PI 
+    end
+    while i < -PI do 
+        i = i + 2.0 * PI 
+    end
+    return i
+end
+
+-- Euclidean distance
+function M.dist2d(x1, y1, x2, y2)
+    local dx = x2 - x1
+    local dy = y2 - y1
+    return math.sqrt(dx * dx + dy * dy)
+end
+
+
+
 return M

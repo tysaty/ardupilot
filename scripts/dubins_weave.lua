@@ -8,6 +8,8 @@ local ALT_FRAME_ABSOLUTE = 0
 local grav = 9.807
 local PHI_MAX_RAD = math.rad(45)
 
+local math_helpers = require("math_helpers")
+
 -- get the kangaroo bus from the control lua
 local function build_path(kangaroo_state)
     -- handling 0 case
@@ -33,9 +35,7 @@ local function build_path(kangaroo_state)
     return generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), math.atan(kangaroo_state.ve, kangaroo_state.vn), rho, math.rad(5), 5.0)
 end
 
-
 -- Section 2: Current state values - vehicle configuration 
-
 -- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
 local function process_imu_sample(sample)
     local pos = ahrs:get_position()
@@ -134,35 +134,8 @@ local function build_state(sample)
     }
 end
 
--- Section 2: onstructing Dubins values
+-- Section 2: constructing Dubins values
 local PI = math.pi
-
-local function clamp(x, low, hi)
-    if x < low then 
-        return low 
-    end
-    if x > hi then 
-        return hi 
-    end
-    return x
-end
-
-local function wrap_pi(i)
-    while i > PI do
-        i = i - 2.0 * PI 
-    end
-    while i < -PI do 
-        i = i + 2.0 * PI 
-    end
-    return i
-end
-
--- Euclidean distance
-local function dist2d(x1, y1, x2, y2)
-    local dx = x2 - x1
-    local dy = y2 - y1
-    return math.sqrt(dx * dx + dy * dy)
-end
 
 -- ---------------------------------------------------------
 -- Dubins kinematic equations
@@ -171,7 +144,7 @@ local function dubins_kinematics(x, y, psi, Vt, omega, dt)
     local x_next = x + Vt * math.cos(psi) * dt
     local y_next = y + Vt * math.sin(psi) * dt
     local psi_next = psi + omega * dt
-    return x_next, y_next, wrap_pi(psi_next)
+    return x_next, y_next, math_helpers.wrap_pi(psi_next)
 end
 
 -- ---------------------------------------------------------
@@ -229,10 +202,10 @@ end
 --  gamma = acos( clamp(2*rho / l, -1, 1) )
 -- ---------------------------------------------------------
 local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
-    local l = dist2d(xLi, yLi, xRf, yRf)
+    local l = math_helpers.dist2d(xLi, yLi, xRf, yRf)
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
-    local gamma = math.acos(clamp((2.0 * rho) / l, -1.0, 1.0))
+    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     local theta = eta + gamma - (PI / 2.0)
     return theta, straight_length, eta, gamma, l
 end
@@ -308,47 +281,8 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     return points
 end
 
--- commented out 5 April
--- MAIN
-
--- local REPORT_INTERVAL_MS = 2000
--- local last_report_ms = millis()
-
--- local function update()
---     -- getting target
---     local target = chase_target()
---     if target == nil then
---         return update, 100
---     end
---     -- local position
---     local pos = ahrs:get_position()
---     -- local wp = vehicle:get_target_location()  
-
---     -- Dubins geometry
---     local points = generate_LSR(
---         dubins.xi, dubins.yi, dubins.psi_i,
---         dubins.xf, dubins.yf, dubins.psi_f,
---         dubins.rho,
---         math.rad(5), 5.0
---     )
-
---     --no points case, update for 100ms
---     if #points == 0 then
---         return update, 100
---     end
-
---     --throttle messaging to 2000 ms
---     local now_ms = millis()
-
---     --update this part for an error check
---     -- if distance and now_ms - last_report_ms >= REPORT_INTERVAL_MS then
---     --     last_report_ms = now_ms
---     --     gcs:send_text(6, string.format("Dubins distance: %.1f m", distance))
---     -- end
-
---     return update, 100
--- end
-
---return update()
-
-return { build_path = build_path, build_state = build_state, generate_lsr = generate_LSR}
+return { 
+    build_path = build_path, 
+    build_state = build_state, 
+    generate_lsr = generate_LSR
+}

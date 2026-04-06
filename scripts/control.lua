@@ -5,12 +5,11 @@ local MODE_AUTO = 10
 local MODE_GUIDED = 15
 
 -- states
-local latest_target = nil 
-local active_path = nil 
-local pending_target = nil
 local controller_busy = nil
 local dubins_point_index = nil
 local kangaroo_loc_pending = nil
+local kangaroo_loc_active = nil
+local dubins_points_active = nil
 local REPORT_INTERVAL_MS = 2000
 local last_report_ms = 0
 
@@ -28,7 +27,9 @@ function fly_to_dubins_point(point)
         return false
     end
     -- initialsing lcoation
-    local target_loc = Location()
+    --local target_loc = Location()
+    local target_loc = kangaroo_loc_active.loc:copy()
+
     -- setting points
     local north_m = point.x or 0.0
     local east_m = point.y or 0.0
@@ -42,7 +43,7 @@ function fly_to_dubins_point(point)
     target_loc:set_alt_m(target_alt_m, 0)
 
     -- update messaging
-    gcs:send_text(6, string.format("Travelling on Dubins Path", "x:",north_m, "y:",east_m))
+    gcs:send_text(6, string.format("Travelling on Dubins Path x=%f, y =%f", north_m, east_m))
     -- set location
     return vehicle:set_target_location(target_loc)
 end
@@ -99,12 +100,23 @@ function dubins_point_reached(point)
     return false
 end
 
+-- function to update build
+local function update_build(kangaroo_loc_active)
+    if not kangaroo_loc_pending then
+        return
+    end
+    dubins_points_active = dubins_points.build_path(kangaroo_loc_active)
+    dubins_point_index = 1
+    controller_busy = dubins_points_active ~= nil and #dubins_points_active > 0
+end
+
 -- update logic
 function update()
     local current_mode = vehicle:get_mode()
     -- only operate in GUIDED or AUTO....
-    if current_mode = 10 OR 15
+    if current_mode == MODE_AUTO or current_mode == MODE_GUIDED then 
         local kangaroo_loc_latest = kangaroo_loc.get()
+
         -- Case 1: kangaroo hasn't moved
         if kangaroo_loc_latest then
             kangaroo_loc_pending = kangaroo_loc_latest
@@ -115,12 +127,8 @@ function update()
         if not controller_busy and kangaroo_loc_pending then
             kangaroo_loc_active = kangaroo_loc_pending
             kangaroo_loc_pending = nil
-
         -- build the points of the Dubins path
-            --dubins_points_active = dubins_points(kangaroo_loc_active)
-            dubins_points_active = dubins_points.build_path(kangaroo_loc_active)
-            dubins_point_index = 1
-            controller_busy = dubins_points_active ~= nil and #dubins_points_active > 0
+
         end
 
         if controller_busy and dubins_points_active then
@@ -134,7 +142,7 @@ function update()
                 if dubins_point_reached(point) then
                     dubins_point_index = dubins_point_index + 1
                 end
-            
+                update_build(kangaroo_loc_active)
                 local now_ms = millis():toint()
                 if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
                     last_report_ms = now_ms
@@ -142,21 +150,18 @@ function update()
                 end
             end
 
-
             -- if the index is greater than the number of active points, i.e. end loop and go to next step
             if dubins_point_index > #dubins_points_active then
                 controller_busy = false
                 dubins_points_active = nil
                 dubins_point_index = nil
 
-                -- double check logic
+                -- if the kangaroo is pending, then activate and update_build
                 if kangaroo_loc_pending then
                     kangaroo_loc_active = kangaroo_loc_pending
                     kangaroo_loc_pending = nil
-                    --dubins_points_active = dubins_points(kangaroo_loc_active)
-                    dubins_points_active = dubins_points.build_path(kangaroo_loc_active)
-                    dubins_point_index = 1
-                    controller_busy = dubins_points_active ~= nil and #dubins_points_active > 0
+                    update_build(kangaroo_loc_active)
+
                 end
             end
         end
