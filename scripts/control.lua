@@ -101,70 +101,69 @@ function dubins_point_reached(point)
 end
 
 -- function to update build
-local function update_build(kangaroo_loc_active)
-    if not kangaroo_loc_pending then
-        return
+local function update_build()
+    if kangaroo_loc_pending == nil then
+        return false
     end
+
+    kangaroo_loc_active = kangaroo_loc_pending
+    kangaroo_loc_pending = nil
+
     dubins_points_active = dubins_points.build_path(kangaroo_loc_active)
     dubins_point_index = 1
-    controller_busy = dubins_points_active ~= nil and #dubins_points_active > 0
+    controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
+
+    return controller_busy
 end
 
 -- update logic
 function update()
     local current_mode = vehicle:get_mode()
     -- only operate in GUIDED or AUTO....
-    if current_mode == MODE_AUTO or current_mode == MODE_GUIDED then 
-        local kangaroo_loc_latest = kangaroo_loc.get()
+    if current_mode ~= MODE_AUTO and current_mode ~= MODE_GUIDED then 
+        return update, 100
+    end
 
-        -- Case 1: kangaroo hasn't moved
-        if kangaroo_loc_latest then
-            kangaroo_loc_pending = kangaroo_loc_latest
-        end
+    local kangaroo_loc_latest = kangaroo_loc.get()
 
-        -- Case 2: kangaroo has moved, Dubins curve to be activated
-        -- if controller isn't busy and the kangaroo_location is pending
-        if not controller_busy and kangaroo_loc_pending then
-            kangaroo_loc_active = kangaroo_loc_pending
-            kangaroo_loc_pending = nil
-        -- build the points of the Dubins path
+    -- Case 1: kangaroo hasn't moved
+    if kangaroo_loc_latest then
+        kangaroo_loc_pending = kangaroo_loc_latest
+    end
 
-        end
+    -- Case 2: kangaroo has moved, Dubins curve to be activated
+    -- if controller isn't busy and the kangaroo_location is pending
+    -- if not controller_busy and kangaroo_loc_pending then
+    --     kangaroo_loc_active = kangaroo_loc_pending
+    --     kangaroo_loc_pending = nil
+    -- end 
+    if not controller_busy then
+        update_build()   -- start path when idle
+    end
 
-        if controller_busy and dubins_points_active then
-            local point = dubins_points_active[dubins_point_index]
+    -- build the points of the Dubins path
+    if controller_busy and dubins_points_active then
+        local point = dubins_points_active[dubins_point_index]
 
-            -- update next point in dubins weave
-            if point then
-                -- fly to point
-                fly_to_dubins_point(point)
-                -- check if point is reached
-                if dubins_point_reached(point) then
-                    dubins_point_index = dubins_point_index + 1
-                end
-                update_build(kangaroo_loc_active)
-                local now_ms = millis():toint()
-                if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
-                    last_report_ms = now_ms
-                    gcs:send_text(6, "Travelling on Dubins Path")
-                end
-            end
-
-            -- if the index is greater than the number of active points, i.e. end loop and go to next step
-            if dubins_point_index > #dubins_points_active then
-                controller_busy = false
-                dubins_points_active = nil
-                dubins_point_index = nil
-
-                -- if the kangaroo is pending, then activate and update_build
-                if kangaroo_loc_pending then
-                    kangaroo_loc_active = kangaroo_loc_pending
-                    kangaroo_loc_pending = nil
-                    update_build(kangaroo_loc_active)
-
-                end
+        -- update next point in dubins weave, fly to the point, reach the ooint, move onto next
+        if point and fly_to_dubins_point(point) and dubins_point_reached(point) then
+            dubins_point_index = dubins_point_index + 1
+            local now_ms = millis():toint()
+            if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
+                last_report_ms = now_ms
+                gcs:send_text(6, "Travelling on Dubins Path")
             end
         end
+
+        -- if the index is greater than the number of active points, i.e. end loop and go to next step
+        if dubins_point_index > #dubins_points_active then
+            controller_busy = false
+            dubins_points_active = nil
+            dubins_point_index = nil
+            update_build()
+        end
+    end
+    
     return update, 100
 end
 
