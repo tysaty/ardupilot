@@ -8,10 +8,35 @@ local ALT_FRAME_ABSOLUTE = 0
 local grav = 9.807
 local PHI_MAX_RAD = math.rad(45)
 
-
 -- get the kangaroo bus from the control lua
+local function build_path(kangaroo_state)
+    -- handling 0 case
+    if kangaroo_state == nil or kangaroo_state.loc == nil then
+        return nil
+    end
+    -- current position of plane
+    local pos = ahrs:get_position()
+    local vel = ahrs:get_velocity_NED()
+    local yaw = ahrs:get_yaw_rad()
+    if pos == nil or vel == nil or yaw == nil then
+        return nil
+    end
+    -- distance from kangaroo
+    local rel_ne = pos:get_distance_NE(kangaroo_state.loc)
+    if rel_ne == nil then
+        return nil
+    end
+    -- velocity 
+    local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
+    local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
+
+    return generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), math.atan(kangaroo_state.ve, kangaroo_state.vn), rho, math.rad(5), 5.0)
+end
+
 
 -- Section 2: Current state values - vehicle configuration 
+
+-- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
 local function process_imu_sample(sample)
     local pos = ahrs:get_position()
     local vel = ahrs:get_velocity_NED()
@@ -235,6 +260,7 @@ local function straight_step(x_prev, y_prev, theta, delta_d)
 end
 
 -- Section 3 - generating segments
+
 -- generating arc points
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
     local psi = psi_start
@@ -325,4 +351,4 @@ end
 
 --return update()
 
-return { build_state = build_state, generate_lsr = generate_LSR, build_path = build_path }
+return { build_path = build_path, build_state = build_state, generate_lsr = generate_LSR}
