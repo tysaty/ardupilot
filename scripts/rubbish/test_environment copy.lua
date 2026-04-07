@@ -6,9 +6,8 @@ local SAMPLE_INTERVAL_MS = 2000
 local CONSOLE_INTERVAL_MS = 10000
 local SCRIPTS_SCAN_INTERVAL_MS = 0
 local ENABLE_DATAFLASH = false
-local OUTPUT_SUBDIR_NAME = "test_environment"
-local EVENT_LOG_PREFIX = "test_environment_events"
-local SAMPLE_LOG_PREFIX = "test_environment_samples"
+local EVENT_LOG_FILE = "test_environment_events.log"
+local SAMPLE_LOG_FILE = "test_environment_samples.csv"
 local NO_DATA = -9999.0
 local MAV_SEVERITY = {
     EMERGENCY = 0,
@@ -20,8 +19,6 @@ local MAV_SEVERITY = {
     INFO = 6,
     DEBUG = 7
 }
-
-gcs:send_text(MAV_SEVERITY.WARNING, "TESTENV: loaded at boot")
 
 -- Parameters captured at boot
 local CONFIG_PARAM_NAMES = {
@@ -69,11 +66,8 @@ local function now_ms()
     return as_number(millis()) or 0
 end
 
--- boot-relative time marker, used in run/file naming
-local BOOT_MS = now_ms()
-
 -- runtime identifier
-local RUN_ID = string.format("boot_%u", BOOT_MS)
+local RUN_ID = string.format("boot_%u", now_ms())
 
 -- boolean to integer
 local function bool_to_int(value)
@@ -142,64 +136,12 @@ local function get_log_dir()
     return get_scripts_dir()
 end
 
-local function resolve_output_dir(log_dir)
-    local candidate = log_dir .. "/" .. OUTPUT_SUBDIR_NAME
-    local stat = fs:stat(candidate)
-    if stat and stat:is_directory() then
-        return candidate, true
-    end
-    return log_dir, false
-end
-
-local function utc_timestamp_tag()
-    local gps_instance = gps:primary_sensor()
-    if gps_instance == nil then
-        gps_instance = 0
-    end
-    local utc_usec = as_number(gps:time_epoch_usec(gps_instance))
-    if utc_usec == nil or utc_usec <= 0 then
-        return nil
-    end
-    local utc_sec = math.floor(utc_usec * 0.000001)
-    local year, month, day, hour, min, sec = rtc:clock_s_to_date_fields(utc_sec)
-    if year == nil then
-        return nil
-    end
-    return string.format("%04u%02u%02u_%02u%02u%02uZ", year, month + 1, day, hour, min, sec)
-end
-
-local function file_suffix()
-    local utc_tag = utc_timestamp_tag()
-    if utc_tag ~= nil then
-        return string.format("%s_boot%u", utc_tag, BOOT_MS)
-    end
-    return string.format("boot%u", BOOT_MS)
-end
-
-local function build_unique_path(directory, prefix, extension, suffix)
-    local path = string.format("%s/%s_%s.%s", directory, prefix, suffix, extension)
-    if fs:stat(path) == nil then
-        return path
-    end
-    local sequence = 1
-    while sequence <= 999 do
-        local candidate = string.format("%s/%s_%s_%03u.%s", directory, prefix, suffix, sequence, extension)
-        if fs:stat(candidate) == nil then
-            return candidate
-        end
-        sequence = sequence + 1
-    end
-    return string.format("%s/%s_%s_overflow.%s", directory, prefix, suffix, extension)
-end
-
 -- establishing local values
 local SCRIPTS_DIR = get_scripts_dir()
 local LOG_DIR = get_log_dir()
-local OUTPUT_DIR, HAS_OUTPUT_SUBDIR = resolve_output_dir(LOG_DIR)
-local FILE_SUFFIX = file_suffix()
 local IS_SITL = (SCRIPTS_DIR == "scripts")
-local EVENT_LOG_PATH = build_unique_path(OUTPUT_DIR, EVENT_LOG_PREFIX, "log", FILE_SUFFIX)
-local SAMPLE_LOG_PATH = build_unique_path(OUTPUT_DIR, SAMPLE_LOG_PREFIX, "csv", FILE_SUFFIX)
+local EVENT_LOG_PATH = LOG_DIR .. "/" .. EVENT_LOG_FILE
+local SAMPLE_LOG_PATH = LOG_DIR .. "/" .. SAMPLE_LOG_FILE
 -- establishing file values
 local event_file = nil
 local sample_file = nil
@@ -660,9 +602,6 @@ end
 
 -- at start sending - initialising, sending text to MAVLINK
 local function startup()
-    if not HAS_OUTPUT_SUBDIR then
-        gcs:send_text(MAV_SEVERITY.WARNING, "TENV: output dir missing, using " .. OUTPUT_DIR)
-    end
     ensure_event_file()
     ensure_sample_file()
     write_event("run_start")

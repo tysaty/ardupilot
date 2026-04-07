@@ -248,9 +248,14 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local theta, straight_len = lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     -- Generate Left
     generate_arc_points(points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
+
+    if #points == 0 then
+        return nil
+    end
+
     -- Straight
     local last = points[#points]
-    local xs, ys = generate_straight_points(points, last.x, last.y, theta, straight_len, delta_d)
+    generate_straight_points(points, last.x, last.y, theta, straight_len, delta_d)
     -- Generate right
     generate_arc_points(points, xRf, yRf, rho, theta, psi_f, delta_psi, false)
     return points
@@ -264,35 +269,83 @@ end
 
 -- generate RSR
 
+-- convert local-frame points into absolute Location waypoints
+-- altitude is intentionally not owned here; control.lua sets altitude policy
+local function to_absolute_points(origin_loc_abs, rel_points)
+    if origin_loc_abs == nil or rel_points == nil or #rel_points == 0 then
+        return nil
+    end
 
+    local abs_points = {}
+    for i = 1, #rel_points do
+        local rel = rel_points[i]
+        if rel ~= nil and rel.x ~= nil and rel.y ~= nil then
+            local wp = origin_loc_abs:copy()
+            wp:offset(rel.x, rel.y)
+            abs_points[#abs_points + 1] = {
+                loc = wp,
+                psi = rel.psi,
+                x = rel.x,
+                y = rel.y
+            }
+        end
+    end
+
+    if #abs_points == 0 then
+        return nil
+    end
+
+    return abs_points
+end
 
 -- get the target location from the kangaroo bus (consumed in control.lua)
 local function build_path(kangaroo_state)
     -- handling 0 case
     if kangaroo_state == nil or kangaroo_state.loc == nil then
-        return nil
+        return nil, "invalid_kangaroo_state"
     end
     -- current position of plane
     local pos = ahrs:get_position()
     local vel = ahrs:get_velocity_NED()
     local yaw = ahrs:get_yaw_rad()
     if pos == nil or vel == nil or yaw == nil then
-        return nil
+        return nil, "missing_aircraft_state"
     end
+
+    local pos_abs = pos:copy()
+    local target_abs = kangaroo_state.loc:copy()
+    pos_abs:change_alt_frame(ALT_FRAME_ABSOLUTE)
+
     -- distance from kangaroo
-    local rel_ne = pos:get_distance_NE(kangaroo_state.loc)
+    local rel_ne = pos_abs:get_distance_NE(target_abs)
     if rel_ne == nil then
-        return nil
+        return nil, "rel_ne_unavailable"
     end
-    -- velocity 
+    -- velocity
     local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
     local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
+    local psi_f = math.atan(kangaroo_state.ve or 0, kangaroo_state.vn or 0)
 
-    return generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), math.atan(kangaroo_state.ve, kangaroo_state.vn), rho, math.rad(5), 5.0)
+    local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
+    if rel_points == nil or #rel_points == 0 then
+        return nil, "empty_relative_path"
+    end
+
+    local abs_points = to_absolute_points(pos_abs, rel_points)
+    if abs_points == nil or #abs_points == 0 then
+        return nil, "absolute_conversion_failed"
+    end
+
+    return abs_points, {
+        rho_m = rho,
+        target_distance_m = math.sqrt(rel_ne:x() * rel_ne:x() + rel_ne:y() * rel_ne:y()),
+        point_count = #abs_points,
+        frame = "absolute"
+    }
 end
 
-return { 
-    build_state = build_state, 
+return {
+    build_state = build_state,
     generate_lsr = generate_LSR,
     build_path = build_path
 }

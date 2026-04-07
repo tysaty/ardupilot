@@ -1,0 +1,86 @@
+-- plane_zigzag.lua
+-- In Plane AUTO mode, replace a straight path to the next waypoint with a zig-zag.
+
+local MODE_AUTO = 10
+local MAV_SEVERITY = {INFO = 6, WARNING = 4}
+
+local UPDATE_MS = 200
+local ZIGZAG_WIDTH_M = 20.0
+local LOOKAHEAD_M = 60.0
+local SWITCH_DIST_M = 15.0
+local FINAL_CAPTURE_DIST_M = 45.0
+
+local last_wp
+local zig_side = 1
+local active_zig_target
+
+local function wrap_360(deg)
+    local r = deg % 360
+    if r < 0 then
+        r = r + 360
+    end
+    return r
+end
+
+local function same_wp(a, b)
+    if a == nil or b == nil then
+        return false
+    end
+    return a:lat() == b:lat() and a:lng() == b:lng() and a:alt() == b:alt()
+end
+
+local function reset_leg_state(next_wp)
+    last_wp = next_wp
+    zig_side = 1
+    active_zig_target = nil
+end
+
+local function compute_zig_target(curr, next_wp, side)
+    local bearing_deg = math.deg(curr:get_bearing(next_wp))
+    local tgt = curr:copy()
+    tgt:offset_bearing(bearing_deg, LOOKAHEAD_M)
+    tgt:offset_bearing(wrap_360(bearing_deg + (side * 90.0)), ZIGZAG_WIDTH_M)
+    tgt:alt(next_wp:alt())
+    return tgt
+end
+
+local function update()
+    if not arming:is_armed() then
+        last_wp = nil
+        active_zig_target = nil
+        return update, UPDATE_MS
+    end
+
+    if vehicle:get_mode() ~= MODE_AUTO then
+        return update, UPDATE_MS
+    end
+
+    local curr = ahrs:get_location()
+    local next_wp = vehicle:get_target_location()
+    if curr == nil or next_wp == nil then
+        return update, UPDATE_MS
+    end
+
+    if not same_wp(last_wp, next_wp) then
+        reset_leg_state(next_wp)
+        gcs:send_text(MAV_SEVERITY.INFO, "ZigZag: new mission leg")
+    end
+
+    local dist_to_wp = curr:get_distance(next_wp)
+    if dist_to_wp < FINAL_CAPTURE_DIST_M then
+        -- Let AP capture the waypoint normally near the end of each leg.
+        active_zig_target = nil
+        return update, UPDATE_MS
+    end
+
+    if active_zig_target == nil or curr:get_distance(active_zig_target) < SWITCH_DIST_M then
+        active_zig_target = compute_zig_target(curr, next_wp, zig_side)
+        zig_side = -zig_side
+    end
+
+    vehicle:update_target_location(next_wp, active_zig_target)
+    return update, UPDATE_MS
+end
+
+gcs:send_text(MAV_SEVERITY.INFO, "ZigZag script loaded (Plane AUTO)")
+return update()

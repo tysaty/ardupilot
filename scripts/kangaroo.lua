@@ -7,8 +7,10 @@
 local ALT_FRAME_ABSOLUTE = 0
 local MAV_SEVERITY = {EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7}
 
-local PARAM_TABLE_KEY = 89
 local PARAM_TABLE_PREFIX = "KANG_"
+local PARAM_TABLE_KEY = nil
+
+gcs:send_text(MAV_SEVERITY.WARNING, "KANG: loaded at boot")
 
 -- use the kangaroo_bus for standardised passing of messages
 local kangaroo_bus = require("kangaroo_bus")
@@ -17,7 +19,16 @@ local param_helpers = require("param_helpers")
 local math_helpers = require("math_helpers")
 
 -- error handling
-assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 13), "could not add KANG_ parameter table")
+
+for key = 0, 200 do
+    if param:add_table(key, PARAM_TABLE_PREFIX, 13) then
+        PARAM_TABLE_KEY = key
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("KANG: using key %d", key))
+        break
+    end
+end
+
+assert(PARAM_TABLE_KEY ~= nil, "KANG: no free param table key")
 
 -- parameter tables
 --[[
@@ -142,11 +153,11 @@ local KANG_PRT_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Param: KANG_OFS_M
   // @DisplayName: Kangaroo start offset
   // @Description: Initial offset from home to place the target
-  // @Range: 0 200
+  // @Range: 0 20000
   // @Units: m
   // @User: Standard
 --]]
-local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 13, 200)
+local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 13, 20000)
 
 -- local variables initisalising
 local anchor_loc = nil
@@ -161,6 +172,7 @@ local target_ve = 0
 local last_update_ms = 0
 local segment_end_ms = 0
 local last_report_ms = 0
+local last_home_wait_ms = 0
 local target_ready = false
 
 local function get_radius_m()
@@ -224,14 +236,41 @@ local function ensure_anchor(now_ms)
         return true
     end
 
-    local home = ahrs:get_home()
-    if home == nil then
+    local base = nil
+
+
+    -- set at home if it's available
+    if ahrs:home_is_set() then
+        base = ahrs:get_home()
+        if base ~= nil then
+            anchor_source = "home"
+        end
+    end
+
+
+    -- if get_home doesn't load the current EKF/GPS location
+    if base == nil then
+        base = ahrs:get_location()
+        if base ~= nil then
+            anchor_source = "current"
+        end
+    end
+
+    -- waiting for loc
+    if base == nil then
+        if now_ms - last_home_wait_ms >= 5000 then
+            last_home_wait_ms = now_ms
+            gcs:send_text(MAV_SEVERITY.WARNING, "KANG: waiting for home/location")
+        end
         return false
     end
 
-    anchor_loc = home:copy()
+ 
+
+    anchor_loc = base:copy()
     anchor_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
-    local start_offset = math_helpers.clamp(KANG_OFS_M:get(), 0, 200)
+
+    local start_offset = math_helpers.clamp(KANG_OFS_M:get(), 500, 20000)
     heading_deg = math_helpers.random_between(0, 360)
     target_north = math.cos(math.rad(heading_deg)) * start_offset
     target_east = math.sin(math.rad(heading_deg)) * start_offset
@@ -240,7 +279,7 @@ local function ensure_anchor(now_ms)
     choose_next_segment(now_ms)
     update_target_location()
     target_ready = true
-    gcs:send_text(MAV_SEVERITY.INFO, "KANG: virtual target initialised")
+    gcs:send_text(MAV_SEVERITY.WARNING, "KANG: virtual target initialised")
     return true
 end
 
@@ -299,7 +338,7 @@ local function report_target(now_ms)
     last_report_ms = now_ms
 
     gcs:send_text(
-        MAV_SEVERITY.INFO,
+        MAV_SEVERITY.WARNING,
         string.format(
             "KANG: lat=%.7f lon=%.7f alt=%.1f spd=%.1f hdg=%.0f vn=%.1f ve=%.1f r=%.1f",
             target_loc:lat() * 1.0e-7,
@@ -333,7 +372,7 @@ math.randomseed(millis():toint())
 math.random()
 math.random()
 
-gcs:send_text(MAV_SEVERITY.INFO, "KANG: loaded, switch Plane to GUIDED after takeoff")
+gcs:send_text(MAV_SEVERITY.WARNING, "KANG: loaded, switch Plane to GUIDED after takeoff")
 
 local function protected_wrapper()
     local success, err = pcall(update)

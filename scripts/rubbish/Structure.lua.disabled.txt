@@ -1,0 +1,169 @@
+-- Structure.lua
+-- Skeleton ArduPilot Lua script:
+-- 1. Read IMU data from the INS interface
+-- 2. Process that data in a generic control block
+-- 3. Send a generic command to the motor / hardware output layer
+
+-- Configuration ---------------------------------------------------------------
+
+local UPDATE_PERIOD_MS = 20
+local IMU_INSTANCE = 0
+
+-- Replace this with the SERVOx_FUNCTION you want to drive.
+-- Example values depend on vehicle setup and assigned outputs.
+local OUTPUT_FUNCTION = 94
+
+-- Output mode:
+-- "scaled" uses SRV_Channels:set_output_scaled(function, value)
+-- "pwm"    uses SRV_Channels:set_output_pwm(function, pwm)
+local OUTPUT_MODE = "scaled"
+
+-- For scaled output, the command below is interpreted using this range.
+local OUTPUT_RANGE = 1000
+
+-- For PWM output, generic neutral/min/max values.
+local PWM_MIN = 1000
+local PWM_TRIM = 1500
+local PWM_MAX = 2000
+
+local announced_missing_output = false
+local last_debug_ms = 0
+
+-- Helpers --------------------------------------------------------------------
+
+local function clamp(value, min_value, max_value)
+    if value < min_value then
+        return min_value
+    end
+    if value > max_value then
+        return max_value
+    end
+    return value
+end
+
+local function send_info(text)
+    gcs:send_text(0, text)
+end
+
+local function output_available()
+    return SRV_Channels:find_channel(OUTPUT_FUNCTION) ~= nil
+end
+
+local function configure_output()
+    if OUTPUT_MODE == "scaled" then
+        SRV_Channels:set_range(OUTPUT_FUNCTION, OUTPUT_RANGE)
+    end
+end
+
+-- Stage 1: read IMU -----------------------------------------------------------
+
+local function read_imu_sample()
+    if ins:calibrating() then
+        return nil, "INS calibrating"
+    end
+
+    if not ins:get_gyro_health(IMU_INSTANCE) then
+        return nil, "gyro unhealthy"
+    end
+
+    if not ins:get_accel_health(IMU_INSTANCE) then
+        return nil, "accel unhealthy"
+    end
+
+    local gyro = ins:get_gyro(IMU_INSTANCE)
+    local accel = ins:get_accel(IMU_INSTANCE)
+    if gyro == nil or accel == nil then
+        return nil, "missing IMU data"
+    end
+
+    return {
+        gyro = gyro,
+        accel = accel,
+        timestamp_ms = millis():toint(),
+    }
+end
+
+-- Stage 2: generic processing -------------------------------------------------
+
+local function process_imu_sample(sample)
+    local gyro_x = sample.gyro:x()
+    local gyro_y = sample.gyro:y()
+    local gyro_z = sample.gyro:z()
+
+    local accel_x = sample.accel:x()
+    local accel_y = sample.accel:y()
+    local accel_z = sample.accel:z()
+
+    -- Replace this block with your real algorithm:
+    -- 1. Filter or transform the IMU signals
+    -- 2. Estimate state or detect events
+    -- 3. Compute a control demand or actuator request
+    --
+    -- The example below is intentionally generic. It converts one gyro axis
+    -- into a normalized command in the range [-1.0, 1.0].
+    local normalized_command = clamp(gyro_x / 1.0, -1.0, 1.0)
+
+    return {
+        gyro_x = gyro_x,
+        gyro_y = gyro_y,
+        gyro_z = gyro_z,
+        accel_x = accel_x,
+        accel_y = accel_y,
+        accel_z = accel_z,
+        normalized_command = normalized_command,
+        timestamp_ms = sample.timestamp_ms,
+    }
+end
+
+-- Stage 3: map controller output to hardware output ---------------------------
+
+local function write_output(control_result)
+    if not output_available() then
+        if not announced_missing_output then
+            send_info("Structure.lua: OUTPUT_FUNCTION not assigned to a servo output")
+            announced_missing_output = true
+        end
+        return
+    end
+
+    if OUTPUT_MODE == "scaled" then
+        -- Generic output path: normalized command to configured output function.
+        SRV_Channels:set_output_scaled(OUTPUT_FUNCTION, control_result.normalized_command)
+        return
+    end
+
+    -- Alternative generic path: convert normalized command into PWM.
+    local pwm_span = PWM_MAX - PWM_TRIM
+    local pwm = PWM_TRIM + control_result.normalized_command * pwm_span
+    pwm = math.floor(clamp(pwm, PWM_MIN, PWM_MAX) + 0.5)
+    SRV_Channels:set_output_pwm(OUTPUT_FUNCTION, pwm)
+end
+
+-- Main loop ------------------------------------------------------------------
+
+local function update()
+    local sample, err = read_imu_sample()
+    if sample == nil then
+        send_info("Structure.lua: " .. err)
+        return update, UPDATE_PERIOD_MS
+    end
+
+    local control_result = process_imu_sample(sample)
+    write_output(control_result)
+
+    -- Optional debug output, throttled to avoid flooding the GCS link.
+    if control_result.timestamp_ms - last_debug_ms >= 1000 then
+        last_debug_ms = control_result.timestamp_ms
+        send_info(string.format(
+            "IMU gx=%.2f ax=%.2f cmd=%.2f",
+            control_result.gyro_x,
+            control_result.accel_x,
+            control_result.normalized_command
+        ))
+    end
+
+    return update, UPDATE_PERIOD_MS
+end
+
+configure_output()
+return update()

@@ -3,6 +3,7 @@
 -- if in gudied or auto
 local MODE_AUTO = 10
 local MODE_GUIDED = 15
+local ALT_FRAME_ABSOLUTE = 0
 
 -- states
 local controller_busy = nil
@@ -13,36 +14,69 @@ local dubins_points_active = nil
 local REPORT_INTERVAL_MS = 2000
 local last_report_ms = 0
 
--- setting local altittude
-local plane_altitude = 150.0
+-- maintain aircraft 150m above virtual target altitude
+local PLANE_ABOVE_TARGET_M = 150.0
+local KANG_ALT_M_FALLBACK = 80.0
+local kang_alt_m_param = Parameter()
+local kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
+
 
 -- import kangaroo_bus (target) and dubins outputs (path)
 local kangaroo_loc = require("kangaroo_bus")
 local dubins_points = require("dubins_weave")
 
--- fly to point
+gcs:send_text(4, "Control: loaded at boot")
+
+-- setting altitude (not captured in the )
+local function get_kangaroo_alt_m()
+    if not kang_alt_m_ready then
+        kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
+    end
+    if kang_alt_m_ready then
+        local alt_m = kang_alt_m_param:get()
+        if alt_m ~= nil then
+            return alt_m
+        end
+    end
+    return KANG_ALT_M_FALLBACK
+end
+
+local function get_home_alt_m()
+    if ahrs:home_is_set() then
+        local home = ahrs:get_home()
+        if home ~= nil and home:alt() ~= nil then
+            return home:alt() * 0.01
+        end
+    end
+
+    local pos = ahrs:get_position()
+    if pos ~= nil then
+        pos:change_alt_frame(ALT_FRAME_ABSOLUTE)
+        local pos_alt_cm = pos:alt()
+        if pos_alt_cm ~= nil then
+            return pos_alt_cm * 0.01
+        end
+    end
+
+    return nil
+end
+
+-- fly to point - point.loc is absolute from dubins_weave
 function fly_to_dubins_point(point)
-    -- handle negative case
-   if point == nil or kangaroo_loc_active == nil or kangaroo_loc_active.loc == nil then
+    if point == nil or point.loc == nil then
         return false
     end
-    -- initialsing lcoation
-    --local target_loc = Location()
-    local target_loc = kangaroo_loc_active.loc:copy()
 
-    -- setting points
-    local north_m = point.x or 0.0
-    local east_m = point.y or 0.0
-    target_loc:offset(north_m, east_m)
+    local home_alt_m = get_home_alt_m()
+    if home_alt_m == nil then
+        return false
+    end
 
-    -- Setting altitutde to be 150 m above 
-    target_loc:change_alt_frame(0)
-    local target_alt_m = (kangaroo_loc_active.loc:alt() * 0.01) + plane_altitude
+    local target_loc = point.loc:copy()
+    target_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
+    local target_alt_m = home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
+    target_loc:set_alt_m(target_alt_m, ALT_FRAME_ABSOLUTE)
 
-    -- set altittude to the target_loc value
-    target_loc:set_alt_m(target_alt_m, 0)
-
-    -- set location
     return vehicle:set_target_location(target_loc)
 end
 
@@ -107,9 +141,14 @@ local function update_build()
     kangaroo_loc_active = kangaroo_loc_pending
     kangaroo_loc_pending = nil
 
-    dubins_points_active = dubins_points.build_path(kangaroo_loc_active)
+    local build_result, build_info = dubins_points.build_path(kangaroo_loc_active)
+    dubins_points_active = build_result
     dubins_point_index = 1
     controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
+
+    if not controller_busy and build_info ~= nil then
+        gcs:send_text(6, "Dubins build failed: " .. tostring(build_info))
+    end
 
     return controller_busy
 end
