@@ -8,6 +8,7 @@ local ALT_FRAME_ABSOLUTE = 0
 -- states
 local controller_busy = nil
 local dubins_point_index = nil
+local dubins_point_count = nil
 local kangaroo_loc_pending = nil
 local kangaroo_loc_active = nil
 local dubins_points_active = nil
@@ -116,15 +117,42 @@ end
 
 -- tuning aparameters
 -- handle an acceptable radius from point
-local WP_ACCEPT_RADIUS_M = 50.0
+local WP_ACCEPT_RADIUS_M = 20.0
+local MIN_WP_ACCEPT_RADIUS_M = 5.0
 -- consecutive hits required to be in radius before proceeding to next point
-local REACHED_STREAK_REQUIRED = 1
+local REACHED_STREAK_REQUIRED = 2
 
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1
 
-function dubins_point_reached(point)
+
+-- new function
+local function get_point_accept_radius_m(point, next_point)
+    local accept_radius_m = WP_ACCEPT_RADIUS_M
+    if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
+        return accept_radius_m
+    end
+
+    local spacing_m = point.loc:get_distance(next_point.loc)
+    if spacing_m == nil or spacing_m <= 0 then
+        return accept_radius_m
+    end
+
+    -- keep acceptance radius below half waypoint spacing so adjacent points
+    -- cannot both be counted as reached from a single position sample.
+    local max_non_overlapping_radius_m = spacing_m * 0.45
+    if max_non_overlapping_radius_m < accept_radius_m then
+        accept_radius_m = math.max(MIN_WP_ACCEPT_RADIUS_M, max_non_overlapping_radius_m)
+    end
+
+    return accept_radius_m
+end
+
+-- if the point has been reached...
+function dubins_point_reached(point, next_point)
+
+    
     -- if no points, return a false
     if point == nil then
         reached_streak = 0
@@ -138,16 +166,14 @@ function dubins_point_reached(point)
     end
 
     local pos = ahrs:get_position()
-    local weave_target = vehicle:get_target_location()
-
     -- nil case
-    if pos == nil or weave_target == nil then
+    if pos == nil or point.loc == nil then
         reached_streak = 0
         return false
     end
 
-    -- checking distance to current location
-    local dist_m = pos:get_distance(weave_target)
+    -- checking distance to the active Dubins point location
+    local dist_m = pos:get_distance(point.loc)
 
     -- if the location is nil
     if dist_m == nil then
@@ -155,8 +181,10 @@ function dubins_point_reached(point)
         return false
     end
 
+    local accept_radius_m = get_point_accept_radius_m(point, next_point)
+
     -- if distance is less 
-    if dist_m <= WP_ACCEPT_RADIUS_M then
+    if dist_m <= accept_radius_m then
         reached_streak = reached_streak + 1
         return reached_streak >= REACHED_STREAK_REQUIRED
     end
@@ -245,6 +273,7 @@ local function update_build()
     local build_result, build_info = dubins_points.build_path(kangaroo_loc_active)
     dubins_points_active = build_result
     dubins_point_index = 1
+    dubins_point_count = (dubins_points_active ~= nil) and #dubins_points_active or nil
     controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
 
     if not controller_busy and build_info ~= nil then
@@ -271,11 +300,7 @@ function update()
     end
 
     -- Case 2: kangaroo has moved, Dubins curve to be activated
-    -- if controller isn't busy and the kangaroo_location is pending
-    -- if not controller_busy and kangaroo_loc_pending then
-    --     kangaroo_loc_active = kangaroo_loc_pending
-    --     kangaroo_loc_pending = nil
-    -- end 
+
     if not controller_busy then
         update_build()   -- start path when idle
     end
@@ -283,31 +308,43 @@ function update()
     -- build the points of the Dubins path
     if controller_busy and dubins_points_active then
         local point = dubins_points_active[dubins_point_index]
+        local next_point = dubins_points_active[dubins_point_index + 1]
 
         -- update next point in dubins weave, fly to the point, reach the point, move onto next
         if point and fly_to_dubins_point(point) then
-            if dubins_point_reached(point) then
+            if dubins_point_reached(point, next_point) then
                 dubins_point_index = dubins_point_index + 1
+                gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
             end
+
         elseif point then
             -- handle failure to set target
             gcs:send_text(6, "Failed to set target for Dubins point")
         end
-
         -- reporting in mavlink
-        local now_ms = millis():toint()
-        if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
-            last_report_ms = now_ms
-            gcs:send_text(6, string.format("Dubins idx=%d/%d", dubins_point_index or 0, #dubins_points_active))
-        end
+        --local now_ms = millis():toint()
+
+        -- if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
+        --     last_report_ms = now_ms
+        --     gcs:send_text(6, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+        -- end
+
         -- if the index is greater than the number of active points, i.e. end loop and go to next step
-        if dubins_point_index > #dubins_points_active then
+        if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
             controller_busy = false
+            kangaroo_loc_pending = true
             dubins_points_active = nil
             dubins_point_index = nil
-            update_build()
+            dubins_point_count = nil
         end
     end
+    
+    if not controller_busy and kangaroo_loc_pending then
+        kangaroo_loc_active = kangaroo_loc_pending
+        kangaroo_loc_pending = nil
+        update_build()
+    end
+
     return update, 100
 end
 
