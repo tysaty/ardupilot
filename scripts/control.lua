@@ -17,13 +17,46 @@ local last_report_ms = 0
 -- maintain aircraft 150m above virtual target altitude
 local PLANE_ABOVE_TARGET_M = 150.0
 local KANG_ALT_M_FALLBACK = 80.0
+
+
+-- establishing flags for the parameters in 
+
+local bus_seq_param = Parameter()
+local bus_seq_ready = bus_seq_param:init("SCR_USER1")
+assert(bus_seq_ready, "missing SCR_USER1")
+
+local bus_t_s_param = Parameter()
+local bus_t_s_ready = bus_t_s_param:init("SCR_USER2")
+assert(bus_t_s_ready, "missing SCR_USER2")
+
+local bus_lat_param = Parameter()
+local bus_lat_ready = bus_lat_param:init("SCR_USER3")
+assert(bus_lat_ready, "missing SCR_USER3")
+
+local bus_lon_param = Parameter()
+local bus_lon_ready = bus_lon_param:init("SCR_USER4")
+assert(bus_lon_ready, "missing SCR_USER4")
+
+local bus_vn_param = Parameter()
+local bus_vn_ready = bus_vn_param:init("SCR_USER5")
+assert(bus_vn_ready, "missing SCR_USER5")
+
+local bus_ve_param = Parameter()
+local bus_ve_ready = bus_ve_param:init("SCR_USER6")
+assert(bus_ve_ready, "missing SCR_USER6")
+
 local kang_alt_m_param = Parameter()
 local kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
 
+local last_bus_seq_seen = 0
 
 -- import kangaroo_bus (target) and dubins outputs (path)
-local kangaroo_loc = require("kangaroo_bus")
+--local kangaroo_loc = require("kangaroo_bus")
 local dubins_points = require("dubins_weave")
+
+
+--math helpers
+local math_helpers = require("math_helpers")
 
 gcs:send_text(4, "Control: loaded at boot")
 
@@ -83,9 +116,9 @@ end
 
 -- tuning aparameters
 -- handle an acceptable radius from point
-local WP_ACCEPT_RADIUS_M = 1.0
+local WP_ACCEPT_RADIUS_M = 50.0
 -- consecutive hits required to be in radius before proceeding to next point
-local REACHED_STREAK_REQUIRED = 2
+local REACHED_STREAK_REQUIRED = 1
 
 -- flags for target reach
 local reached_streak = 0
@@ -132,6 +165,74 @@ function dubins_point_reached(point)
     return false
 end
 
+-- bus function
+local function all_bus_ready()
+    return bus_seq_ready and bus_t_s_ready and bus_lat_ready and bus_lon_ready and bus_vn_ready and bus_ve_ready
+end
+
+local function read_bus_target()
+    -- not all values are ready
+    if not all_bus_ready() then
+        return nil
+    end
+    local seq_1 = bus_seq_param:get()
+    if seq_1 == nil then
+        return nil
+    end
+
+    -- if sequence is odd
+    if (seq_1 % 2) ~= 0 then
+        return nil
+    end
+
+    -- writing values
+    local t_s = bus_t_s_param:get()
+    local lat_deg = bus_lat_param:get()
+    local lon_deg = bus_lon_param:get()
+    local vn = bus_vn_param:get()
+    local ve = bus_ve_param:get()
+    -- bin if any are nil
+    if t_s == nil or lat_deg == nil or lon_deg == nil or vn == nil or ve == nil then
+        return nil
+    end
+
+    local seq_2 = bus_seq_param:get()
+    if seq_2 == nil then
+        return nil
+    end
+
+    -- checking consistency of sample
+    if seq_1 ~= seq_2 or (seq_2 % 2) ~= 0 then
+        return nil
+    end
+
+    -- if not a new sample
+    if seq_2 == last_bus_seq_seen then
+        return nil -- no new sample
+    end
+
+    -- testing if sample is stale
+    local now_s = millis():toint() * 0.001
+    if (now_s - t_s) > 1.0 then
+        return nil -- stale sample
+    end
+
+    -- updating location
+    local loc = Location()
+    loc:lat(math_helpers.deg_to_e7(lat_deg))
+    loc:lng(math_helpers.deg_to_e7(lon_deg))
+
+    last_bus_seq_seen = seq_2
+
+    return {
+        loc = loc,
+        vn = vn,
+        ve = ve,
+        seq = seq_2,
+        timestamp_ms = math.floor(t_s * 1000.0 + 0.5)
+    }
+end
+
 -- function to update build
 local function update_build()
     if kangaroo_loc_pending == nil then
@@ -161,7 +262,8 @@ function update()
         return update, 100
     end
 
-    local kangaroo_loc_latest = kangaroo_loc.get()
+    local kangaroo_loc_latest = read_bus_target()
+    --local kangaroo_loc_latest = kangaroo_loc.get()
 
     -- Case 1: kangaroo hasn't moved
     if kangaroo_loc_latest then
@@ -182,10 +284,16 @@ function update()
     if controller_busy and dubins_points_active then
         local point = dubins_points_active[dubins_point_index]
 
-        -- update next point in dubins weave, fly to the point, reach the ooint, move onto next
-        if point and fly_to_dubins_point(point) and dubins_point_reached(point) then
-            dubins_point_index = dubins_point_index + 1
+        -- update next point in dubins weave, fly to the point, reach the point, move onto next
+        if point and fly_to_dubins_point(point) then
+            if dubins_point_reached(point) then
+                dubins_point_index = dubins_point_index + 1
+            end
+        elseif point then
+            -- handle failure to set target
+            gcs:send_text(6, "Failed to set target for Dubins point")
         end
+
         -- reporting in mavlink
         local now_ms = millis():toint()
         if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
@@ -200,7 +308,6 @@ function update()
             update_build()
         end
     end
-
     return update, 100
 end
 

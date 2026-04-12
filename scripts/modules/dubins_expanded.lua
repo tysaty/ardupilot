@@ -185,6 +185,36 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     return theta, straight_length, eta, gamma, l
 end
 
+
+-- =========================================================
+-- Example RSR path generator
+-- Input headings in radians
+-- =========================================================
+local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local points = {}
+
+    local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
+    local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
+
+    local theta, straight_len = rsr_theta_and_distance(xRi, yRi, xRf, yRf)
+
+    -- First right arc
+    generate_arc_points(points, xRi, yRi, rho, psi_i, theta, delta_psi, true)
+
+    -- Straight
+    local last = points[#points]
+    local xs, ys = generate_straight_points(points, last.x, last.y, theta, straight_len, delta_d)
+
+    -- Final right arc
+    generate_arc_points(points, xRf, yRf, rho, theta, psi_f, delta_psi, true)
+
+    return points
+end
+
+
+lsl_theta_and_distance
+
+
 -- ---------------------------------------------------------
 -- (9) Arc point generation
 -- pn = [xc + rho*sin(psi_n), yc + rho*cos(psi_n)]
@@ -262,12 +292,51 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
 end
 
 -- generate LSL
+local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local points = {}
+    local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
+    local xLf, yLf = circle_center_Left(xf, yf, psi_f, rho)
+    local theta, straight_len = lsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+    -- Generate Left
+    generate_arc_points(points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
 
+    if #points == 0 then
+        return nil
+    end
+
+    -- Straight
+    local last = points[#points]
+    generate_straight_points(points, last.x, last.y, theta, straight_len, delta_d)
+    -- Generate right
+    generate_arc_points(points, xRf, yRf, rho, theta, psi_f, delta_psi, false)
+    return points
+end
 
 -- generate RSL
 
 
 -- generate RSR
+-- =========================================================
+-- Example RSR path generator
+-- Input headings in radians
+-- =========================================================
+local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local points = {}
+    local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
+    local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
+    local theta, straight_len = rsr_theta_and_distance(xRi, yRi, xRf, yRf)
+
+    -- First right arc
+    generate_arc_points(points, xRi, yRi, rho, psi_i, theta, delta_psi, true)
+    -- Straight
+    local last = points[#points]
+    local xs, ys = generate_straight_points(points, last.x, last.y, theta, straight_len, delta_d)
+    -- Final right arc
+    generate_arc_points(points, xRf, yRf, rho, theta, psi_f, delta_psi, true)
+
+    return points
+end
+
 
 -- convert local-frame points into absolute Location waypoints
 -- altitude is intentionally not owned here; control.lua sets altitude policy
@@ -326,11 +395,7 @@ local function build_path(kangaroo_state)
     local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
     local psi_f = math.atan(kangaroo_state.ve or 0, kangaroo_state.vn or 0)
 
-
-    -- tune these points
-    local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
-
-    --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
+    local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
     if rel_points == nil or #rel_points == 0 then
         return nil, "empty_relative_path"
     end
