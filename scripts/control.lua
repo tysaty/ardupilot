@@ -51,14 +51,13 @@ local kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
 
 local last_bus_seq_seen = 0
 
--- import kangaroo_bus (target) and dubins outputs (path)
---local kangaroo_loc = require("kangaroo_bus")
---local dubins_points = require("dubins_weave")
+-- import the dubins weaving module
 local dubins_points = require("dubins_weave_full")
 
 --math helpers
 local math_helpers = require("math_helpers")
 
+-- boot message
 gcs:send_text(4, "Control: loaded at boot")
 
 -- setting altitude (not captured in the )
@@ -125,7 +124,6 @@ local REACHED_STREAK_REQUIRED = 2
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1
-
 
 -- new function
 local function get_point_accept_radius_m(point, next_point)
@@ -262,13 +260,14 @@ local function read_bus_target()
 end
 
 -- function to update build
-local function update_build()
-    if kangaroo_loc_pending == nil then
-        return false
-    end
+local function update_build(kangaroo_loc_active)
 
-    kangaroo_loc_active = kangaroo_loc_pending
-    kangaroo_loc_pending = nil
+    -- if kangaroo_loc_pending == nil then
+    --     return false
+    -- end
+
+    -- kangaroo_loc_active = kangaroo_loc_pending
+    -- kangaroo_loc_pending = nil
 
     local build_result, build_info = dubins_points.build_path(kangaroo_loc_active)
     dubins_points_active = build_result
@@ -301,8 +300,8 @@ function update()
 
     -- Case 2: kangaroo has moved, Dubins curve to be activated
 
-    if not controller_busy then
-        update_build()   -- start path when idle
+    if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
+        update_build(kangaroo_loc_pending)
     end
 
     -- build the points of the Dubins path
@@ -314,9 +313,10 @@ function update()
         -- may be better suited with a 
         if point and fly_to_dubins_point(point) then
             if dubins_point_reached(point, next_point) then
-                gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+                --gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
                 dubins_point_index = dubins_point_index + 1
             end
+           -- gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
 
         elseif point then
             -- handle failure to set target
@@ -331,17 +331,18 @@ function update()
                 -- hold it until there is a fresh sample in 
                 kangaroo_loc_pending = kangaroo_loc_active
             end
-            --kangaroo_loc_pending = true
+            -- clear path exeuction state for rebuild
             dubins_points_active = nil
             dubins_point_index = nil
             dubins_point_count = nil
         end
     end
     
-    if not controller_busy and kangaroo_loc_pending then
+    -- if the controller has finished and there is a kangaroo location
+    if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
         kangaroo_loc_active = kangaroo_loc_pending
         kangaroo_loc_pending = nil
-        update_build()
+        update_build(kangaroo_loc_active)
     end
 
     return update, 100
