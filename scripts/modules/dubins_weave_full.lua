@@ -203,13 +203,6 @@ local function rsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     return theta, straight_length, eta, gamma, l
 
     ---
-        local l = math_helpers.dist2d(xLi, yLi, xRf, yRf)
-    local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
-    local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
-    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-    local theta = eta + gamma - (PI / 2.0)
-    return theta, straight_length, eta, gamma, l
-    ---
 end
 
 -- ---------------------------------------------------------
@@ -306,8 +299,8 @@ end
 local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local LSL_points = {}
     local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
-    local xLf, ylf = circle_center_left(xf, yf, psi_f, rho)
-    local theta, straight_len = lsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+    local xLf, yLf = circle_center_left(xf, yf, psi_f, rho)
+    local theta, straight_len = lsl_theta_and_distance(xLi, yLi, xLf, yLf, rho)
     -- Generate Left (first arc)
     generate_arc_points(LSL_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
     if #LSL_points == 0 then
@@ -317,7 +310,7 @@ local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local last = LSL_points[#LSL_points]
     generate_straight_points(LSL_points, last.x, last.y, theta, straight_len, delta_d)
     -- Generate Left
-    generate_arc_points(LSL_points, xLf, Lf, rho, theta, psi_f, delta_psi, false)
+    generate_arc_points(LSL_points, xLf, yLf, rho, theta, psi_f, delta_psi, false)
     return LSL_points
 end
 
@@ -325,8 +318,8 @@ end
 local function generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSL_oints = {}
     local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
-    local xLf, ylf = circle_center_left(xf, yf, psi_f, rho)
-    local theta, straight_len = rsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+    local xLf, yLf = circle_center_left(xf, yf, psi_f, rho)
+    local theta, straight_len = rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
     -- generate right
     generate_arc_points(RSL_oints, xRi, yRi, rho, psi_i, theta, delta_psi, true)
     if #RSL_oints == 0 then
@@ -344,8 +337,8 @@ end
 local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSR_points = {}
     local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
-    local xLf, ylf = circle_center_left(xf, yf, psi_f, rho)
-    local theta, straight_len = rsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+    local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
+    local theta, straight_len = rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     -- generate right
     generate_arc_points(RSR_points, xRi, yRi, rho, psi_i, theta, delta_psi, true)
     if #RSR_points == 0 then
@@ -391,14 +384,38 @@ end
 
 --- add in a measurement/optimsiation function
 local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local optimal_path = {}
+    local optimal_points = {}
+    -- generate each iteration of points
     local LSR_points = generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local RSR_points = generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local LSL_points = generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSL_points = generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSR_points = generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    -- count length
-    -- if LSR_Points is ... return optimal_path = LSR_points
-    return optimal_path
+
+    -- calculate distance - with guards if the value is a nil case
+    local LSR_distance = LSR_points and (#LSR_points * delta_d) or math.huge
+    local LSL_distance = LSL_points and (#LSL_points * delta_d) or math.huge
+    local RSL_distance = RSL_points and (#RSL_points * delta_d) or math.huge
+    local RSR_distance = RSR_points and (#RSR_points * delta_d) or math.huge
+
+    -- candidate list: keeping all values together 
+    local candidates = {
+        {distance = LSR_distance, points = LSR_points, name = "LSR"},
+        {distance = LSL_distance, points = LSL_points, name = "LSL"},
+        {distance = RSL_distance, points = RSL_points, name = "RSL"},
+        {distance = RSR_distance, points = RSR_points, name = "RSR"},
+    }
+
+    local min_val = nil
+
+    -- looping through minimum valuables
+    for i, candidate in ipairs(candidates) do
+        if not min_val or candidate.distance < min_val.distance then
+            min_val = candidate
+        end
+    end
+
+    -- return the optimal values
+    return min_val.distance, min_val.points, min_val.name
 end
 
 
@@ -432,21 +449,23 @@ local function build_path(kangaroo_state)
 
 
     -- tune these points
-    local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
-
-    -- call optimal path builder
-    -- local optimal_path = ... optimal_path()
+    local _, rel_points, _ = optimal_path(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
+    --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
 
     --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
     if rel_points == nil or #rel_points == 0 then
         return nil, "empty_relative_path"
     end
 
+    -- converting relative values to absolute points
     local abs_points = to_absolute_points(pos_abs, rel_points)
+
+    -- nil case
     if abs_points == nil or #abs_points == 0 then
         return nil, "absolute_conversion_failed"
     end
 
+    -- otherwise return
     return abs_points, {
         rho_m = rho,
         target_distance_m = math.sqrt(rel_ne:x() * rel_ne:x() + rel_ne:y() * rel_ne:y()),
@@ -457,6 +476,5 @@ end
 
 return {
     build_state = build_state,
-    --generate_lsr = generate_LSR,
     build_path = build_path
 }

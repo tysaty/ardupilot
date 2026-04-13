@@ -53,8 +53,8 @@ local last_bus_seq_seen = 0
 
 -- import kangaroo_bus (target) and dubins outputs (path)
 --local kangaroo_loc = require("kangaroo_bus")
-local dubins_points = require("dubins_weave")
-
+--local dubins_points = require("dubins_weave")
+local dubins_points = require("dubins_weave_full")
 
 --math helpers
 local math_helpers = require("math_helpers")
@@ -311,28 +311,27 @@ function update()
         local next_point = dubins_points_active[dubins_point_index + 1]
 
         -- update next point in dubins weave, fly to the point, reach the point, move onto next
+        -- may be better suited with a 
         if point and fly_to_dubins_point(point) then
             if dubins_point_reached(point, next_point) then
-                dubins_point_index = dubins_point_index + 1
                 gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+                dubins_point_index = dubins_point_index + 1
             end
 
         elseif point then
             -- handle failure to set target
             gcs:send_text(6, "Failed to set target for Dubins point")
         end
-        -- reporting in mavlink
-        --local now_ms = millis():toint()
-
-        -- if now_ms - last_report_ms >= REPORT_INTERVAL_MS then
-        --     last_report_ms = now_ms
-        --     gcs:send_text(6, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
-        -- end
 
         -- if the index is greater than the number of active points, i.e. end loop and go to next step
         if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
             controller_busy = false
-            kangaroo_loc_pending = true
+            -- test 13 April
+            if kangaroo_loc_pending = nil then
+                -- hold it until there is a fresh sample in 
+                kangaroo_loc_pending = kangaroo_loc_active
+            end
+            --kangaroo_loc_pending = true
             dubins_points_active = nil
             dubins_point_index = nil
             dubins_point_count = nil
