@@ -327,7 +327,7 @@ function update()
         if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
             controller_busy = false
             -- test 13 April
-            if kangaroo_loc_pending = nil then
+            if kangaroo_loc_pending == nil then
                 -- hold it until there is a fresh sample in 
                 kangaroo_loc_pending = kangaroo_loc_active
             end
