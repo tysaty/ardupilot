@@ -1,17 +1,34 @@
--- Dubins path implementation 
--- Implemented just as LSR for the time being - will expand following testing
+-- ---------------------------------------------------------
+-- Dubins Path Implementation
 
+-- a Dubins path generator, that returns the optimal
+-- path between two points (the plane and the target).
+-- Currently only implemneted in 2-dimensions, requries
+-- extnesion into 3D following successfuly tests. 
+
+-- Main reference for equeations:
+-- Lugo-Cárdenas, Israel & Flores, Gerardo & Salazar, Sergio & Lozano, R.. (2014). 
+-- Dubins path generation for a fixed wing UAV. 339-346. 10.1109/ICUAS.2014.6842272. 
+-- ---------------------------------------------------------
+
+-- ---------------------------------------------------------
 -- Section 1: Configuration 
 -- captures turn radius, waypoint acceptance, starting condition (i.e. left or right)
 -- setting absolute to be the same altitutde as the reference (MAJOR ASSUMPTION IN CODE - NEED TO FIX)
+-- ---------------------------------------------------------
+
 local ALT_FRAME_ABSOLUTE = 0
 local grav = 9.807
 local PHI_MAX_RAD = math.rad(45)
 
 local math_helpers = require("math_helpers")
 
+-- ---------------------------------------------------------
 -- Section 2: Current state values - vehicle configuration 
 -- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
+-- ---------------------------------------------------------
+
+-- processing position of plane
 local function process_imu_sample(sample)
     local pos = ahrs:get_position()
     local vel = ahrs:get_velocity_NED()
@@ -55,7 +72,7 @@ local function process_imu_sample(sample)
     }
 end
 
--- getting target value
+-- finding target location
 local function chase_target()
     local target = vehicle:get_target_location()
     if target == nil then
@@ -66,7 +83,6 @@ local function chase_target()
 end
 
 --  states for dubins calculations
--- build_state is not used in the control.lua file - only here for working
 local function build_state(sample)
     local current_state = process_imu_sample(sample)
     local target = chase_target()
@@ -94,11 +110,14 @@ local function build_state(sample)
     }
 end
 
--- Section 2: constructing Dubins values
+-- ---------------------------------------------------------
+-- Section 3: constructing Dubins curves
+-- ---------------------------------------------------------
+
 local PI = math.pi
 
 -- ---------------------------------------------------------
--- Dubins kinematic equations
+-- kinematic equations
 -- ---------------------------------------------------------
 local function dubins_kinematics(x, y, psi, Vt, omega, dt)
     local x_next = x + Vt * math.cos(psi) * dt
@@ -108,7 +127,7 @@ local function dubins_kinematics(x, y, psi, Vt, omega, dt)
 end
 
 -- ---------------------------------------------------------
--- (2) Heading rate induced by roll
+-- Heading rate induced by roll
 -- omega = g / Vt * tan(phi)
 -- ---------------------------------------------------------
 local function heading_rate_from_roll(phi, Vt, g)
@@ -116,7 +135,7 @@ local function heading_rate_from_roll(phi, Vt, g)
 end
 
 -- ---------------------------------------------------------
--- (3) Minimum turn radius
+-- Minimum turn radius
 -- rho = Vt^2 / (g * tan(phi_max))
 -- ---------------------------------------------------------
 local function min_turn_radius(Vt, phi_max, g)
@@ -124,7 +143,7 @@ local function min_turn_radius(Vt, phi_max, g)
 end
 
 -- ---------------------------------------------------------
--- (4) Circle centers
+-- Circle centers
 -- ---------------------------------------------------------
 local function circle_center_right(x, y, psi, rho)
     local xc = x + rho * math.cos(psi)
@@ -155,10 +174,8 @@ end
 -- LSR Geometry
 -- theta = eta + gamma - pi/2
 -- eta   = pi/2 + atan2(yRf - yLi, xRf - xLi)
--- gamma = acos(2*rho / d)
--- straight_length = sqrt(l^2 - 4*rho^2)
 -- l = distance(CL_i, CR_f) (i.e. distance between centroids)
---  straight_length = sqrt(l^2 - 4*rho^2)
+--   straight_length = sqrt(l^2 - 4*rho^2)
 --  gamma = acos( clamp(2*rho / l, -1, 1) )
 -- ---------------------------------------------------------
 local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
@@ -193,7 +210,6 @@ end
 -- straight_length = sqrt(l^2 - 4*rho^2)
 -- ---------------------------------------------------------
 
---- up to here...
 local function rsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local l = math_helpers.dist2d(xLi, yLi, xRf, yRf)
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
@@ -201,14 +217,13 @@ local function rsl_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     local theta = eta + gamma - (PI / 2.0)
     return theta, straight_length, eta, gamma, l
-
-    ---
 end
 
 -- ---------------------------------------------------------
 -- RSR Geometry
 -- theta = pi/2 - atan2(yRf - yRi, xRf - xRi)
 -- straight_length = sqrt((xRf - xRi)^2 + (yRf - yRi)^2)
+-- no gamma because of external tangents 
 -- ---------------------------------------------------------
 local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local dx = xRf - xRi
@@ -219,8 +234,8 @@ local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
 end
 
 -- ---------------------------------------------------------
--- (9) Arc point generation
--- pn = [xc + rho*sin(psi_n), yc + rho*cos(psi_n)]
+-- Arc point generation
+-- pn = xc + rho*sin(psi_n), yc + rho*cos(psi_n)
 -- Used by the paper for both right and left arc point updates
 -- ---------------------------------------------------------
 local function arc_point(xc, yc, rho, psi_n)
@@ -231,7 +246,7 @@ end
 
 
 -- ---------------------------------------------------------
--- (10) Straight segment point generation
+-- Straight segment point generation
 -- x_n = x_(n-1) + delta_d * sin(theta)
 -- y_n = y_(n-1) + delta_d * cos(theta)
 -- ---------------------------------------------------------
@@ -241,25 +256,43 @@ local function straight_step(x_prev, y_prev, theta, delta_d)
     return x, y
 end
 
--- Section 3 - generating segments
 
--- generating arc points
+
+-- ---------------------------------------------------------
+-- Section 4: generating curves
+-- ---------------------------------------------------------
+
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
     local psi = psi_start
     if increasing then
-        while psi <= psi_end do
+        -- normalise so psi_end >= psi_start (left/CCW arc); cap at one full circle
+        if psi_end < psi_start then
+            psi_end = psi_end + 2 * PI
+        end
+        if psi_end - psi_start > 2 * PI then
+            psi_end = psi_start + 2 * PI
+        end
+        while psi <= psi_end + 1e-9 do
             local x, y = arc_point(xc, yc, rho, psi)
             points[#points + 1] = {x = x, y = y, psi = psi}
             psi = psi + delta_psi
         end
     else
-        while psi >= psi_end do
+        -- normalise so psi_end <= psi_start (right/CW arc); cap at one full circle
+        if psi_end > psi_start then
+            psi_end = psi_end - 2 * PI
+        end
+        if psi_start - psi_end > 2 * PI then
+            psi_end = psi_start - 2 * PI
+        end
+        while psi >= psi_end - 1e-9 do
             local x, y = arc_point(xc, yc, rho, psi)
             points[#points + 1] = {x = x, y = y, psi = psi}
             psi = psi - delta_psi
         end
     end
 end
+
 -- generate striaght points
 local function generate_straight_points(points, x_start, y_start, theta, total_d, delta_d)
     local x = x_start
@@ -353,36 +386,11 @@ local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
 end
 
 
--- convert local-frame points into absolute Location waypoints
--- altitude is intentionally not owned here; control.lua sets altitude policy
-local function to_absolute_points(origin_loc_abs, rel_points)
-    if origin_loc_abs == nil or rel_points == nil or #rel_points == 0 then
-        return nil
-    end
-
-    local abs_points = {}
-    for i = 1, #rel_points do
-        local rel = rel_points[i]
-        if rel ~= nil and rel.x ~= nil and rel.y ~= nil then
-            local wp = origin_loc_abs:copy()
-            wp:offset(rel.x, rel.y)
-            abs_points[#abs_points + 1] = {
-                loc = wp,
-                psi = rel.psi,
-                x = rel.x,
-                y = rel.y
-            }
-        end
-    end
-
-    if #abs_points == 0 then
-        return nil
-    end
-
-    return abs_points
-end
-
+-- ---------------------------------------------------------
+-- Section 5: Optimal paths
 --- add in a measurement/optimsiation function
+-- --------------------------------------------------------
+
 local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local optimal_points = {}
     -- generate each iteration of points
@@ -419,7 +427,45 @@ local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
 end
 
 
+-- ---------------------------------------------------------
+-- Section 6: Local to Absolute Values
+-- convert local-frame points into absolute Location waypoints
+-- altitude is intentionally not owned here; control.lua sets altitude policy
+-- --------------------------------------------------------
+
+local function to_absolute_points(origin_loc_abs, rel_points)
+    if origin_loc_abs == nil or rel_points == nil or #rel_points == 0 then
+        return nil
+    end
+
+    local abs_points = {}
+    for i = 1, #rel_points do
+        local rel = rel_points[i]
+        if rel ~= nil and rel.x ~= nil and rel.y ~= nil then
+            local wp = origin_loc_abs:copy()
+            wp:offset(rel.x, rel.y)
+            abs_points[#abs_points + 1] = {
+                loc = wp,
+                psi = rel.psi,
+                x = rel.x,
+                y = rel.y
+            }
+        end
+    end
+
+    if #abs_points == 0 then
+        return nil
+    end
+
+    return abs_points
+end
+
+
+-- ---------------------------------------------------------
+-- Section 7: Build Path
 -- get the target location from the kangaroo bus (consumed in control.lua)
+-- --------------------------------------------------------
+
 local function build_path(kangaroo_state)
     -- handling 0 case
     if kangaroo_state == nil or kangaroo_state.loc == nil then
@@ -447,7 +493,7 @@ local function build_path(kangaroo_state)
     local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
     local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
 
-
+    -- prior math for psi_f
     --local psi_f = math.atan(kangaroo_state.ve or 0, kangaroo_state.vn or 0)
 
     -- updated math on psi_f
@@ -466,8 +512,9 @@ local function build_path(kangaroo_state)
     --- optimal path
     --local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
 
-    local _, rel_points, _ = optimal_path(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 50.0)
-    --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
+    -- this requires optimsiation
+    --local _, rel_points, _ = optimal_path(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 50.0)
+    local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
 
     --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
     if rel_points == nil or #rel_points == 0 then

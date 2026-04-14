@@ -1,12 +1,22 @@
--- Kangaroo 2
+-- ---------------------------------------------------------
+-- Kangaroo.lua
 -- Plane SITL helper that creates a virtual target starting near home and
 -- moves it in random hop-like bursts. 
--- Control logic is controlled in control.lua
 
--- initial vlaues
+-- Control logic is controlled in control.lua
+-- ---------------------------------------------------------
+
+
+
+-- ---------------------------------------------------------
+-- Section 1. Initial values
+-- ---------------------------------------------------------
+
+-- setting alt_frame to zero
 local ALT_FRAME_ABSOLUTE = 0
 local MAV_SEVERITY = {EMERGENCY = 0, ALERT = 1, CRITICAL = 2, ERROR = 3, WARNING = 4, NOTICE = 5, INFO = 6, DEBUG = 7}
 
+-- for delcared parameters
 local PARAM_TABLE_PREFIX = "KANG_"
 local PARAM_TABLE_KEY = nil
 
@@ -14,12 +24,13 @@ gcs:send_text(MAV_SEVERITY.WARNING, "KANG: loaded at boot")
 
 -- use the kangaroo_bus for standardised passing of messages
 --local kangaroo_bus = require("kangaroo_bus")
-
 local param_helpers = require("param_helpers")
 local math_helpers = require("math_helpers")
 
 
+-- ---------------------------------------------------------
 -- setting up bus_sequence - sequence, timestamp, lat lon, and velocity 
+-- ---------------------------------------------------------
 
 local bus_seq = Parameter()
 assert(bus_seq:init("SCR_USER1"), "missing SCR_USER1")
@@ -40,7 +51,6 @@ local bus_ve = Parameter()
 assert(bus_ve:init("SCR_USER6"), "missing SCR_USER6")
 
 -- error handling
-
 for key = 0, 200 do
     if param:add_table(key, PARAM_TABLE_PREFIX, 14) then
         PARAM_TABLE_KEY = key
@@ -50,6 +60,12 @@ for key = 0, 200 do
 end
 
 assert(PARAM_TABLE_KEY ~= nil, "KANG: no free param table key")
+
+
+-- ---------------------------------------------------------
+-- Section 2. Parameters
+-- Parameters to support quick debugging of Kangaroo motion
+-- ---------------------------------------------------------
 
 -- parameter tables
 --[[
@@ -159,7 +175,6 @@ local KANG_PAUSE_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @User: Standard
 --]]
 local KANG_PRINT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PRINT", 11, 1)
-
 
 --[[
   // @Param: KANG_PRT_S
@@ -460,13 +475,14 @@ math.random()
 
 gcs:send_text(MAV_SEVERITY.WARNING, "KANG: loaded, switch Plane to GUIDED after takeoff")
 
-local function protected_wrapper()
+local function protected_return()
     local success, err = pcall(update)
     if not success then
         gcs:send_text(MAV_SEVERITY.ERROR, "KANG: " .. err)
-        return protected_wrapper, 1000
+        -- send after a second
+        return protected_return, 1000
     end
-    return protected_wrapper, 200
+    return protected_return, 200
 end
 
-return protected_wrapper()
+return protected_return()

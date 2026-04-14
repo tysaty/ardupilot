@@ -21,7 +21,6 @@ local KANG_ALT_M_FALLBACK = 80.0
 
 
 -- establishing flags for the parameters in 
-
 local bus_seq_param = Parameter()
 local bus_seq_ready = bus_seq_param:init("SCR_USER1")
 assert(bus_seq_ready, "missing SCR_USER1")
@@ -54,7 +53,6 @@ local last_bus_seq_seen = 0
 -- import the dubins weaving module
 local dubins_points = require("dubins_weave_full")
 -- LSR implementation
-
 --local dubins_points = require("dubins_weave")
 --math helpers
 local math_helpers = require("math_helpers")
@@ -410,12 +408,15 @@ function update()
         kangaroo_loc_pending = kangaroo_loc_latest
     end
 
-     -- if the controller has finished and there is a kangaroo location
+    -- if the controller has finished and there is a kangaroo location
     if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
-        kangaroo_loc_active = kangaroo_loc_pending
-        kangaroo_loc_pending = nil
-        update_build(kangaroo_loc_active)
-        gcs:send_text(4, string.format("New Dubins Build!"))
+        local success = update_build(kangaroo_loc_pending)
+        if success then
+            kangaroo_loc_active = kangaroo_loc_pending
+            kangaroo_loc_pending = nil
+            gcs:send_text(4, "New Dubins Build!")
+        end
+        -- on failure kangaroo_loc_pending stays so the next tick retries with a fresh sample
     end
 
    -- build the points of the Dubins path
@@ -506,16 +507,11 @@ function update()
             reached_streak = 0
             reached_index = -1
 
-            -- Recycle active loc only if fresh enough AND no pending sample already waiting
+            -- If no fresh bus sample is already waiting, recycle the last known location
+            -- so the rebuild trigger fires next tick even if the bus is momentarily quiet
             if kangaroo_loc_pending == nil and kangaroo_loc_active ~= nil then
-                local now_s = millis():toint() * 0.001
-                local age_s = now_s - (kangaroo_loc_active.timestamp_ms * 0.001)
-                if age_s < 3.0 then
-                    kangaroo_loc_pending = kangaroo_loc_active
-                    gcs:send_text(6, "Control: recycling active loc for rebuild")
-                else
-                    gcs:send_text(4, "Control: active loc stale, waiting for fresh bus sample")
-                end
+                kangaroo_loc_pending = kangaroo_loc_active
+                gcs:send_text(6, "Control: recycling active loc for rebuild")
             end
 
             kangaroo_loc_active = nil
