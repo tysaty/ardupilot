@@ -250,6 +250,7 @@ end
 
 -- generate next point
 local function choose_next_segment(now_ms)
+
     local speed_min, speed_max = math_helpers.ordered_range(KANG_SPD_MIN:get(), KANG_SPD_MAX:get(), 1)
     local hop_min, hop_max = math_helpers.ordered_range(KANG_HOP_MIN:get(), KANG_HOP_MAX:get(), 1)
     local bound_m = math_helpers.clamp(KANG_BOUND_M:get(), 50, 3000)
@@ -337,7 +338,7 @@ local function ensure_anchor(now_ms)
     return true
 end
 
--- move the randomisation function forward in time
+-- move the function forward in time
 local function integrate_target(now_ms)
     if not target_ready then
         return
@@ -450,8 +451,7 @@ local function update()
     end
     integrate_target(now_ms)
     publish_bus(now_ms)
-    --kangaroo_bus.publish(target_loc, target_vn, target_ve, heading_deg, speed_mps, now_ms)
-    report_target(now_ms)
+    --report_target(now_ms)
 end
 
 math.randomseed(millis():toint())

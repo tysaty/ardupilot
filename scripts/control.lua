@@ -53,7 +53,9 @@ local last_bus_seq_seen = 0
 
 -- import the dubins weaving module
 local dubins_points = require("dubins_weave_full")
+-- LSR implementation
 
+--local dubins_points = require("dubins_weave")
 --math helpers
 local math_helpers = require("math_helpers")
 
@@ -116,41 +118,63 @@ end
 
 -- tuning aparameters
 -- handle an acceptable radius from point
-local WP_ACCEPT_RADIUS_M = 20.0
-local MIN_WP_ACCEPT_RADIUS_M = 5.0
+--local WP_ACCEPT_RADIUS_M = 30.0
+--local MIN_WP_ACCEPT_RADIUS_M = 1.0
+-- test
+local WP_ACCEPT_RADIUS_M = 40.0
+local MIN_WP_ACCEPT_RADIUS_M = 20.0 
+
 -- consecutive hits required to be in radius before proceeding to next point
-local REACHED_STREAK_REQUIRED = 2
+local REACHED_STREAK_REQUIRED = 1
 
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1
 
--- new function
+-- old function
+-- local function get_point_accept_radius_m(point, next_point)
+    
+--     local accept_radius_m = WP_ACCEPT_RADIUS_M
+--     if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
+--         return accept_radius_m
+--     end
+
+--     local spacing_m = point.loc:get_distance(next_point.loc)
+--     if spacing_m == nil or spacing_m <= 0 then
+--         return accept_radius_m
+--     end
+
+--     -- keep acceptance radius below half waypoint spacing so adjacent points
+--     -- cannot both be counted as reached from a single position sample.
+--     local max_non_overlapping_radius_m = spacing_m * 0.45
+--     if max_non_overlapping_radius_m < accept_radius_m then
+--         accept_radius_m = math.max(MIN_WP_ACCEPT_RADIUS_M, max_non_overlapping_radius_m)
+--     end
+
+--     return accept_radius_m
+-- end
+
+-- test - revised
 local function get_point_accept_radius_m(point, next_point)
     local accept_radius_m = WP_ACCEPT_RADIUS_M
     if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
         return accept_radius_m
     end
-
     local spacing_m = point.loc:get_distance(next_point.loc)
     if spacing_m == nil or spacing_m <= 0 then
         return accept_radius_m
     end
-
-    -- keep acceptance radius below half waypoint spacing so adjacent points
-    -- cannot both be counted as reached from a single position sample.
-    local max_non_overlapping_radius_m = spacing_m * 0.45
-    if max_non_overlapping_radius_m < accept_radius_m then
-        accept_radius_m = math.max(MIN_WP_ACCEPT_RADIUS_M, max_non_overlapping_radius_m)
-    end
-
-    return accept_radius_m
+    -- never let radius exceed 45% of spacing (avoid double-counting)
+    -- but never go below MIN_WP_ACCEPT_RADIUS_M
+    local max_radius = spacing_m * 0.45
+    return math.max(MIN_WP_ACCEPT_RADIUS_M, math.min(accept_radius_m, max_radius))
 end
+
+
 
 -- if the point has been reached...
 function dubins_point_reached(point, next_point)
 
-    
     -- if no points, return a false
     if point == nil then
         reached_streak = 0
@@ -171,7 +195,15 @@ function dubins_point_reached(point, next_point)
     end
 
     -- checking distance to the active Dubins point location
-    local dist_m = pos:get_distance(point.loc)
+    --local dist_m = pos:get_distance(point.loc)
+
+    -- horizontal distance
+    local dist_m = pos:get_distance_NE(point.loc)
+
+    -- take euclidean distance if not nil
+    if dist_m ~= nil then
+        dist_m = math.sqrt(dist_m:x() * dist_m:x() + dist_m:y() * dist_m:y())
+    end
 
     -- if the location is nil
     if dist_m == nil then
@@ -259,17 +291,22 @@ local function read_bus_target()
     }
 end
 
+-- to avoid a rebulid storm...
+local MIN_DUBINS_POINTS = 5
+
 -- function to update build
 local function update_build(kangaroo_loc_active)
 
-    -- if kangaroo_loc_pending == nil then
-    --     return false
-    -- end
-
-    -- kangaroo_loc_active = kangaroo_loc_pending
-    -- kangaroo_loc_pending = nil
-
     local build_result, build_info = dubins_points.build_path(kangaroo_loc_active)
+
+    -- reject short paths
+    if build_result ~= nil and #build_result < MIN_DUBINS_POINTS then
+        gcs:send_text(4, string.format("Dubins build rejected: only %d points", #build_result))
+        build_result = nil
+        build_info = "degenerate_path"
+    end
+
+    -- generate result
     dubins_points_active = build_result
     dubins_point_index = 1
     dubins_point_count = (dubins_points_active ~= nil) and #dubins_points_active or nil
@@ -278,9 +315,86 @@ local function update_build(kangaroo_loc_active)
     if not controller_busy and build_info ~= nil then
         gcs:send_text(6, "Dubins build failed: " .. tostring(build_info))
     end
-
+    -- return true for controller_busy
     return controller_busy
 end
+
+-- update to run main logic
+-- function update()
+--     -- only run if vehcile is in AUTO or GUIDED
+--     local current_mode = vehicle:get_mode()
+--     -- if statement to manage when not AUTO or not GUIDED
+--     if current_mode ~= MODE_AUTO and current_mode ~= MODE_GUIDED then 
+--         return update, 100
+--     end
+
+--     -------
+--     -- Three target states for state machine
+--     -- 1. kanagroo_loc_latest, the newest bus sample
+--     -- 2. kangaroo_loc_pending, the allocated target to build from
+--     -- 3. kangaroo_loc_active, the target currently being weaved in
+--     -------
+
+--     -------
+--     --- State 1: Building a new weave when the controller is idle
+--     local kangaroo_loc_latest = read_bus_target()
+    
+--     if kangaroo_loc_latest then
+--         kangaroo_loc_pending = kangaroo_loc_latest
+--     end
+
+--     if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
+--         kangaroo_loc_active = kangaroo_loc_pending
+--         kangaroo_loc_pending = nil
+--         update_build(kangaroo_loc_active)
+--     end
+
+--     -----
+--     --- State 2: Controller is busy, locked into state
+--     if controller_busy and dubins_points_active then
+--         local point = dubins_points_active[dubins_point_index]
+--         local next_point = dubins_points_active[dubins_point_index + 1]
+
+--         -- update next point in dubins weave, fly to the point, reach the point, move onto next
+--         -- may be better suited with a 
+--         if point and fly_to_dubins_point(point) then
+--             if dubins_point_reached(point, next_point) then
+--                 --gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+--                 dubins_point_index = dubins_point_index + 1
+--             end
+--            -- gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+
+--         elseif point then
+--             -- handle failure to set target
+--             gcs:send_text(6, "Failed to set target for Dubins point")
+--         end
+
+--         -- if the index is greater than the number of active points, i.e. end loop and go to next step
+--         if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
+--             -- test for fresh sample
+--             -- clear path exeuction state for rebuild
+--             controller_busy = false
+--             dubins_points_active = nil
+--             dubins_point_index = nil
+--             dubins_point_count = nil
+--             reached_streak = 0
+--             reached_index = -1
+
+--             --- State 3 - Target is waiting fora  reset
+--             if kangaroo_loc_pending == nil then
+--                 -- hold it until there is a fresh sample in 
+--                 kangaroo_loc_pending = kangaroo_loc_active
+--             end
+
+--             --clear out kangaroo_loc_active
+--             kangaroo_loc_active = nil
+--         end
+
+--     end
+
+--     return update, 100
+-- end
+
 
 -- update logic
 function update()
@@ -291,61 +405,125 @@ function update()
     end
 
     local kangaroo_loc_latest = read_bus_target()
-    --local kangaroo_loc_latest = kangaroo_loc.get()
 
-    -- Case 1: kangaroo hasn't moved
     if kangaroo_loc_latest then
         kangaroo_loc_pending = kangaroo_loc_latest
     end
 
-    -- Case 2: kangaroo has moved, Dubins curve to be activated
-
+     -- if the controller has finished and there is a kangaroo location
     if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
-        update_build(kangaroo_loc_pending)
+        kangaroo_loc_active = kangaroo_loc_pending
+        kangaroo_loc_pending = nil
+        update_build(kangaroo_loc_active)
+        gcs:send_text(4, string.format("New Dubins Build!"))
     end
 
-    -- build the points of the Dubins path
+   -- build the points of the Dubins path
     if controller_busy and dubins_points_active then
         local point = dubins_points_active[dubins_point_index]
         local next_point = dubins_points_active[dubins_point_index + 1]
+
+        -- count
+        -- if dubins_point_count ~= nil and dubins_point_index ~= nil then
+        --     local now_ms = millis():toint()
+        --     if (now_ms - last_report_ms) >= REPORT_INTERVAL_MS then
+        --         local idx = math.min(dubins_point_index, dubins_point_count)
+        --         gcs:send_text(4, string.format("Dubins point %d/%d", idx, dubins_point_count))
+                
+        --         last_report_ms = now_ms
+        --     end
+        -- end
+        if dubins_point_count ~= nil and dubins_point_index ~= nil then
+            local now_ms = millis():toint()
+            if (now_ms - last_report_ms) >= REPORT_INTERVAL_MS then
+                local pos2 = ahrs:get_position()
+                local pt = dubins_points_active[dubins_point_index]
+                local dist_2d = -1
+                if pos2 and pt then
+                    local dn = pos2:get_distance_NE(pt.loc)
+                    if dn then
+                        dist_2d = math.sqrt(dn:x() * dn:x() + dn:y() * dn:y())
+                    end
+                end
+                gcs:send_text(4, string.format("Dubins point %d/%d dist=%.1fm",
+                    dubins_point_index, dubins_point_count, dist_2d))
+                last_report_ms = now_ms
+            end
+        end
 
         -- update next point in dubins weave, fly to the point, reach the point, move onto next
         -- may be better suited with a 
         if point and fly_to_dubins_point(point) then
             if dubins_point_reached(point, next_point) then
-                --gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+
+                gcs:send_text(4, string.format("Reached Dubins point %d/%d", dubins_point_index, dubins_point_count or 0))
+
+                -- increase increment
                 dubins_point_index = dubins_point_index + 1
+                --gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
+
             end
            -- gcs:send_text(4, string.format("Dubins idx=%d/%d", dubins_point_index or 0, dubins_point_count or 0))
 
         elseif point then
             -- handle failure to set target
-            gcs:send_text(6, "Failed to set target for Dubins point")
+            gcs:send_text(4, "Failed to set target for Dubins point")
         end
 
-        -- if the index is greater than the number of active points, i.e. end loop and go to next step
+        --- old try
+        -- -- if the index is greater than the number of active points, i.e. end loop and go to next step
+        -- if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
+        --     gcs:send_text(4, string.format("End of Dubins Curve!"))
+        --     controller_busy = false
+        --     dubins_points_active = nil
+        --     dubins_point_index = nil
+        --     dubins_point_count = nil
+        --     -- new content
+        --     reached_streak = 0
+        --     reached_index = -1
+        --     -- test 13 April
+        --     if kangaroo_loc_pending == nil then
+        --         -- hold it until there is a fresh sample in 
+        --         kangaroo_loc_pending = kangaroo_loc_active
+        --     end
+        --     -- clear path exeuction state for rebuild
+        --     --dubins_points_active = nil
+        --     --dubins_point_index = nil
+        --     --dubins_point_count = nil
+
+        --     kangaroo_loc_active = nil
+        -- end
+
+        --- new try
         if dubins_point_count ~= nil and dubins_point_index > dubins_point_count then
+            gcs:send_text(4, "End of Dubins Curve!")
+
+            -- Clear execution state
             controller_busy = false
-            -- test 13 April
-            if kangaroo_loc_pending == nil then
-                -- hold it until there is a fresh sample in 
-                kangaroo_loc_pending = kangaroo_loc_active
-            end
-            -- clear path exeuction state for rebuild
             dubins_points_active = nil
             dubins_point_index = nil
             dubins_point_count = nil
+            reached_streak = 0
+            reached_index = -1
+
+            -- Recycle active loc only if fresh enough AND no pending sample already waiting
+            if kangaroo_loc_pending == nil and kangaroo_loc_active ~= nil then
+                local now_s = millis():toint() * 0.001
+                local age_s = now_s - (kangaroo_loc_active.timestamp_ms * 0.001)
+                if age_s < 3.0 then
+                    kangaroo_loc_pending = kangaroo_loc_active
+                    gcs:send_text(6, "Control: recycling active loc for rebuild")
+                else
+                    gcs:send_text(4, "Control: active loc stale, waiting for fresh bus sample")
+                end
+            end
+
+            kangaroo_loc_active = nil
+            -- Rebuild happens next tick via the normal not-busy + pending check
         end
     end
     
-    -- if the controller has finished and there is a kangaroo location
-    if not controller_busy and kangaroo_loc_pending and kangaroo_loc_pending.loc then
-        kangaroo_loc_active = kangaroo_loc_pending
-        kangaroo_loc_pending = nil
-        update_build(kangaroo_loc_active)
-    end
-
-    return update, 100
+    return update, 200
 end
 
 return update()

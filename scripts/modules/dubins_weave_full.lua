@@ -442,14 +442,31 @@ local function build_path(kangaroo_state)
     if rel_ne == nil then
         return nil, "rel_ne_unavailable"
     end
+
     -- velocity
     local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
     local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
-    local psi_f = math.atan(kangaroo_state.ve or 0, kangaroo_state.vn or 0)
 
+
+    --local psi_f = math.atan(kangaroo_state.ve or 0, kangaroo_state.vn or 0)
+
+    -- updated math on psi_f
+    local vn_f = kangaroo_state.vn or 0
+    local ve_f = kangaroo_state.ve or 0
+    local speed_f = math.sqrt(vn_f * vn_f + ve_f * ve_f)
+    local psi_f
+    if speed_f > 0.5 then   -- only trust heading if target is actually moving
+        psi_f = math.atan(ve_f, vn_f)
+    else
+        -- fall back: aim the terminal heading toward the kangaroo from the plane
+        psi_f = math.atan(rel_ne:y(), rel_ne:x())
+    end
 
     -- tune these points
-    local _, rel_points, _ = optimal_path(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
+    --- optimal path
+    --local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+
+    local _, rel_points, _ = optimal_path(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 50.0)
     --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(15), 15.0)
 
     --local rel_points = generate_LSR(0.0, 0.0, yaw, rel_ne:x(), rel_ne:y(), psi_f, rho, math.rad(5), 5.0)
