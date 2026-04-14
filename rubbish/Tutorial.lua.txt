@@ -1,0 +1,156 @@
+-- Tutorial.lua
+-- A compact Lua walkthrough for ArduPilot scripting.
+--
+-- Read this file from top to bottom. Each section shows a core Lua concept
+-- that you need to write, read, and edit Lua scripts confidently.
+--
+-- ArduPilot note:
+-- Most scripts follow the same pattern used at the bottom of this file:
+-- define helpers, define update(), then return update().
+
+-- SECTION 1: COMMENTS
+-- Single line comments start with two dashes.
+-- Long comments can use Lua's bracket form, for example: [=[ comment ]=]
+
+-- SECTION 2: VARIABLES AND BASIC TYPES
+-- Prefer local variables. They stay scoped to this file or function.
+local script_name = "Tutorial"
+local lesson_interval_ms = 4000
+local lesson_index = 1
+
+-- Lua's common types:
+local number_value = 42
+local string_value = "Lua is lightweight"
+local boolean_value = true
+local empty_value = nil
+
+-- SECTION 3: TABLES
+-- Tables are Lua's main data structure. They can act like arrays, maps, or objects.
+local topics = {
+    "Use local variables by default.",
+    "Tables hold related values and nested data.",
+    "Functions can be stored in variables and passed around.",
+    "if/elseif/else controls branching.",
+    "for and while loops repeat work.",
+    "Use .. to join strings and string.format() for readable output.",
+    "ArduPilot scripts usually return update, delay_ms.",
+    "Use : for method calls such as gcs:send_text(...).",
+}
+
+local vehicle_state = {
+    mode = "GUIDED",
+    retry_count = 0,
+    gains = { p = 0.20, i = 0.05, d = 0.01 },
+}
+
+-- SECTION 4: FUNCTIONS
+-- Functions can be named or local. Use local helper functions unless they
+-- must be visible globally.
+local function clamp(value, min_value, max_value)
+    if value < min_value then
+        return min_value
+    end
+    if value > max_value then
+        return max_value
+    end
+    return value
+end
+
+local function describe_mode(mode_name)
+    if mode_name == "AUTO" then
+        return "AUTO runs mission logic"
+    elseif mode_name == "GUIDED" then
+        return "GUIDED accepts script or GCS commands"
+    else
+        return "Mode: " .. tostring(mode_name)
+    end
+end
+
+-- SECTION 5: LOOPS
+local function sum_first_n(limit)
+    local total = 0
+
+    -- Numeric for loop: for start, finish, step do
+    for i = 1, limit, 1 do
+        total = total + i
+    end
+
+    return total
+end
+
+local function countdown_text(start_value)
+    local current = start_value
+    local parts = {}
+
+    -- while loops run until their condition becomes false
+    while current > 0 do
+        parts[#parts + 1] = tostring(current)
+        current = current - 1
+    end
+
+    return table.concat(parts, ", ")
+end
+
+-- SECTION 6: METHODS AND THE ':' SYNTAX
+-- obj:method(x) is shorthand for obj.method(obj, x)
+local function send_info(text)
+    gcs:send_text(0, text)
+end
+
+-- SECTION 7: READING CODE
+-- When reading Lua, look for:
+-- 1. locals declared at the top
+-- 2. helper functions
+-- 3. tables holding state/config
+-- 4. the main update() loop
+--
+-- In ArduPilot, API definitions are documented in:
+-- libraries/AP_Scripting/docs/docs.lua
+--
+-- SECTION 7A: EDITING TIPS
+-- 1. Change one local variable or helper at a time.
+-- 2. Keep related values inside tables so edits stay grouped.
+-- 3. Prefer small functions with descriptive names.
+-- 4. When you see obj:method(...), keep the ':' unless you also pass obj manually.
+
+local function build_summary()
+    local gain_total = vehicle_state.gains.p + vehicle_state.gains.i + vehicle_state.gains.d
+    local clamped_gain = clamp(gain_total, 0.0, 1.0)
+    local summed_numbers = sum_first_n(5)
+
+    -- string.format() is often clearer than many concatenations
+    return string.format(
+        "%s | n=%d | bool=%s | nil=%s | sum=%d | gains=%.2f | runs=%d",
+        script_name,
+        number_value,
+        tostring(boolean_value),
+        tostring(empty_value),
+        summed_numbers,
+        clamped_gain,
+        vehicle_state.retry_count
+    )
+end
+
+-- SECTION 8: THE MAIN SCRIPT LOOP
+-- update() runs, does work, then returns itself with a delay in milliseconds.
+local function update()
+    local mode_text = describe_mode(vehicle_state.mode)
+    local countdown = countdown_text(3)
+    local summary = build_summary()
+
+    send_info(summary)
+    send_info("String example: " .. string_value)
+    send_info(mode_text)
+    send_info("Loop example countdown: " .. countdown)
+    send_info("Lesson " .. tostring(lesson_index) .. ": " .. topics[lesson_index])
+
+    vehicle_state.retry_count = vehicle_state.retry_count + 1
+    lesson_index = lesson_index + 1
+    if lesson_index > #topics then
+        lesson_index = 1
+    end
+
+    return update, lesson_interval_ms
+end
+
+return update()
