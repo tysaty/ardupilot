@@ -27,7 +27,8 @@ gcs:send_text(MAV_SEVERITY.WARNING, "KANG: loaded at boot")
 local param_helpers = require("param_helpers")
 local math_helpers = require("math_helpers")
 
--- initialise mavlink tx (no rx needed)
+
+-- initialise mavlink (no rx needed, only tx)
 mavlink:init(1, 0)
 
 -- ADSB flags bitmask values
@@ -509,6 +510,7 @@ local function update()
         return
     end
     integrate_target(now_ms)
+    publish_bus(now_ms)
     if target_loc ~= nil then
         send_ADSB_VEHICLE(
             target_loc:lat() * 1.0e-7,

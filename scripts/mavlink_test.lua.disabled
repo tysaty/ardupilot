@@ -1,4 +1,5 @@
 --[[
+--- https://github.com/ardupilot/ardupilot/pull/32785
     adsb_send.lua: send a simulated ADSB vehicle flying a 500m radius circle
 
     This script demonstrates how to send ADSB_VEHICLE MAVLink messages using
