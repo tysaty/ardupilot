@@ -9,8 +9,11 @@ Example:
 import argparse
 import csv
 import math
+
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
+from typing import Optional
+
 import matplotlib.pyplot as plt
 
 # radius of earth

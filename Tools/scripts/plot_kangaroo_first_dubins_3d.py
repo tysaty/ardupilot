@@ -9,8 +9,12 @@ Example:
 import argparse
 import csv
 import math
+
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List
+from typing import Optional
+from typing import Tuple
+
 import matplotlib.pyplot as plt
 
 EARTH_RADIUS_M = 6378137.0
