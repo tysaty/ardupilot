@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Plot plane and kangaroo traces in 3D from kangaroo_plane_logger.lua CSV output.
 

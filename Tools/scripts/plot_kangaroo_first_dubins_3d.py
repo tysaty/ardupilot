@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """
 Plot the first Dubins curve logged by kangaroo_first_dubins_logger.lua.
 
