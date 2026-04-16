@@ -60,6 +60,41 @@ local math_helpers = require("math_helpers")
 -- boot message
 gcs:send_text(4, "Control: loaded at boot")
 
+-- -- -----------------------------------------------------------------------
+-- -- MAVProxy map visualisation: broadcast each Dubins waypoint as an
+-- -- ADSB_VEHICLE so they appear as dots on the MAVProxy map.
+
+-- -- ICAO addresses 0xDB0001..0xDBFFFF are reserved for path points.
+-- -- -----------------------------------------------------------------------
+-- mavlink:init(1, 0)
+
+-- local DUBINS_VIS_ICAO_BASE   = 0xDB0001
+-- local DUBINS_VIS_INTERVAL_MS = 2000     -- re-send before MAVProxy times contacts out
+-- local DUBINS_VIS_STRIDE      = 3        -- send every Nth point to reduce clutter
+-- local last_vis_ms            = 0
+
+-- local ADSB_VIS_FLAGS = 1 + 2 + 64      -- VALID_COORDS + VALID_ALTITUDE + SIMULATED
+--                                         -- no VALID_CALLSIGN (16) = no label shown
+
+-- local function send_vis_point(icao, lat_deg, lng_deg, alt_m)
+--     local cs = string.sub("\0\0\0\0\0\0\0\0\0", 1, 9)  -- empty callsign
+--     local payload = string.pack("<I4i4i4i4 I2I2i2I2I2 Bc9BB",
+--         icao,
+--         math.floor(lat_deg * 1e7),
+--         math.floor(lng_deg * 1e7),
+--         math.floor(alt_m   * 1000),
+--         0, 0, 0,            -- heading, hor_velocity, ver_velocity
+--         ADSB_VIS_FLAGS,
+--         0,                  -- squawk
+--         0,                  -- altitude_type
+--         cs,
+--         0,                  -- emitter_type
+--         0)                  -- tslc
+--     for chan = 0, 5 do
+--         mavlink:send_chan(chan, 246, payload)
+--     end
+-- end
+
 -- setting altitude (not captured in the )
 local function get_kangaroo_alt_m()
     if not kang_alt_m_ready then
@@ -93,6 +128,28 @@ local function get_home_alt_m()
 
     return nil
 end
+
+-- local function broadcast_dubins_vis()
+--     if dubins_points_active == nil then 
+--         return 
+--     end
+
+--     local home_alt = get_home_alt_m()
+--     local alt_m = (home_alt or 0) + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
+
+--     local icao = DUBINS_VIS_ICAO_BASE
+--     for i = 1, #dubins_points_active, DUBINS_VIS_STRIDE do
+--         local pt = dubins_points_active[i]
+--         if pt and pt.loc then
+--             send_vis_point(
+--                 icao,
+--                 pt.loc:lat() * 1.0e-7,
+--                 pt.loc:lng() * 1.0e-7,
+--                 alt_m)
+--             icao = icao + 1
+--         end
+--     end
+-- end
 
 -- fly to point - point.loc is absolute from dubins_weave
 function fly_to_dubins_point(point)
@@ -498,6 +555,12 @@ function update()
             end
         end
     end
+
+    -- -- periodically re-broadcast path points to MAVProxy map
+    -- if (now_ms - last_vis_ms) >= DUBINS_VIS_INTERVAL_MS then
+    --     last_vis_ms = now_ms
+    --     broadcast_dubins_vis()
+    -- end
 
     -- fly the active path
     if dubins_points_active and dubins_point_index then
