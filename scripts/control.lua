@@ -20,30 +20,52 @@ local PLANE_ABOVE_TARGET_M = 150.0
 local KANG_ALT_M_FALLBACK = 80.0
 
 
--- establishing flags for the parameters in 
-local bus_seq_param = Parameter()
-local bus_seq_ready = bus_seq_param:init("SCR_USER1")
-assert(bus_seq_ready, "missing SCR_USER1")
+-- KBUS_ bus params (owned by kangaroo_MAV.lua via bind_add_param).
+-- Bound lazily here because control.lua loads before kangaroo alphabetically.
+-- Old SCR_USER declarations kept below for reference.
+local kbus_seq_param = Parameter()
+local kbus_t_s_param = Parameter()
+local kbus_lat_param = Parameter()
+local kbus_lon_param = Parameter()
+local kbus_vn_param  = Parameter()
+local kbus_ve_param  = Parameter()
+local kbus_all_ready = false
 
-local bus_t_s_param = Parameter()
-local bus_t_s_ready = bus_t_s_param:init("SCR_USER2")
-assert(bus_t_s_ready, "missing SCR_USER2")
+local function ensure_kbus()
+    if kbus_all_ready then return true end
+    kbus_all_ready = kbus_seq_param:init("KBUS_SEQ")
+                 and kbus_t_s_param:init("KBUS_T_S")
+                 and kbus_lat_param:init("KBUS_LAT")
+                 and kbus_lon_param:init("KBUS_LON")
+                 and kbus_vn_param:init("KBUS_VN")
+                 and kbus_ve_param:init("KBUS_VE")
+    return kbus_all_ready
+end
 
-local bus_lat_param = Parameter()
-local bus_lat_ready = bus_lat_param:init("SCR_USER3")
-assert(bus_lat_ready, "missing SCR_USER3")
+-- Estabolishing parameters (SCR_USER - superseded by KBUS_ above)
+--local bus_seq_param = Parameter()
+--local bus_seq_ready = bus_seq_param:init("SCR_USER1")
+--assert(bus_seq_ready, "missing SCR_USER1")
 
-local bus_lon_param = Parameter()
-local bus_lon_ready = bus_lon_param:init("SCR_USER4")
-assert(bus_lon_ready, "missing SCR_USER4")
+--local bus_t_s_param = Parameter()
+--local bus_t_s_ready = bus_t_s_param:init("SCR_USER2")
+--assert(bus_t_s_ready, "missing SCR_USER2")
 
-local bus_vn_param = Parameter()
-local bus_vn_ready = bus_vn_param:init("SCR_USER5")
-assert(bus_vn_ready, "missing SCR_USER5")
+--local bus_lat_param = Parameter()
+--local bus_lat_ready = bus_lat_param:init("SCR_USER3")
+--assert(bus_lat_ready, "missing SCR_USER3")
 
-local bus_ve_param = Parameter()
-local bus_ve_ready = bus_ve_param:init("SCR_USER6")
-assert(bus_ve_ready, "missing SCR_USER6")
+--local bus_lon_param = Parameter()
+--local bus_lon_ready = bus_lon_param:init("SCR_USER4")
+--assert(bus_lon_ready, "missing SCR_USER4")
+
+--local bus_vn_param = Parameter()
+--local bus_vn_ready = bus_vn_param:init("SCR_USER5")
+--assert(bus_vn_ready, "missing SCR_USER5")
+
+--local bus_ve_param = Parameter()
+--local bus_ve_ready = bus_ve_param:init("SCR_USER6")
+--assert(bus_ve_ready, "missing SCR_USER6")
 
 local kang_alt_m_param = Parameter()
 local kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
@@ -56,9 +78,32 @@ local dubins_points = require("dubins_weave_full")
 --local dubins_points = require("dubins_weave")
 --math helpers
 local math_helpers = require("math_helpers")
+local param_helpers = require("param_helpers")
 
 -- boot message
 gcs:send_text(4, "Control: loaded at boot")
+
+-- ---------------------------------------------------------
+-- Parameter Table
+-- ---------------------------------------------------------
+local CTRL_TABLE_PREFIX = "CTRL_"
+local CTRL_TABLE_KEY = nil
+for key = 0, 200 do
+    if param:add_table(key, CTRL_TABLE_PREFIX, 8) then
+        CTRL_TABLE_KEY = key
+        break
+    end
+end
+assert(CTRL_TABLE_KEY ~= nil, "CTRL: no free param table key")
+
+-- Dubins path rebuild interval (ms). Range: 500–10000
+local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 4000)
+-- Waypoint acceptance radius (m). Range: 5–100
+local CTRL_WP_RAD     = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "WP_RAD", 2, 40)
+-- Minimum waypoint acceptance radius (m). Range: 1–50
+local CTRL_MIN_WP     = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "MIN_WP", 3, 20)
+-- Consecutive position samples inside radius before waypoint is marked reached
+local CTRL_STREAK     = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "STREAK", 4, 1)
 
 -- -- -----------------------------------------------------------------------
 -- -- MAVProxy map visualisation: broadcast each Dubins waypoint as an
@@ -175,7 +220,7 @@ end
 -- handle an acceptable radius from point
 --local WP_ACCEPT_RADIUS_M = 30.0
 --local MIN_WP_ACCEPT_RADIUS_M = 1.0
--- test
+-- need to tune these ...
 local WP_ACCEPT_RADIUS_M = 40.0
 local MIN_WP_ACCEPT_RADIUS_M = 20.0 
 
@@ -211,7 +256,7 @@ local reached_index = -1
 
 -- test - revised
 local function get_point_accept_radius_m(point, next_point)
-    local accept_radius_m = WP_ACCEPT_RADIUS_M
+    local accept_radius_m = CTRL_WP_RAD:get()
     if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
         return accept_radius_m
     end
@@ -220,9 +265,9 @@ local function get_point_accept_radius_m(point, next_point)
         return accept_radius_m
     end
     -- never let radius exceed 45% of spacing (avoid double-counting)
-    -- but never go below MIN_WP_ACCEPT_RADIUS_M
+    -- but never go below CTRL_MIN_WP
     local max_radius = spacing_m * 0.45
-    return math.max(MIN_WP_ACCEPT_RADIUS_M, math.min(accept_radius_m, max_radius))
+    return math.max(CTRL_MIN_WP:get(), math.min(accept_radius_m, max_radius))
 end
 
 
@@ -271,7 +316,7 @@ function dubins_point_reached(point, next_point)
     -- if distance is less 
     if dist_m <= accept_radius_m then
         reached_streak = reached_streak + 1
-        return reached_streak >= REACHED_STREAK_REQUIRED
+        return reached_streak >= math.floor(CTRL_STREAK:get())
     end
     -- reseting reached streak, ending loop in control loop
     reached_streak = 0
@@ -280,15 +325,15 @@ end
 
 -- bus function
 local function all_bus_ready()
-    return bus_seq_ready and bus_t_s_ready and bus_lat_ready and bus_lon_ready and bus_vn_ready and bus_ve_ready
+    return ensure_kbus()
 end
 
 local function read_bus_target()
     -- not all values are ready
-    if not all_bus_ready() then
+    if not ensure_kbus() then
         return nil
     end
-    local seq_1 = bus_seq_param:get()
+    local seq_1 = kbus_seq_param:get()
     if seq_1 == nil then
         return nil
     end
@@ -299,17 +344,17 @@ local function read_bus_target()
     end
 
     -- writing values
-    local t_s = bus_t_s_param:get()
-    local lat_deg = bus_lat_param:get()
-    local lon_deg = bus_lon_param:get()
-    local vn = bus_vn_param:get()
-    local ve = bus_ve_param:get()
+    local t_s     = kbus_t_s_param:get()
+    local lat_deg = kbus_lat_param:get()
+    local lon_deg = kbus_lon_param:get()
+    local vn      = kbus_vn_param:get()
+    local ve      = kbus_ve_param:get()
     -- bin if any are nil
     if t_s == nil or lat_deg == nil or lon_deg == nil or vn == nil or ve == nil then
         return nil
     end
 
-    local seq_2 = bus_seq_param:get()
+    local seq_2 = kbus_seq_param:get()
     if seq_2 == nil then
         return nil
     end
@@ -370,8 +415,8 @@ local function update_build(kangaroo_loc_active)
     if not controller_busy and build_info ~= nil then
         gcs:send_text(6, "Dubins build failed: " .. tostring(build_info))
     end
-    -- return true for controller_busy
-    return controller_busy
+    -- return controller_busy and build_info so callers can log path_type / rho
+    return controller_busy, build_info
 end
 
 -- update to run main logic
@@ -523,11 +568,19 @@ end
 -- end
 -- -----------------------------------------------------------------------
 
+--- 19 April to do 
+--- to do - add velocity control trigger
+--- insert error function
+--- cost function for two paths - select optimal path
+--- cumulative error
+--- add testing tools
+---
+
 -- -----------------------------------------------------------------------
 -- NEW update() — rebuild Dubins path every second from latest bus target,
 -- walk through points as they are reached.
 -- -----------------------------------------------------------------------
-local REBUILD_INTERVAL_MS = 1000
+local REBUILD_INTERVAL_MS = 4000
 local last_rebuild_ms     = 0
 
 function update()
@@ -546,12 +599,15 @@ function update()
 
     -- rebuild every second from the latest known target
     if kangaroo_loc_pending and kangaroo_loc_pending.loc then
-        if (now_ms - last_rebuild_ms) >= REBUILD_INTERVAL_MS then
+        if (now_ms - last_rebuild_ms) >= CTRL_REBUILD_MS:get() then
             last_rebuild_ms = now_ms
-            local success = update_build(kangaroo_loc_pending)
+            local success, build_info = update_build(kangaroo_loc_pending)
             if success then
                 kangaroo_loc_active = kangaroo_loc_pending
-                gcs:send_text(4, string.format("Dubins rebuild: %d points", dubins_point_count or 0))
+                gcs:send_text(4, string.format("Dubins rebuild: %d pts type=%s rho=%.0fm",
+                    dubins_point_count or 0,
+                    (type(build_info) == "table" and build_info.path_type) or "?",
+                    (type(build_info) == "table" and build_info.rho_m) or 0))
             end
         end
     end
@@ -596,7 +652,16 @@ function update()
         end
     end
 
-    return update, 2500
+    return update, 100
 end
 
-return update()
+local function protected_update()
+    local ok, err = pcall(update)
+    if not ok then
+        gcs:send_text(3, "CTRL: " .. tostring(err))
+        return protected_update, 1000
+    end
+    return protected_update, 100
+end
+
+return protected_update()

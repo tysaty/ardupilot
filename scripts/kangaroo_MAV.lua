@@ -5,9 +5,6 @@
 
 -- Control logic is controlled in control.lua
 -- ---------------------------------------------------------
-
-
-
 -- ---------------------------------------------------------
 -- Section 1. Initial values
 -- ---------------------------------------------------------
@@ -73,29 +70,7 @@ local function send_ADSB_VEHICLE(lat_deg, lng_deg, alt_amsl_m, heading_deg_v,
 end
 
 
--- ---------------------------------------------------------
--- setting up bus_sequence - sequence, timestamp, lat lon, and velocity 
--- ---------------------------------------------------------
-
-local bus_seq = Parameter()
-assert(bus_seq:init("SCR_USER1"), "missing SCR_USER1")
-
-local bus_t_s = Parameter()
-assert(bus_t_s:init("SCR_USER2"), "missing SCR_USER2")
-
-local bus_lat = Parameter()
-assert(bus_lat:init("SCR_USER3"), "missing SCR_USER3")
-
-local bus_lon = Parameter()
-assert(bus_lon:init("SCR_USER4"), "missing SCR_USER4")
-
-local bus_vn = Parameter()
-assert(bus_vn:init("SCR_USER5"), "missing SCR_USER5")
-
-local bus_ve = Parameter()
-assert(bus_ve:init("SCR_USER6"), "missing SCR_USER6")
-
--- error handling
+-- establish key for aparemeter table
 for key = 0, 200 do
     if param:add_table(key, PARAM_TABLE_PREFIX, 14) then
         PARAM_TABLE_KEY = key
@@ -106,6 +81,27 @@ end
 
 assert(PARAM_TABLE_KEY ~= nil, "KANG: no free param table key")
 
+-- ---------------------------------------------------------
+-- Section 1b. KBUS_ parameter table
+-- Inter-script bus: passes target state to control.lua each update cycle.
+-- Owned here; control.lua binds lazily after kangaroo boots.
+-- ---------------------------------------------------------
+local KBUS_TABLE_PREFIX = "KBUS_"
+local KBUS_TABLE_KEY = nil
+for key = 0, 200 do
+    if param:add_table(key, KBUS_TABLE_PREFIX, 6) then
+        KBUS_TABLE_KEY = key
+        break
+    end
+end
+assert(KBUS_TABLE_KEY ~= nil, "KANG: no free KBUS param table key")
+
+local KBUS_SEQ = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "SEQ", 1, 0)  -- sequence counter (odd = write in progress, even = stable)
+local KBUS_T_S = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "T_S", 2, 0)  -- timestamp (s)
+local KBUS_LAT = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "LAT", 3, 0)  -- target latitude (deg)
+local KBUS_LON = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "LON", 4, 0)  -- target longitude (deg)
+local KBUS_VN  = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "VN",  5, 0)  -- velocity north (m/s)
+local KBUS_VE  = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX, "VE",  6, 0)  -- velocity east (m/s)
 
 -- ---------------------------------------------------------
 -- Section 2. Parameters
@@ -250,6 +246,34 @@ local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @User: Standard
 --]]
 local KANG_SPD_REL = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_REL", 14, 0.6)
+
+---- BUS VARIABLES for passing into controller
+-- ---------------------------------------------------------
+-- setting up bus_sequence - sequence, timestamp, lat lon, and velocity
+-- now using KBUS_ bind_add_param table (see Section 1b above)
+-- ---------------------------------------------------------
+
+--local bus_seq = Parameter()
+--assert(bus_seq:init("SCR_USER1"), "missing SCR_USER1")
+
+--local bus_t_s = Parameter()
+--assert(bus_t_s:init("SCR_USER2"), "missing SCR_USER2")
+
+--local bus_lat = Parameter()
+--assert(bus_lat:init("SCR_USER3"), "missing SCR_USER3")
+
+--local bus_lon = Parameter()
+--assert(bus_lon:init("SCR_USER4"), "missing SCR_USER4")
+
+--local bus_vn = Parameter()
+--assert(bus_vn:init("SCR_USER5"), "missing SCR_USER5")
+
+--local bus_ve = Parameter()
+--assert(bus_ve:init("SCR_USER6"), "missing SCR_USER6")
+
+
+
+---- Othe rinitialisatoin
 
 -- local variables initisalising
 local anchor_loc = nil
@@ -489,13 +513,13 @@ local function publish_bus(now_ms)
     --
     -- update write
     local ok = true
-    ok = bus_seq:set(seq_odd) and ok
-    ok = bus_t_s:set(t_s) and ok
-    ok = bus_lat:set(lat_deg) and ok
-    ok = bus_lon:set(lon_deg) and ok
-    ok = bus_vn:set(target_vn or 0) and ok
-    ok = bus_ve:set(target_ve or 0) and ok
-    ok = bus_seq:set(seq_even) and ok
+    ok = KBUS_SEQ:set(seq_odd) and ok
+    ok = KBUS_T_S:set(t_s) and ok
+    ok = KBUS_LAT:set(lat_deg) and ok
+    ok = KBUS_LON:set(lon_deg) and ok
+    ok = KBUS_VN:set(target_vn or 0) and ok
+    ok = KBUS_VE:set(target_ve or 0) and ok
+    ok = KBUS_SEQ:set(seq_even) and ok
     return ok
 end
 
