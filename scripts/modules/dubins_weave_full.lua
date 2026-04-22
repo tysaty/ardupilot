@@ -28,90 +28,6 @@ local math_helpers = require("math_helpers")
 -- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
 -- ---------------------------------------------------------
 
--- processing position of plane
-local function process_imu_sample(sample)
-    local pos = ahrs:get_position()
-    local vel = ahrs:get_velocity_NED()
-    local yaw = ahrs:get_yaw_rad()
-    -- nil case
-    if pos == nil or vel == nil or yaw == nil then
-        return nil
-    end
-    -- udpate absolute frame reference
-    pos:change_alt_frame(ALT_FRAME_ABSOLUTE)
-    -- calculate V_T
-    local vn = vel:x()
-    local ve = vel:y()
-    local vd = vel:z()
-    local vt = math.sqrt(vn * vn + ve * ve)
-    -- establishing lat, long, alt
-    local lat, lng, alt = nil, nil, nil
-    if pos then
-        lat = pos:lat()
-        lng = pos:lng()
-        alt = pos:alt()
-    end
-    -- ms 
-    local timestamp_ms = millis():toint()
-    if sample ~= nil then
-        timestamp_ms = sample.timestamp_ms
-    end
-    return {
-        --normalized_command = normalized_command,
-        timestamp_ms = timestamp_ms,
-        -- EKF/AHRS estimated vehicle position at roughly this time
-        pos = pos,
-        lat = lat,
-        lng = lng,
-        alt = alt,
-        psi = yaw,
-        vn = vn,
-        ve = ve,
-        vd = vd,
-        Vt = vt
-    }
-end
-
--- finding target location
-local function chase_target()
-    local target = vehicle:get_target_location()
-    if target == nil then
-        return nil
-    end
-    local loc = target:copy()
-    return loc
-end
-
---  states for dubins calculations
-local function build_state(sample)
-    local current_state = process_imu_sample(sample)
-    local target = chase_target()
-    if current_state == nil or target == nil then
-        return nil
-    end
-    --
-    local rel_ne = current_state.pos:get_distance_NE(target)
-    if rel_ne == nil then
-        return nil
-    end
-
-    return{
-        current_state = current_state,
-        target = target,
-        xi = 0.0,
-        yi = 0.0,
-        psi_i = current_state.psi,
-        -- in coordinate system - x is east (y in rel_NE), y is north (x in rel_NE)
-        xf = rel_ne:y(),
-        yf = rel_ne:x(),
-        --xf = rel_ne:x(),
-        --yf = rel_ne:y(),
-        -- heading is a bit of a tba - this is an apprximation ...
-        psi_f = current_state.pos:get_bearing(target),
-        -- tba if this is right
-        rho = min_turn_radius(math.max(current_state.Vt, 1.0), PHI_MAX_RAD, grav)
-    }
-end
 
 -- ---------------------------------------------------------
 -- Section 3: constructing Dubins curves
@@ -129,13 +45,6 @@ local PI = math.pi
 --     return x_next, y_next, math_helpers.wrap_pi(psi_next)
 -- end
 
--- ---------------------------------------------------------
--- Heading rate induced by roll
--- omega = g / Vt * tan(phi)
--- ---------------------------------------------------------
-local function heading_rate_from_roll(phi, Vt, g)
-    return (g / Vt) * math.tan(phi)
-end
 
 -- ---------------------------------------------------------
 -- Minimum turn radius
@@ -146,7 +55,7 @@ local function min_turn_radius(Vt, phi_max, g)
 end
 
 -- ---------------------------------------------------------
--- Circle centers
+-- generate circle centres
 -- ---------------------------------------------------------
 local function circle_center_right(x, y, psi, rho)
     local xc = x + rho * math.cos(psi)
@@ -158,19 +67,6 @@ local function circle_center_left(x, y, psi, rho)
     local xc = x - rho * math.cos(psi)
     local yc = y + rho * math.sin(psi)
     return xc, yc
-end
-
-local function dubins_circle_centers(xi, yi, psi_i, xf, yf, psi_f, rho)
-    local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
-    local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
-    local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
-    local xLf, yLf = circle_center_left(xf, yf, psi_f, rho)
-    return {
-        CRi = {x = xRi, y = yRi},
-        CLi = {x = xLi, y = yLi},
-        CRf = {x = xRf, y = yRf},
-        CLf = {x = xLf, y = yLf},
-    }
 end
 
 -- ---------------------------------------------------------
@@ -188,7 +84,7 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     --local theta = eta + gamma - (PI / 2.0)
     local theta = gamma - eta + (PI / 2.0)
-    return theta, straight_length, eta, gamma, l
+    return theta, straight_length
 end
 
 -- ---------------------------------------------------------
@@ -224,7 +120,7 @@ local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     --local theta = eta + gamma - (PI / 2.0)
     local theta = eta - gamma + (PI/2.0)
-    return theta, straight_length, eta, gamma, l
+    return theta, straight_length
 end
 
 -- ---------------------------------------------------------
@@ -432,7 +328,7 @@ local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local min_val = nil
 
     -- looping through minimum valuables
-    for i, candidate in ipairs(candidates) do
+    for _, candidate in ipairs(candidates) do
         if not min_val or candidate.distance < min_val.distance then
             min_val = candidate
         end
@@ -554,6 +450,5 @@ local function build_path(kangaroo_state)
 end
 
 return {
-    build_state = build_state,
     build_path = build_path
 }

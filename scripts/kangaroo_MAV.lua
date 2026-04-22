@@ -379,6 +379,7 @@ local function ensure_anchor(now_ms)
 
     local base = nil
 
+    local anchor_source = "unknown"
 
     -- set at home if it's available
     if ahrs:home_is_set() then
@@ -387,7 +388,6 @@ local function ensure_anchor(now_ms)
             anchor_source = "home"
         end
     end
-
 
     -- if get_home doesn't load the current EKF/GPS location
     if base == nil then
@@ -401,7 +401,7 @@ local function ensure_anchor(now_ms)
     if base == nil then
         if now_ms - last_home_wait_ms >= 5000 then
             last_home_wait_ms = now_ms
-            gcs:send_text(MAV_SEVERITY.WARNING, "KANG: waiting for home/location")
+            gcs:send_text(MAV_SEVERITY.WARNING, "KANG: waiting for home/location" .. anchor_source)
         end
         return false
     end
