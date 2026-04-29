@@ -82,6 +82,8 @@ local CTRL_STREAK = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREF
 local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_DIST", 5, 750)
 -- Velocity that the follower vehicle is travelling at for the dubins controller to activate
 local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 30)
+-- Minimum improvement in final-point distance (m) before swapping to a new Dubins path, set to 50 m
+local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
 
 
 -- -- -----------------------------------------------------------------------
@@ -340,11 +342,16 @@ end
 -- to avoid a rebulid storm...
 local MIN_DUBINS_POINTS = 5
 
+-- staged (not yet committed) Dubins build
+local dubins_points_new = nil
+local dubins_new_info   = nil
+local kangaroo_loc_new  = nil
+
 -- function to update build
-local function update_build(kangaroo_loc_active)
+local function update_build(kangaroo_loc_target)
 
     -- generate build
-    local build_result, build_info = dubins_points.build_path(kangaroo_loc_active)
+    local build_result, build_info = dubins_points.build_path(kangaroo_loc_target)
 
     -- reject short paths
     if build_result ~= nil and #build_result < MIN_DUBINS_POINTS then
@@ -353,17 +360,60 @@ local function update_build(kangaroo_loc_active)
         build_info = "degenerate_path"
     end
 
-    -- reset counts
-    dubins_points_active = build_result
-    dubins_point_index = 1
-    dubins_point_count = (dubins_points_active ~= nil) and #dubins_points_active or nil
-    controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
+    -- -- reset counts (moved to commit_dubins_path)
+    -- dubins_points_active = build_result
+    -- dubins_point_index = 1
+    -- dubins_point_count = (dubins_points_active ~= nil) and #dubins_points_active or nil
+    -- controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
 
-    if not controller_busy and build_info ~= nil then
-        gcs:send_text(6, "Dubins build failed: " .. tostring(build_info))
+    if build_result == nil then
+        if build_info ~= nil then
+            gcs:send_text(6, "Dubins build failed: " .. tostring(build_info))
+        end
+        return false, build_info
     end
-    -- return controller_busy and build_info so callers can log path_type / rho
-    return controller_busy, build_info
+
+    -- stage the new path; commit_dubins_path() decides when to apply it
+    dubins_points_new = build_result
+    dubins_new_info   = build_info
+    kangaroo_loc_new  = kangaroo_loc_target
+    return true, build_info
+end
+
+local function get_path_final_loc(path)
+    if path == nil or #path == 0 then return nil end
+    local last = path[#path]
+    return last and last.loc or nil
+end
+
+-- Swap to new Dubins path if its final point is closer to the kangaroo
+local function should_swap_dubins_path(kangaroo_loc, active_final_loc, new_final_loc, margin_m)
+    if not kangaroo_loc or not active_final_loc or not new_final_loc then
+        return false
+    end
+
+    margin_m = margin_m or 0
+
+    local active_dist = kangaroo_loc:get_distance(active_final_loc)
+    local new_dist    = kangaroo_loc:get_distance(new_final_loc)
+
+    -- swap only if new path is closer by at least margin_m
+    if new_dist + margin_m < active_dist then
+        return true, active_dist, new_dist
+    end
+
+    return false, active_dist, new_dist
+end
+
+local function commit_dubins_path()
+    dubins_points_active = dubins_points_new
+    dubins_point_index   = 1
+    dubins_point_count   = #dubins_points_active
+    controller_busy      = true
+    kangaroo_loc_active  = kangaroo_loc_new
+    dubins_points_new    = nil
+    dubins_new_info      = nil
+    kangaroo_loc_new     = nil
 end
 
 
@@ -458,10 +508,6 @@ function update()
         kangaroo_loc_pending = kangaroo_loc_latest
     end
 
-    -- setting states - note that BUILD and ACTIVE can coexist at the same time
-    -- local DUBINS_IDLE   = current_mode ~= MODE_AUTO and current_mode ~= MODE_GUIDED
-    -- local DUBINS_BUILD  = kangaroo_loc_pending and kangaroo_loc_pending.loc ~= nil
-    -- local DUBINS_ACTIVE = dubins_points_active ~= nil and dubins_point_index ~= nil
    
     local pos = ahrs:get_position()
     -- establishing the state
@@ -483,11 +529,29 @@ function update()
             last_rebuild_ms = now_ms
             local success, build_info = update_build(kangaroo_loc_pending)
             if success then
-                kangaroo_loc_active = kangaroo_loc_pending
-                gcs:send_text(4, string.format("Dubins rebuild: %d pts type=%s rho=%.0fm",
-                    dubins_point_count or 0,
-                    (type(build_info) == "table" and build_info.path_type) or "?",
-                    (type(build_info) == "table" and build_info.rho_m) or 0))
+                if dubins_points_active == nil then
+                    -- no active path yet, commit immediately
+                    local n_pts = #dubins_points_new
+                    commit_dubins_path()
+                    gcs:send_text(4, string.format("Dubins initial build: %d pts type=%s rho=%.0fm",
+                        n_pts,
+                        (type(build_info) == "table" and build_info.path_type) or "?",
+                        (type(build_info) == "table" and build_info.rho_m) or 0))
+                else
+                    local active_final = get_path_final_loc(dubins_points_active)
+                    local new_final    = get_path_final_loc(dubins_points_new)
+                    local kang_loc     = kangaroo_loc_pending and kangaroo_loc_pending.loc
+                    -- manage switching trade off
+                    local swap, adist, ndist = should_swap_dubins_path(kang_loc, active_final, new_final, CTRL_SWAP_DIST:get())
+                    if swap then
+                        local n_pts = #dubins_points_new
+                        commit_dubins_path()
+                        gcs:send_text(4, string.format("Dubins swapped: %d pts new=%.0fm < active=%.0fm type=%s rho=%.0fm",
+                            n_pts, ndist, adist,
+                            (type(build_info) == "table" and build_info.path_type) or "?",
+                            (type(build_info) == "table" and build_info.rho_m) or 0))
+                    end
+                end
             end
         end
     end
