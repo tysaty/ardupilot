@@ -53,7 +53,7 @@ local math_helpers = require("math_helpers")
 
 -- error handling
 for key = 0, 200 do
-    if param:add_table(key, PARAM_TABLE_PREFIX, 14) then
+    if param:add_table(key, PARAM_TABLE_PREFIX, 22) then
         PARAM_TABLE_KEY = key
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("KANG: using key %d", key))
         break
@@ -91,13 +91,40 @@ local KBUS_VE  = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX,
 
 -- parameter tables
 --[[
-  // @Param: KANG_ENABLE
-  // @DisplayName: Kangaroo enable
-  // @Description: Enable the virtual hopping target for Plane Guided mode
+  // @Param: KANG_RAND
+  // @DisplayName: Kangaroo random
+  // @Description: Enable the virtual hopping target - randomised
   // @Values: 0:Disabled,1:Enabled
   // @User: Standard
 --]]
-local KANG_ENABLE = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "ENABLE", 1, 1)
+local KANG_RANDOM = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "RANDOM", 1, 1)
+
+--[[
+  // @Param: KANG_STRAIGHT
+  // @DisplayName: Kangaroo straight
+  // @Description: Enable the virtual hopping target - straight line
+  // @Values: 0:Disabled,1:Enabled
+  // @User: Standard
+--]]
+local KANG_STRAIGHT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "STRAIGHT", 2, 0)
+
+--[[
+  // @Param: KANG_CIRCLE
+  // @DisplayName: Kangaroo circle
+  // @Description: Enable the virtual hopping target - circling
+  // @Values: 0:Disabled,1:Enabled
+  // @User: Standard
+--]]
+local KANG_CIRCLE = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "CIRCLE", 3, 0)
+
+--[[
+  // @Param: KANG_RECTANGLE
+  // @DisplayName: Kangaroo rectangle
+  // @Description: Enable the virtual hopping target - rectangle
+  // @Values: 0:Disabled,1:Enabled
+  // @User: Standard
+--]]
+local KANG_RECTANGLE = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "RECTANGLE", 4, 0)
 
 --[[
   // @Param: KANG_ALT_M
@@ -107,7 +134,7 @@ local KANG_ENABLE = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PR
   // @Units: m
   // @User: Standard
 --]]
-local KANG_ALT_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "ALT_M", 2, 80)
+local KANG_ALT_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "ALT_M", 5, 80)
 
 --[[
   // @Param: KANG_SPD_MIN
@@ -117,7 +144,7 @@ local KANG_ALT_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: m/s
   // @User: Standard
 --]]
-local KANG_SPD_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MIN", 3, 8)
+local KANG_SPD_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MIN", 6, 8)
 
 --[[
   // @Param: KANG_SPD_MAX
@@ -127,7 +154,7 @@ local KANG_SPD_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: m/s
   // @User: Standard
 --]]
-local KANG_SPD_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MAX", 4, 20)
+local KANG_SPD_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MAX", 7, 20)
 
 --[[
   // @Param: KANG_HOP_MIN
@@ -137,7 +164,7 @@ local KANG_SPD_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: s
   // @User: Standard
 --]]
-local KANG_HOP_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "HOP_MIN", 5, 2)
+local KANG_HOP_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "HOP_MIN", 8, 2)
 
 --[[
   // @Param: KANG_HOP_MAX
@@ -147,7 +174,7 @@ local KANG_HOP_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: s
   // @User: Standard
 --]]
-local KANG_HOP_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "HOP_MAX", 6, 6)
+local KANG_HOP_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "HOP_MAX", 9, 6)
 
 --[[
   // @Param: KANG_BOUND_M
@@ -157,7 +184,7 @@ local KANG_HOP_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: m
   // @User: Standard
 --]]
-local KANG_BOUND_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "BOUND_M", 7, 500)
+local KANG_BOUND_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "BOUND_M", 10, 500)
 
 --[[
   // @Param: KANG_TURN_DEG
@@ -167,7 +194,7 @@ local KANG_BOUND_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: deg
   // @User: Standard
 --]]
-local KANG_TURN_DEG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "TURN_DEG", 8, 110)
+local KANG_TURN_DEG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "TURN_DEG", 11, 110)
 
 --[[
   // @Param: KANG_PAUSE_P
@@ -177,7 +204,7 @@ local KANG_TURN_DEG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_
   // @Units: %
   // @User: Standard
 --]]
-local KANG_PAUSE_P = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PAUSE_P", 9, 20)
+local KANG_PAUSE_P = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PAUSE_P", 12, 20)
 
 --[[
   // @Param: KANG_PAUSE_S
@@ -187,7 +214,7 @@ local KANG_PAUSE_P = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: s
   // @User: Standard
 --]]
-local KANG_PAUSE_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PAUSE_S", 10, 2)
+local KANG_PAUSE_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PAUSE_S", 13, 2)
 
 --[[
   // @Param: KANG_PRINT
@@ -196,7 +223,7 @@ local KANG_PAUSE_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Values: 0:Disabled,1:Enabled
   // @User: Standard
 --]]
-local KANG_PRINT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PRINT", 11, 1)
+local KANG_PRINT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PRINT", 14, 1)
 
 --[[
   // @Param: KANG_PRT_S
@@ -206,7 +233,7 @@ local KANG_PRINT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: s
   // @User: Standard
 --]]
-local KANG_PRT_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PRT_S", 12, 1)
+local KANG_PRT_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "PRT_S", 15, 1)
 
 --[[
   // @Param: KANG_OFS_M
@@ -216,7 +243,7 @@ local KANG_PRT_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: m
   // @User: Standard
 --]]
-local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 13, 20000)
+local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 16, 500)
 
 --[[
   // @Param: KANG_SPD_REL
@@ -226,7 +253,57 @@ local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Increment: 0.05
   // @User: Standard
 --]]
-local KANG_SPD_REL = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_REL", 14, 0.6)
+local KANG_SPD_REL = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_REL", 17, 0.6)
+
+--[[
+  // @Param: KANG_STR_HDG
+  // @DisplayName: Kangaroo straight heading
+  // @Description: Heading for straight-line mode (clockwise from north)
+  // @Range: 0 360
+  // @Units: deg
+  // @User: Standard
+--]]
+local KANG_STR_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "STR_HDG", 18, 0)
+
+--[[
+  // @Param: KANG_CIR_R
+  // @DisplayName: Kangaroo circle radius
+  // @Description: Orbit radius for circle mode
+  // @Range: 50 3000
+  // @Units: m
+  // @User: Standard
+--]]
+local KANG_CIR_R = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "CIR_R", 19, 300)
+
+--[[
+  // @Param: KANG_REC_W
+  // @DisplayName: Kangaroo rectangle width
+  // @Description: Rectangle width (cross-track dimension) for rectangle mode
+  // @Range: 50 3000
+  // @Units: m
+  // @User: Standard
+--]]
+local KANG_REC_W = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_W", 20, 400)
+
+--[[
+  // @Param: KANG_REC_L
+  // @DisplayName: Kangaroo rectangle length
+  // @Description: Rectangle length (along-track dimension) for rectangle mode
+  // @Range: 50 3000
+  // @Units: m
+  // @User: Standard
+--]]
+local KANG_REC_L = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_L", 21, 600)
+
+--[[
+  // @Param: KANG_REC_HDG
+  // @DisplayName: Kangaroo rectangle heading
+  // @Description: Rectangle orientation (clockwise from north); length axis points in this direction
+  // @Range: 0 360
+  // @Units: deg
+  // @User: Standard
+--]]
+local KANG_REC_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_HDG", 22, 0)
 
 -- local variables initisalising
 local anchor_loc = nil
@@ -245,8 +322,25 @@ local last_report_ms = 0
 local last_home_wait_ms = 0
 local target_ready = false
 
+-- mode-specific state
+local orbit_north          = 0       -- OFS_M start offset shared by all modes
+local orbit_east           = 0
+local straight_heading_deg = 0
+local circle_angle_rad     = 0
+local rect_corners         = nil
+local rect_side            = 0
+local rect_t               = 0.0
+
 local function get_radius_m()
     return math.sqrt(target_north * target_north + target_east * target_east)
+end
+
+local function get_active_mode()
+    if KANG_STRAIGHT:get()  >= 1 then return "straight"  end
+    if KANG_CIRCLE:get()    >= 1 then return "circle"    end
+    if KANG_RECTANGLE:get() >= 1 then return "rectangle" end
+    if KANG_RANDOM:get()    >= 1 then return "random"    end
+    return nil
 end
 
 local function update_target_location()
@@ -283,6 +377,18 @@ local function get_plane_groundspeed_mps()
         return nil
     end
     return math.max(0, speed_mps_now)
+end
+
+local function get_capped_speed()
+    local spd   = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
+    local ratio = math_helpers.clamp(KANG_SPD_REL:get(), 0, 1)
+    if ratio > 0 then
+        local plane_spd = get_plane_groundspeed_mps()
+        if plane_spd ~= nil and spd > plane_spd * ratio then
+            spd = plane_spd * ratio
+        end
+    end
+    return spd
 end
 
 -- generate next point
@@ -363,33 +469,55 @@ local function ensure_anchor(now_ms)
     anchor_loc = base:copy()
     anchor_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
 
-    local start_offset = math_helpers.clamp(KANG_OFS_M:get(), 500, 20000)
-    heading_deg = math_helpers.random_between(0, 360)
-    target_north = math.cos(math.rad(heading_deg)) * start_offset
-    target_east = math.sin(math.rad(heading_deg)) * start_offset
     speed_mps = 0
     last_update_ms = now_ms
-    choose_next_segment(now_ms)
+
+    -- all modes share the same random start offset from home
+    local start_offset = math_helpers.clamp(KANG_OFS_M:get(), 0, 20000)
+    local start_hdg    = math_helpers.random_between(0, 360)
+    orbit_north = math.cos(math.rad(start_hdg)) * start_offset
+    orbit_east  = math.sin(math.rad(start_hdg)) * start_offset
+
+    local mode = get_active_mode()
+    if mode == "random" then
+        heading_deg  = start_hdg
+        target_north = orbit_north
+        target_east  = orbit_east
+        choose_next_segment(now_ms)
+    elseif mode == "straight" then
+        straight_heading_deg = math_helpers.clamp(KANG_STR_HDG:get(), 0, 360)
+        target_north = orbit_north
+        target_east  = orbit_east
+    elseif mode == "circle" then
+        circle_angle_rad = 0
+        local r = math_helpers.clamp(KANG_CIR_R:get(), 50, 3000)
+        target_north = orbit_north + r
+        target_east  = orbit_east
+    elseif mode == "rectangle" then
+        rect_side = 0
+        rect_t    = 0.0
+        local L  = math_helpers.clamp(KANG_REC_L:get(), 50, 3000)
+        local W  = math_helpers.clamp(KANG_REC_W:get(), 50, 3000)
+        local H  = math.rad(math_helpers.clamp(KANG_REC_HDG:get(), 0, 360))
+        local ch = math.cos(H)
+        local sh = math.sin(H)
+        rect_corners = {
+            { n = orbit_north,                 e = orbit_east              },
+            { n = orbit_north + L*ch,          e = orbit_east + L*sh       },
+            { n = orbit_north + L*ch - W*sh,   e = orbit_east + L*sh + W*ch},
+            { n = orbit_north - W*sh,          e = orbit_east + W*ch       },
+        }
+        target_north = orbit_north
+        target_east  = orbit_east
+    end
+
     update_target_location()
     target_ready = true
-    gcs:send_text(MAV_SEVERITY.WARNING, "KANG: virtual target initialised")
+    gcs:send_text(MAV_SEVERITY.WARNING, "KANG: virtual target initialised (" .. (mode or "none") .. ")")
     return true
 end
 
--- move the function forward in time
-local function integrate_target(now_ms)
-    if not target_ready then
-        return
-    end
-    local dt = (now_ms - last_update_ms) * 0.001
-    if dt < 0 then
-        dt = 0
-    end
-    if dt > 0.5 then
-        dt = 0.5
-    end
-    last_update_ms = now_ms
-
+local function integrate_random(now_ms, dt)
     if now_ms >= segment_end_ms then
         choose_next_segment(now_ms)
     end
@@ -398,21 +526,95 @@ local function integrate_target(now_ms)
     local ve = math.sin(math.rad(heading_deg)) * speed_mps
 
     target_north = target_north + (vn * dt)
-    target_east = target_east + (ve * dt)
+    target_east  = target_east  + (ve * dt)
 
-    local bound_m = math_helpers.clamp(KANG_BOUND_M:get(), 50, 3000)
+    local bound_m  = math_helpers.clamp(KANG_BOUND_M:get(), 50, 3000)
     local radius_m = get_radius_m()
+
     if radius_m > bound_m then
         local scale = bound_m / radius_m
         target_north = target_north * scale
-        target_east = target_east * scale
-        heading_deg = math_helpers.wrap_360(math.deg(math.atan(-target_east, -target_north)) + math_helpers.random_between(-25, 25))
+        target_east  = target_east  * scale
+        heading_deg  = math_helpers.wrap_360(math.deg(math.atan(-target_east, -target_north)) + math_helpers.random_between(-25, 25))
         segment_end_ms = now_ms + 1000
         vn = math.cos(math.rad(heading_deg)) * speed_mps
         ve = math.sin(math.rad(heading_deg)) * speed_mps
     end
+
     target_vn = vn
     target_ve = ve
+end
+
+local function integrate_straight(dt)
+    speed_mps   = get_capped_speed()
+    heading_deg = straight_heading_deg
+    local vn = math.cos(math.rad(heading_deg)) * speed_mps
+    local ve = math.sin(math.rad(heading_deg)) * speed_mps
+    target_north = target_north + vn * dt
+    target_east  = target_east  + ve * dt
+    target_vn = vn
+    target_ve = ve
+end
+
+local function integrate_circle(dt)
+    local r   = math_helpers.clamp(KANG_CIR_R:get(), 50, 3000)
+    speed_mps = get_capped_speed()
+    local omega   = speed_mps / r
+    circle_angle_rad = circle_angle_rad + omega * dt
+    target_north = orbit_north + r * math.cos(circle_angle_rad)
+    target_east  = orbit_east  + r * math.sin(circle_angle_rad)
+    target_vn    = -speed_mps * math.sin(circle_angle_rad)
+    target_ve    =  speed_mps * math.cos(circle_angle_rad)
+    heading_deg  = math_helpers.wrap_360(math.deg(circle_angle_rad) + 90)
+end
+
+local function integrate_rectangle(dt)
+    if rect_corners == nil then return end
+    speed_mps = get_capped_speed()
+    local function corner(i) return rect_corners[i % 4 + 1] end
+    local s0 = corner(rect_side)
+    local s1 = corner(rect_side + 1)
+    local dn = s1.n - s0.n
+    local de = s1.e - s0.e
+    local side_len = math.sqrt(dn * dn + de * de)
+    if side_len < 0.01 then return end
+
+    rect_t = rect_t + (speed_mps * dt) / side_len
+    if rect_t >= 1.0 then
+        rect_side = (rect_side + 1) % 4
+        rect_t    = rect_t - 1.0
+        s0 = corner(rect_side)
+        s1 = corner(rect_side + 1)
+        dn = s1.n - s0.n
+        de = s1.e - s0.e
+        side_len = math.sqrt(dn * dn + de * de)
+        if side_len < 0.01 then return end
+    end
+
+    target_north = s0.n + dn * rect_t
+    target_east  = s0.e + de * rect_t
+    target_vn    = (dn / side_len) * speed_mps
+    target_ve    = (de / side_len) * speed_mps
+    heading_deg  = math_helpers.wrap_360(math.deg(math.atan(de, dn)))
+end
+
+-- move the function forward in time
+local function integrate_target(now_ms)
+    if not target_ready then
+        return
+    end
+    local dt = (now_ms - last_update_ms) * 0.001
+    if dt < 0 then dt = 0 end
+    if dt > 0.5 then dt = 0.5 end
+    last_update_ms = now_ms
+
+    local mode = get_active_mode()
+    if     mode == "random"    then integrate_random(now_ms, dt)
+    elseif mode == "straight"  then integrate_straight(dt)
+    elseif mode == "circle"    then integrate_circle(dt)
+    elseif mode == "rectangle" then integrate_rectangle(dt)
+    end
+
     update_target_location()
 end
 
@@ -478,8 +680,7 @@ local function publish_bus(now_ms)
 end
 
 local function update()
-    
-    if KANG_ENABLE:get() < 1 then
+    if get_active_mode() == nil then
         return
     end
 
