@@ -72,16 +72,20 @@ assert(CTRL_TABLE_KEY ~= nil, "CTRL: no free param table key")
 -- Parameter value delcarations
 -- Dubins path rebuild interval (ms)
 local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 6000)
+-- local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 2000)
 -- Waypoint acceptance radius (m). Range: 5–100
 local CTRL_WP_RAD = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "WP_RAD", 2, 40)
 -- Minimum waypoint acceptance radius (m). Range: 1–50
 local CTRL_MIN_WP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "MIN_WP", 3, 20)
 -- Consecutive position samples inside radius before waypoint is marked reached
 local CTRL_STREAK = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "STREAK", 4, 1)
+-- local CTRL_STREAK = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "STREAK", 4, 2)
 -- Minimum distance that the follower is travelling at for the dubins controller to activate
 local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_DIST", 5, 750)
+-- local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_DIST", 5, 400)
 -- Velocity that the follower vehicle is travelling at for the dubins controller to activate
 local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 30)
+-- local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 15)
 -- Minimum improvement in final-point distance (m) before swapping to a new Dubins path, set to 50 m
 local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
 
@@ -134,6 +138,7 @@ local function get_kangaroo_alt_m()
     return KANG_ALT_M_FALLBACK
 end
 
+-- get home altitude 
 local function get_home_alt_m()
     if ahrs:home_is_set() then
         local home = ahrs:get_home()
@@ -196,6 +201,7 @@ function fly_to_dubins_point(point)
 end
 
 
+-- Error function 
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1

@@ -47,7 +47,7 @@ local PI = math.pi
 
 
 -- ---------------------------------------------------------
--- Minimum turn radius
+-- Minimum turn radius (rho)
 -- rho = Vt^2 / (g * tan(phi_max))
 -- ---------------------------------------------------------
 local function min_turn_radius(Vt, phi_max, g)
@@ -55,7 +55,7 @@ local function min_turn_radius(Vt, phi_max, g)
 end
 
 -- ---------------------------------------------------------
--- generate circle centres
+-- generate circle centres - consistent for intial and final circles
 -- ---------------------------------------------------------
 local function circle_center_right(x, y, psi, rho)
     local xc = x + rho * math.cos(psi)
@@ -82,8 +82,10 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-    --local theta = eta + gamma - (PI / 2.0)
-    local theta = gamma - eta + (PI / 2.0)
+    -- math in paper
+    local theta = eta + gamma - (PI / 2.0)
+    -- appears to work better
+    --local theta = gamma - eta + (PI / 2.0)
     return theta, straight_length
 end
 
@@ -114,11 +116,7 @@ local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
     local l = math_helpers.dist2d(xRi, yRi, xLf, yLf)
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) - math.atan(yLf - yRi, xLf - xRi)
-    --local eta = (PI / 2.0) + math.atan(yLf - yRi, xLf - xRi)
-    -- Wrestlemania check eta
-    --local gamma = math.atan((2*rho)/straight_length)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-    --local theta = eta + gamma - (PI / 2.0)
     local theta = eta - gamma + (PI/2.0)
     return theta, straight_length
 end
@@ -138,9 +136,10 @@ local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
 end
 
 -- ---------------------------------------------------------
--- Arc point generation
+-- Arc point generation of the nth point
 -- pn = xc + rho*sin(psi_n), yc + rho*cos(psi_n)
 -- Used by the paper for both right and left arc point updates
+-- Usable for intial and final values
 -- x is east
 -- y is north
 -- ---------------------------------------------------------
@@ -152,7 +151,7 @@ end
 
 
 -- ---------------------------------------------------------
--- Straight segment point generation
+-- Straight segment point generation of the nth point
 -- x_n = x_(n-1) + delta_d * sin(theta)
 -- y_n = y_(n-1) + delta_d * cos(theta)
 -- ---------------------------------------------------------
