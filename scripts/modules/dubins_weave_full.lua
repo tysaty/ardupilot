@@ -79,9 +79,13 @@ end
 -- ---------------------------------------------------------
 local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local l = math_helpers.dist2d(xLi, yLi, xRf, yRf)
+    if l < 2.0 * rho then 
+        return nil, nil 
+    end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
-    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
+    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+    --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     -- math in paper
     local theta = eta + gamma - (PI / 2.0)
     -- appears to work better
@@ -114,9 +118,13 @@ end
 
 local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
     local l = math_helpers.dist2d(xRi, yRi, xLf, yLf)
+    if l < 2.0 * rho then 
+        return nil, nil 
+    end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) - math.atan(yLf - yRi, xLf - xRi)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
+    --local gamma = math.atan(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
     local theta = eta - gamma + (PI/2.0)
     return theta, straight_length
 end
@@ -133,6 +141,47 @@ local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local straight_length = math.sqrt(dx * dx + dy * dy)
     local theta = (PI / 2.0) - math.atan(dy, dx)
     return theta, straight_length
+end
+
+-- ---------------------------------------------------------
+-- RLR Geometry
+-- TBA
+-- no gamma because of external tangents 
+-- ---------------------------------------------------------
+local function rlr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
+    local dx = xRf - xRi
+    local dy = yRf - yRi
+    local straight_length = math.sqrt(dx * dx + dy * dy)
+    local theta = (PI / 2.0) - math.atan(dy, dx)
+    return theta, straight_length
+end
+
+-- ---------------------------------------------------------
+-- LRL Geometry
+-- TBA
+-- no gamma because of external tangents 
+-- ---------------------------------------------------------
+local function lrl_theta_and_distance(xRi, yRi, xRf, yRf, rho)
+    local dx = xRf - xRi
+    local dy = yRf - yRi
+    local straight_length = math.sqrt(dx * dx + dy * dy)
+    local theta = (PI / 2.0) - math.atan(dy, dx)
+    return theta, straight_length
+end
+
+
+-- ---------------------------------------------------------
+-- Compute the angular sweep (radians) traversed by generate_arc_points
+-- with the same normalisation logic used there.
+-- ---------------------------------------------------------
+local function arc_sweep_rad(psi_start, psi_end, increasing)
+    if increasing then
+        if psi_end < psi_start then psi_end = psi_end + 2 * PI end
+        return psi_end - psi_start
+    else
+        if psi_end > psi_start then psi_end = psi_end - 2 * PI end
+        return psi_start - psi_end
+    end
 end
 
 -- ---------------------------------------------------------
@@ -217,12 +266,13 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
     local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
     local theta, straight_len = lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+    if theta == nil then return nil, math.huge end
     -- Generate Left
     --generate_arc_points(LSR_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
     generate_arc_points(LSR_points, xLi, yLi, rho,  psi_i + PI/2,  theta + PI/2,  delta_psi, false)
 
     if #LSR_points == 0 then
-        return nil
+        return nil, math.huge
     end
 
     -- Straight
@@ -232,7 +282,10 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     --generate_arc_points(LSR_points, xRf, yRf, rho, theta, psi_f, delta_psi, false)
     generate_arc_points(LSR_points, xRf, yRf, rho,  theta - PI/2,  psi_f - PI/2,  delta_psi, true)
 
-    return LSR_points
+    local sweep1 = arc_sweep_rad(psi_i + PI/2, theta + PI/2, false)
+    local sweep2 = arc_sweep_rad(theta - PI/2, psi_f - PI/2, true)
+    local total_length = rho * (sweep1 + sweep2) + straight_len
+    return LSR_points, total_length
 end
 
 -- generate LSL
@@ -246,7 +299,7 @@ local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     --generate_arc_points(LSL_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
 
     if #LSL_points == 0 then
-        return nil
+        return nil, math.huge
     end
     -- Straight
     local last = LSL_points[#LSL_points]
@@ -255,7 +308,11 @@ local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
      --   generate_arc_points(LSL_points, xLf, yLf, rho, theta, psi_f, delta_psi, true)
 
     generate_arc_points(LSL_points, xLf, yLf, rho, theta + PI/2, psi_f + PI/2, delta_psi, false)
-    return LSL_points
+
+    local sweep1 = arc_sweep_rad(psi_i + PI/2, theta + PI/2, false)
+    local sweep2 = arc_sweep_rad(theta + PI/2, psi_f + PI/2, false)
+    local total_length = rho * (sweep1 + sweep2) + straight_len
+    return LSL_points, total_length
 end
 
 -- generate RSL
@@ -264,17 +321,22 @@ local function generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
     local xLf, yLf = circle_center_left(xf, yf, psi_f, rho)
     local theta, straight_len = rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
+    if theta == nil then return nil, math.huge end
     -- generate right
     generate_arc_points(RSL_oints, xRi, yRi, rho, psi_i - PI/2, theta - PI/2, delta_psi, true)
     if #RSL_oints == 0 then
-        return nil
+        return nil, math.huge
     end
     -- Straight
     local last = RSL_oints[#RSL_oints]
     generate_straight_points(RSL_oints, last.x, last.y, theta, straight_len, delta_d)
     -- generate left
     generate_arc_points(RSL_oints, xLf, yLf, rho, theta + PI/2, psi_f + PI/2, delta_psi, false)
-    return RSL_oints
+
+    local sweep1 = arc_sweep_rad(psi_i - PI/2, theta - PI/2, true)
+    local sweep2 = arc_sweep_rad(theta + PI/2, psi_f + PI/2, false)
+    local total_length = rho * (sweep1 + sweep2) + straight_len
+    return RSL_oints, total_length
 end
 
 -- generate RSR loop
@@ -286,14 +348,18 @@ local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- generate right
     generate_arc_points(RSR_points, xRi, yRi, rho, psi_i- PI/2, theta- PI/2, delta_psi, true)
     if #RSR_points == 0 then
-        return nil
+        return nil, math.huge
     end
     -- Straight
     local last = RSR_points[#RSR_points]
     generate_straight_points(RSR_points, last.x, last.y, theta, straight_len, delta_d)
     -- generate right
     generate_arc_points(RSR_points, xRf, yRf, rho, theta- PI/2, psi_f- PI/2, delta_psi, true)
-    return RSR_points
+
+    local sweep1 = arc_sweep_rad(psi_i - PI/2, theta - PI/2, true)
+    local sweep2 = arc_sweep_rad(theta - PI/2, psi_f - PI/2, true)
+    local total_length = rho * (sweep1 + sweep2) + straight_len
+    return RSR_points, total_length
 end
 
 
@@ -305,16 +371,16 @@ end
 local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local optimal_points = {}
     -- generate each iteration of points
-    local LSR_points = generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local LSL_points = generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local RSL_points = generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local RSR_points = generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local LSR_points, LSR_distance = generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local LSL_points, LSL_distance = generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local RSL_points, RSL_distance = generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local RSR_points, RSR_distance = generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
 
     -- calculate distance - with guards if the value is a nil case
-    local LSR_distance = LSR_points and (#LSR_points * delta_d) or math.huge
-    local LSL_distance = LSL_points and (#LSL_points * delta_d) or math.huge
-    local RSL_distance = RSL_points and (#RSL_points * delta_d) or math.huge
-    local RSR_distance = RSR_points and (#RSR_points * delta_d) or math.huge
+    --local LSR_distance = LSR_points and (#LSR_points * delta_d) or math.huge
+    --local LSL_distance = LSL_points and (#LSL_points * delta_d) or math.huge
+    --local RSL_distance = RSL_points and (#RSL_points * delta_d) or math.huge
+    --local RSR_distance = RSR_points and (#RSR_points * delta_d) or math.huge
 
     -- candidate list: keeping all values together 
     local candidates = {

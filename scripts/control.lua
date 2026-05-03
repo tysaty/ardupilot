@@ -63,7 +63,7 @@ local CTRL_TABLE_PREFIX = "CTRL_"
 local CTRL_TABLE_KEY = nil
 -- establish parameter table key
 for key = 0, 200 do
-    if param:add_table(key, CTRL_TABLE_PREFIX, 8) then
+    if param:add_table(key, CTRL_TABLE_PREFIX, 9) then
         CTRL_TABLE_KEY = key
         break
     end
@@ -86,8 +86,12 @@ local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TA
 -- Velocity that the follower vehicle is travelling at for the dubins controller to activate
 local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 30)
 -- local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 15)
+
+-- additional swapping control 3 May
 -- Minimum improvement in final-point distance (m) before swapping to a new Dubins path, set to 50 m
 local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
+-- Cooldown (ms) after a swap before another swap is allowed
+local CTRL_SWAP_COOL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_COOL", 8, 1000)
 
 
 -- -- -----------------------------------------------------------------------
@@ -502,6 +506,7 @@ end
 
 -- -----------------------------------------------------------------------
 local last_rebuild_ms     = 0
+local last_swap_ms        = 0
 
 function update()
     local current_mode = vehicle:get_mode()
@@ -539,6 +544,7 @@ function update()
                     -- no active path yet, commit immediately
                     local n_pts = #dubins_points_new
                     commit_dubins_path()
+                    last_swap_ms = now_ms
                     gcs:send_text(4, string.format("Dubins initial build: %d pts type=%s rho=%.0fm",
                         n_pts,
                         (type(build_info) == "table" and build_info.path_type) or "?",
@@ -549,9 +555,14 @@ function update()
                     local kang_loc     = kangaroo_loc_pending and kangaroo_loc_pending.loc
                     -- manage switching trade off
                     local swap, adist, ndist = should_swap_dubins_path(kang_loc, active_final, new_final, CTRL_SWAP_DIST:get())
-                    if swap then
+                    
+                    -- cooldown - hystersisi 
+                    local cooldown_elapsed = (now_ms - last_swap_ms) >= CTRL_SWAP_COOL:get()
+                    -- guarding from swapping too quickly...
+                    if swap and cooldown_elapsed then
                         local n_pts = #dubins_points_new
                         commit_dubins_path()
+                        last_swap_ms = now_ms
                         gcs:send_text(4, string.format("Dubins swapped: %d pts new=%.0fm < active=%.0fm type=%s rho=%.0fm",
                             n_pts, ndist, adist,
                             (type(build_info) == "table" and build_info.path_type) or "?",
