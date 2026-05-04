@@ -1,8 +1,8 @@
 -- ---------------------------------------------------------
--- Dubins Path Implementation
+-- Dubins Path Implementation - 2 Dimensional
 
--- a Dubins path generator, that returns the optimal
--- path between two points (the plane and the target).
+-- The core Dubins path generator, that returns the optimal
+-- path between two points (the plane and the kangaroo).
 -- Currently only implemneted in 2-dimensions, requries
 -- extnesion into 3D following successfuly tests. 
 
@@ -10,7 +10,6 @@
 -- Lugo-Cárdenas, Israel & Flores, Gerardo & Salazar, Sergio & Lozano, R.. (2014). 
 -- Dubins path generation for a fixed wing UAV. 339-346. 10.1109/ICUAS.2014.6842272. 
 -- ---------------------------------------------------------
-
 -- ---------------------------------------------------------
 -- Section 1: Configuration 
 -- captures turn radius, waypoint acceptance, starting condition (i.e. left or right)
