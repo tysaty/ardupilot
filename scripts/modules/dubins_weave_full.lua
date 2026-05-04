@@ -250,8 +250,8 @@ end
 
 -- alternate with degeneration
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
-    -- Skip GENUINELY degenerate arcs (zero sweep) - otherwise the loop
-    -- emits one phantom point at psi_start which doesn't connect to the
+    -- Skip degenerate, zero sweep arcs
+    -- Previosuly emitting one phantom point at psi_start that doesn't connect to the
     -- adjacent straight segment.
     if math.abs(psi_end - psi_start) < 1e-9 then
         return
@@ -262,28 +262,37 @@ local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delt
     -- pi (e.g. backtrack U-turns), so don't shrink to "shortest signed".
     local sweep
     local sign
+    -- increasing case for clockwise
     if increasing then
-        if psi_end < psi_start then psi_end = psi_end + 2 * PI end
+        if psi_end < psi_start then 
+            psi_end = psi_end + 2 * PI 
+        end
         sweep = psi_end - psi_start
         sign = 1
+    -- else it's counterclockwise
     else
-        if psi_end > psi_start then psi_end = psi_end - 2 * PI end
+        if psi_end > psi_start then 
+            psi_end = psi_end - 2 * PI 
+        end
         sweep = psi_start - psi_end
         sign = -1
     end
 
     -- Cap at one full circle to prevent runaway on noisy inputs
-    if sweep > 2 * PI then sweep = 2 * PI end
+    if sweep > 2 * PI then 
+        sweep = 2 * PI 
+    end
 
-    -- Walk in steps of delta_psi, starting AT psi_start + sign*delta_psi
-    -- (skip psi_start itself; it's already on the previous segment)
+    -- Steps of delta_psi, starting AT psi_start + sign*delta_psi
     local n_steps = math.floor(sweep / delta_psi)
+    -- skip psi_start itself; it's already on the previous segment
     for i = 1, n_steps do
         local psi = psi_start + sign * i * delta_psi
         local x, y = arc_point(xc, yc, rho, psi)
         points[#points + 1] = {x = x, y = y, psi = psi}
     end
-    -- Snap to exact endpoint if the last full step didn't reach it
+    -- Preivously not meeting end point
+    -- Snap to exact, final endpoint if the last full step didn't reach it
     if sweep - n_steps * delta_psi > 1e-6 then
         local psi = psi_start + sign * sweep
         local x, y = arc_point(xc, yc, rho, psi)
