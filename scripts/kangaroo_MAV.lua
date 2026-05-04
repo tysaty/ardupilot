@@ -70,16 +70,6 @@ local function send_ADSB_VEHICLE(lat_deg, lng_deg, alt_amsl_m, heading_deg_v,
 end
 
 
--- establish key for aparemeter table
-for key = 0, 200 do
-    if param:add_table(key, PARAM_TABLE_PREFIX, 22) then
-        PARAM_TABLE_KEY = key
-        gcs:send_text(MAV_SEVERITY.WARNING, string.format("KANG: using key %d", key))
-        break
-    end
-end
-
-assert(PARAM_TABLE_KEY ~= nil, "KANG: no free param table key")
 
 -- ---------------------------------------------------------
 -- Section 1b. KBUS_ parameter table
@@ -107,6 +97,17 @@ local KBUS_VE  = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX,
 -- Section 2. Parameters
 -- Parameters to support quick debugging of Kangaroo motion
 -- ---------------------------------------------------------
+-- establish key for aparemeter table
+for key = 0, 200 do
+    if param:add_table(key, PARAM_TABLE_PREFIX, 23) then
+        PARAM_TABLE_KEY = key
+        gcs:send_text(MAV_SEVERITY.WARNING, string.format("KANG: using key %d", key))
+        break
+    end
+end
+
+assert(PARAM_TABLE_KEY ~= nil, "KANG: no free param table key")
+
 --[[
   // @Param: KANG_RAND
   // @DisplayName: Kangaroo random
@@ -283,6 +284,16 @@ local KANG_SPD_REL = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
 local KANG_STR_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "STR_HDG", 18, 0)
 
 --[[
+  // @Param: KANG_LAT_DISP
+  // @DisplayName: Kangaroo straight displacement (x axis)
+  // @Description: Straight line dispalcement in the x axis (- left of plane, + right of plane)
+  // @Range: -20000 +20000
+  // @Units: m
+  // @User: Standard
+--]]
+local KANG_LAT_DISP = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "LAT_DISP", 19, 200)
+
+--[[
   // @Param: KANG_CIR_R
   // @DisplayName: Kangaroo circle radius
   // @Description: Orbit radius for circle mode
@@ -290,7 +301,7 @@ local KANG_STR_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: m
   // @User: Standard
 --]]
-local KANG_CIR_R = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "CIR_R", 19, 300)
+local KANG_CIR_R = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "CIR_R", 20, 300)
 
 --[[
   // @Param: KANG_REC_W
@@ -300,7 +311,7 @@ local KANG_CIR_R = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: m
   // @User: Standard
 --]]
-local KANG_REC_W = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_W", 20, 400)
+local KANG_REC_W = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_W", 21, 400)
 
 --[[
   // @Param: KANG_REC_L
@@ -310,7 +321,7 @@ local KANG_REC_W = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: m
   // @User: Standard
 --]]
-local KANG_REC_L = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_L", 21, 600)
+local KANG_REC_L = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_L", 22, 600)
 
 --[[
   // @Param: KANG_REC_HDG
@@ -320,7 +331,7 @@ local KANG_REC_L = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: deg
   // @User: Standard
 --]]
-local KANG_REC_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_HDG", 22, 0)
+local KANG_REC_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_HDG", 23, 0)
 
 -- local variables initisalising
 local anchor_loc = nil
@@ -354,10 +365,18 @@ local function get_radius_m()
 end
 
 local function get_active_mode()
-    if KANG_STRAIGHT:get() >= 1 then return "straight"  end
-    if KANG_CIRCLE:get() >= 1 then return "circle"    end
-    if KANG_RECTANGLE:get() >= 1 then return "rectangle" end
-    if KANG_RANDOM:get()    >= 1 then return "random"    end
+    if KANG_STRAIGHT:get() >= 1 then 
+        return "straight"  
+    end
+    if KANG_CIRCLE:get() >= 1 then 
+        return "circle"    
+    end
+    if KANG_RECTANGLE:get() >= 1 then 
+        return "rectangle" 
+    end
+    if KANG_RANDOM:get() >= 1 then 
+        return "random"
+    end
     return nil
 end
 
@@ -448,6 +467,17 @@ local function choose_next_segment(now_ms)
     segment_end_ms = now_ms + duration_ms
 end
 
+-- Helper to adjust offset of the heading with the laterial projection 
+local function heading_frame_offset(heading_deg_v, forward_m, lateral_m)
+-- heading
+    local h = math.rad(heading_deg_v)
+        return {
+            n = math.cos(h) * forward_m - math.sin(h) * lateral_m,
+            e = math.sin(h) * forward_m + math.cos(h) * lateral_m,
+        }
+end
+
+
 -- starting point for kangaroo random walk
 local function ensure_anchor(now_ms)
     if anchor_loc ~= nil then
@@ -490,12 +520,19 @@ local function ensure_anchor(now_ms)
     last_update_ms = now_ms
 
     -- all modes share the same random start offset from home
+    -- offset for random walk
     local start_offset = math_helpers.clamp(KANG_OFS_M:get(), 0, 20000)
-    local start_hdg    = math_helpers.random_between(0, 360)
+    -- heading angle - randomly generated
+    local start_hdg = math_helpers.random_between(0, 360)
+    -- orbit values
     orbit_north = math.cos(math.rad(start_hdg)) * start_offset
     orbit_east  = math.sin(math.rad(start_hdg)) * start_offset
-
+    -- lateral displacement
+    local disp_m = math_helpers.clamp(KANG_LAT_DISP:get(), -20000, 20000)
+    -- forward offset
+    local fwd_m = math_helpers.clamp(KANG_OFS_M:get(), 0, 20000)
     local mode = get_active_mode()
+
     -- random walk
     if mode == "random" then
         heading_deg  = start_hdg
@@ -504,29 +541,46 @@ local function ensure_anchor(now_ms)
         choose_next_segment(now_ms)
     -- straight mode
     elseif mode == "straight" then
+
         straight_heading_deg = math_helpers.clamp(KANG_STR_HDG:get(), 0, 360)
-        target_north = orbit_north
-        target_east  = orbit_east
+
+        local hdg_rad = math.rad(straight_heading_deg)
+
+        straight_heading_deg = math_helpers.clamp(KANG_STR_HDG:get(), 0, 360)
+        target_north  = math.cos(hdg_rad) * fwd_m - math.sin(hdg_rad) * disp_m
+        target_east  = math.sin(hdg_rad) * fwd_m + math.cos(hdg_rad) * disp_m
     -- circle mode
     elseif mode == "circle" then
         circle_angle_rad = 0
+        -- local r = math_helpers.clamp(KANG_CIR_R:get(), 50, 3000)
+        -- target_north = orbit_north + r
+        -- target_east  = orbit_east
+
         local r = math_helpers.clamp(KANG_CIR_R:get(), 50, 3000)
+        -- uses heading from the straight 
+        local center = heading_frame_offset(KANG_STR_HDG:get(), fwd_m, disp_m)
+        orbit_north = center.n
+        orbit_east = center.e
+
         target_north = orbit_north + r
-        target_east  = orbit_east
+        target_east = orbit_east
     -- generate work
     elseif mode == "rectangle" then
         rect_side = 0
         rect_t    = 0.0
+        local origin = heading_frame_offset(math_helpers.clamp(KANG_REC_HDG:get(), 0, 360), fwd_m, disp_m)
+        orbit_north = origin.n
+        orbit_east = origin.e
         local L  = math_helpers.clamp(KANG_REC_L:get(), 50, 3000)
         local W  = math_helpers.clamp(KANG_REC_W:get(), 50, 3000)
         local H  = math.rad(math_helpers.clamp(KANG_REC_HDG:get(), 0, 360))
         local ch = math.cos(H)
         local sh = math.sin(H)
         rect_corners = {
-            { n = orbit_north,                 e = orbit_east              },
-            { n = orbit_north + L*ch,          e = orbit_east + L*sh       },
-            { n = orbit_north + L*ch - W*sh,   e = orbit_east + L*sh + W*ch},
-            { n = orbit_north - W*sh,          e = orbit_east + W*ch       },
+            { n = orbit_north, e = orbit_east},
+            { n = orbit_north + L*ch, e = orbit_east + L*sh},
+            { n = orbit_north + L*ch - W*sh, e = orbit_east + L*sh + W*ch},
+            { n = orbit_north - W*sh, e = orbit_east + W*ch},
         }
         target_north = orbit_north
         target_east  = orbit_east

@@ -86,7 +86,10 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
     --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
     -- math in paper
-    local theta = eta + gamma - (PI / 2.0)
+    --local theta = eta + gamma - (PI / 2.0)
+    local phi = math.atan(yRf - yLi, xRf - xLi)
+    local theta = gamma - phi
+
     -- appears to work better
     --local theta = gamma - eta + (PI / 2.0)
     return theta, straight_length
@@ -214,36 +217,81 @@ end
 -- Section 4: generating curves
 -- ---------------------------------------------------------
 
+-- local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
+--     local psi = psi_start
+--     if increasing then
+--         -- normalise so psi_end >= psi_start (left/CCW arc); cap at one full circle
+--         if psi_end < psi_start then
+--             psi_end = psi_end + 2 * PI
+--         end
+--         if psi_end - psi_start > 2 * PI then
+--             psi_end = psi_start + 2 * PI
+--         end
+--         while psi <= psi_end + 1e-9 do
+--             local x, y = arc_point(xc, yc, rho, psi)
+--             points[#points + 1] = {x = x, y = y, psi = psi}
+--             psi = psi + delta_psi
+--         end
+--     else
+--         -- normalise so psi_end <= psi_start (right/CW arc); cap at one full circle
+--         if psi_end > psi_start then
+--             psi_end = psi_end - 2 * PI
+--         end
+--         if psi_start - psi_end > 2 * PI then
+--             psi_end = psi_start - 2 * PI
+--         end
+--         while psi >= psi_end - 1e-9 do
+--             local x, y = arc_point(xc, yc, rho, psi)
+--             points[#points + 1] = {x = x, y = y, psi = psi}
+--             psi = psi - delta_psi
+--         end
+--     end
+-- end
+
+-- alternate with degeneration
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
-    local psi = psi_start
+    -- Skip GENUINELY degenerate arcs (zero sweep) - otherwise the loop
+    -- emits one phantom point at psi_start which doesn't connect to the
+    -- adjacent straight segment.
+    if math.abs(psi_end - psi_start) < 1e-9 then
+        return
+    end
+
+    -- Trust the caller's 'increasing' flag for direction; wrap psi_end
+    -- to make the signed sweep have the right sign. Sweeps may exceed
+    -- pi (e.g. backtrack U-turns), so don't shrink to "shortest signed".
+    local sweep
+    local sign
     if increasing then
-        -- normalise so psi_end >= psi_start (left/CCW arc); cap at one full circle
-        if psi_end < psi_start then
-            psi_end = psi_end + 2 * PI
-        end
-        if psi_end - psi_start > 2 * PI then
-            psi_end = psi_start + 2 * PI
-        end
-        while psi <= psi_end + 1e-9 do
-            local x, y = arc_point(xc, yc, rho, psi)
-            points[#points + 1] = {x = x, y = y, psi = psi}
-            psi = psi + delta_psi
-        end
+        if psi_end < psi_start then psi_end = psi_end + 2 * PI end
+        sweep = psi_end - psi_start
+        sign = 1
     else
-        -- normalise so psi_end <= psi_start (right/CW arc); cap at one full circle
-        if psi_end > psi_start then
-            psi_end = psi_end - 2 * PI
-        end
-        if psi_start - psi_end > 2 * PI then
-            psi_end = psi_start - 2 * PI
-        end
-        while psi >= psi_end - 1e-9 do
-            local x, y = arc_point(xc, yc, rho, psi)
-            points[#points + 1] = {x = x, y = y, psi = psi}
-            psi = psi - delta_psi
-        end
+        if psi_end > psi_start then psi_end = psi_end - 2 * PI end
+        sweep = psi_start - psi_end
+        sign = -1
+    end
+
+    -- Cap at one full circle to prevent runaway on noisy inputs
+    if sweep > 2 * PI then sweep = 2 * PI end
+
+    -- Walk in steps of delta_psi, starting AT psi_start + sign*delta_psi
+    -- (skip psi_start itself; it's already on the previous segment)
+    local n_steps = math.floor(sweep / delta_psi)
+    for i = 1, n_steps do
+        local psi = psi_start + sign * i * delta_psi
+        local x, y = arc_point(xc, yc, rho, psi)
+        points[#points + 1] = {x = x, y = y, psi = psi}
+    end
+    -- Snap to exact endpoint if the last full step didn't reach it
+    if sweep - n_steps * delta_psi > 1e-6 then
+        local psi = psi_start + sign * sweep
+        local x, y = arc_point(xc, yc, rho, psi)
+        points[#points + 1] = {x = x, y = y, psi = psi}
     end
 end
+
+
 
 -- generate striaght points
 local function generate_straight_points(points, x_start, y_start, theta, total_d, delta_d)
@@ -270,13 +318,22 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     --generate_arc_points(LSR_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
     generate_arc_points(LSR_points, xLi, yLi, rho,  psi_i + PI/2,  theta + PI/2,  delta_psi, false)
 
-    if #LSR_points == 0 then
-        return nil, math.huge
+    -- handle degenartive points
+    local sx, sy
+    if #LSR_points > 0 then
+        sx, sy = LSR_points[#LSR_points].x, LSR_points[#LSR_points].y
+    else
+        sx, sy = xi, yi
     end
-
-    -- Straight
-    local last = LSR_points[#LSR_points]
-    generate_straight_points(LSR_points, last.x, last.y, theta, straight_len, delta_d)
+    generate_straight_points(LSR_points, sx, sy, theta, straight_len, delta_d)
+    -- if #LSR_points == 0 then
+    --     return nil, math.huge
+    -- end
+    
+    -- -- Straight
+    -- local last = LSR_points[#LSR_points]
+    
+    -- generate_straight_points(LSR_points, last.x, last.y, theta, straight_len, delta_d)
     -- Generate right
     --generate_arc_points(LSR_points, xRf, yRf, rho, theta, psi_f, delta_psi, false)
     generate_arc_points(LSR_points, xRf, yRf, rho,  theta - PI/2,  psi_f - PI/2,  delta_psi, true)
@@ -297,12 +354,23 @@ local function generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     generate_arc_points(LSL_points, xLi, yLi, rho, psi_i + PI/2, theta + PI/2, delta_psi, false)
     --generate_arc_points(LSL_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
 
-    if #LSL_points == 0 then
-        return nil, math.huge
+    -- if #LSL_points == 0 then
+    --     return nil, math.huge
+    -- end
+    -- -- Straight
+    -- local last = LSL_points[#LSL_points]
+    -- generate_straight_points(LSL_points, last.x, last.y, theta, straight_len, delta_d)
+
+    -- hanlde colinear case
+    local sx, sy
+    if #LSL_points > 0 then
+        sx, sy = LSL_points[#LSL_points].x, LSL_points[#LSL_points].y
+    else
+        sx, sy = xi, yi
     end
-    -- Straight
-    local last = LSL_points[#LSL_points]
-    generate_straight_points(LSL_points, last.x, last.y, theta, straight_len, delta_d)
+    -- generate straight line
+    generate_straight_points(LSL_points, sx, sy, theta, straight_len, delta_d)
+
     -- Generate Left
      --   generate_arc_points(LSL_points, xLf, yLf, rho, theta, psi_f, delta_psi, true)
 
@@ -323,12 +391,27 @@ local function generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     if theta == nil then return nil, math.huge end
     -- generate right
     generate_arc_points(RSL_oints, xRi, yRi, rho, psi_i - PI/2, theta - PI/2, delta_psi, true)
-    if #RSL_oints == 0 then
-        return nil, math.huge
+
+
+
+    -- if #RSL_oints == 0 then
+    --     return nil, math.huge
+    -- end
+    -- -- Straight
+    -- local last = RSL_oints[#RSL_oints]
+    -- generate_straight_points(RSL_oints, last.x, last.y, theta, straight_len, delta_d)
+
+    -- handle colinear case 
+    local sx, sy
+    if #RSL_oints > 0 then
+        sx, sy = RSL_oints[#RSL_oints].x, RSL_oints[#RSL_oints].y
+    else
+        sx, sy = xi, yi
     end
-    -- Straight
-    local last = RSL_oints[#RSL_oints]
-    generate_straight_points(RSL_oints, last.x, last.y, theta, straight_len, delta_d)
+    --- generate straight
+    generate_straight_points(RSL_oints, sx, sy, theta, straight_len, delta_d)
+
+
     -- generate left
     generate_arc_points(RSL_oints, xLf, yLf, rho, theta + PI/2, psi_f + PI/2, delta_psi, false)
 
@@ -346,12 +429,23 @@ local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local theta, straight_len = rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     -- generate right
     generate_arc_points(RSR_points, xRi, yRi, rho, psi_i- PI/2, theta- PI/2, delta_psi, true)
-    if #RSR_points == 0 then
-        return nil, math.huge
+
+    -- handle colinear case 
+    local sx, sy
+    if #RSR_points > 0 then
+        sx, sy = RSR_points[#RSR_points].x, RSR_points[#RSR_points].y
+    else
+        sx, sy = xi, yi
     end
-    -- Straight
-    local last = RSR_points[#RSR_points]
-    generate_straight_points(RSR_points, last.x, last.y, theta, straight_len, delta_d)
+    --- generate straight
+    generate_straight_points(RSR_points, sx, sy, theta, straight_len, delta_d)
+
+    -- if #RSR_points == 0 then
+    --     return nil, math.huge
+    -- end
+    -- -- Straight
+    -- local last = RSR_points[#RSR_points]
+    -- generate_straight_points(RSR_points, last.x, last.y, theta, straight_len, delta_d)
     -- generate right
     generate_arc_points(RSR_points, xRf, yRf, rho, theta- PI/2, psi_f- PI/2, delta_psi, true)
 
