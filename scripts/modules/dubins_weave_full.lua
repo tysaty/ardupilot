@@ -249,6 +249,7 @@ end
 -- end
 
 -- alternate with degeneration
+
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
     -- Skip degenerate, zero sweep arcs
     -- Previosuly emitting one phantom point at psi_start that doesn't connect to the
@@ -318,6 +319,7 @@ end
 
 -- generating LSR
 local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    
     local LSR_points = {}
     local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
     local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)

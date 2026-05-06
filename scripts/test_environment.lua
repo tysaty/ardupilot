@@ -700,13 +700,5 @@ local function update()
     return update, 200
 end
 
--- if not IS_SITL then
---     gcs:send_text(MAV_SEVERITY.INFO, "TENV: SITL-only, inactive on hardware")
---     local function inactive()
---         return inactive, 60000
---     end
---     return inactive, 60000
--- end
-
 startup()
 return update, 200

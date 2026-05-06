@@ -69,7 +69,10 @@ for key = 0, 200 do
     end
 end
 assert(CTRL_TABLE_KEY ~= nil, "CTRL: no free param table key")
--- Parameter value delcarations
+
+-- -- -----------------------------------------------------------------------
+-- -- Paramater value declaration for control algorithm
+-- -- -----------------------------------------------------------------------
 -- Dubins path rebuild interval (ms)
 local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 6000)
 -- local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 2000)
@@ -81,12 +84,12 @@ local CTRL_MIN_WP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREF
 local CTRL_STREAK = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "STREAK", 4, 1)
 -- local CTRL_STREAK = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "STREAK", 4, 2)
 -- Minimum distance that the follower is travelling at for the dubins controller to activate
+--- this requires tuning... (750 m in the radisu)
 local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_DIST", 5, 750)
 -- local CTRL_DUBINS_ON_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_DIST", 5, 400)
 -- Velocity that the follower vehicle is travelling at for the dubins controller to activate
 local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 30)
 -- local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "DUB_VEL", 6, 15)
-
 -- additional swapping control 3 May
 -- Minimum improvement in final-point distance (m) before swapping to a new Dubins path, set to 50 m
 local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
@@ -212,6 +215,7 @@ local reached_index = -1
 -- error variables
 local cum_L1_error = 0.0
 local cum_L2_error = 0.0
+local error_samples = 0
 
 -- local function get_point_accept_radius_m(point, next_point)
     
@@ -468,8 +472,11 @@ local function engage_control_state(current_mode, dubins_point_active, dubins_po
         }
     end
 
-    --
-    local trigger_met = dist_m <= min_distance or speed_ms <= min_speed
+    -- new trigger
+    local trigger_met = dist_m <= min_distance and speed_ms <= min_speed
+    -- old trigger (before 7 May)
+    -- note rerun autotest
+    ---local trigger_met = dist_m <= min_distance or speed_ms <= min_speed
 
     if trigger_met then
         return {
@@ -587,13 +594,12 @@ function update()
 
         local pos2 = ahrs:get_position()
 
-        -- error tracking - not working properly since adding it in 
         if pos2 and point and point.loc then
             local l1, l2 = compute_track_er(pos2, point.loc)
             if l1 then
                 cum_L1_error = cum_L1_error + l1
                 cum_L2_error = cum_L2_error + l2
-
+                error_samples = error_samples + 1
             end
         end
         -- periodic distance report
@@ -611,8 +617,9 @@ function update()
 
             gcs:send_text(4, string.format("Dubins point %d/%d dist=%.1fm",
                 dubins_point_index, dubins_point_count, dist_2d))
+            local n = math.max(error_samples, 1)
             gcs:send_text(4, string.format("Dubins error L1 Norm:%.1fm L2 Norm:%.1fm",
-                cum_L1_error, cum_L2_error))
+                cum_L1_error / n, cum_L2_error / n))
             last_report_ms = now_ms
         end
 
