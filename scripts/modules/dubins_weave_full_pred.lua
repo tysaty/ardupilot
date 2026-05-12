@@ -1,17 +1,21 @@
 -- ---------------------------------------------------------
 -- Dubins Path Implementation - 2 Dimensional
+-- PREDICTION-AWARE VERSION (dubins_weave_full_pred.lua)
+-- Exposes total_length_m in build_path metadata so that
+-- control_pred.lua can compute flight-time for kangaroo prediction.
+-- Original file: dubins_weave_full.lua (do not modify that file)
 
 -- The core Dubins path generator, that returns the optimal
 -- path between two points (the plane and the kangaroo).
 -- Currently only implemneted in 2-dimensions, requries
--- extnesion into 3D following successfuly tests. 
+-- extnesion into 3D following successfuly tests.
 
 -- Main reference for equeations:
--- Lugo-Cárdenas, Israel & Flores, Gerardo & Salazar, Sergio & Lozano, R.. (2014). 
--- Dubins path generation for a fixed wing UAV. 339-346. 10.1109/ICUAS.2014.6842272. 
+-- Lugo-Cárdenas, Israel & Flores, Gerardo & Salazar, Sergio & Lozano, R.. (2014).
+-- Dubins path generation for a fixed wing UAV. 339-346. 10.1109/ICUAS.2014.6842272.
 -- ---------------------------------------------------------
 -- ---------------------------------------------------------
--- Section 1: Configuration 
+-- Section 1: Configuration
 -- captures turn radius, waypoint acceptance, starting condition (i.e. left or right)
 -- setting absolute to be the same altitutde as the reference (MAJOR ASSUMPTION IN CODE - NEED TO FIX)
 -- ---------------------------------------------------------
@@ -23,7 +27,7 @@ local PHI_MAX_RAD = math.rad(45)
 local math_helpers = require("math_helpers")
 
 -- ---------------------------------------------------------
--- Section 2: Current state values - vehicle configuration 
+-- Section 2: Current state values - vehicle configuration
 -- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
 -- ---------------------------------------------------------
 
@@ -78,8 +82,8 @@ end
 -- ---------------------------------------------------------
 local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     local l = math_helpers.dist2d(xLi, yLi, xRf, yRf)
-    if l < 2.0 * rho then 
-        return nil, nil 
+    if l < 2.0 * rho then
+        return nil, nil
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
@@ -120,8 +124,8 @@ end
 
 local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
     local l = math_helpers.dist2d(xRi, yRi, xLf, yLf)
-    if l < 2.0 * rho then 
-        return nil, nil 
+    if l < 2.0 * rho then
+        return nil, nil
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
     local eta = (PI / 2.0) - math.atan(yLf - yRi, xLf - xRi)
@@ -135,7 +139,7 @@ end
 -- RSR Geometry
 -- theta = pi/2 - atan2(yRf - yRi, xRf - xRi)
 -- straight_length = sqrt((xRf - xRi)^2 + (yRf - yRi)^2)
--- no gamma because of external tangents 
+-- no gamma because of external tangents
 -- ---------------------------------------------------------
 local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local dx = xRf - xRi
@@ -148,7 +152,7 @@ end
 -- ---------------------------------------------------------
 -- RLR Geometry
 -- TBA
--- no gamma because of external tangents 
+-- no gamma because of external tangents
 -- ---------------------------------------------------------
 local function rlr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local dx = xRf - xRi
@@ -161,7 +165,7 @@ end
 -- ---------------------------------------------------------
 -- LRL Geometry
 -- TBA
--- no gamma because of external tangents 
+-- no gamma because of external tangents
 -- ---------------------------------------------------------
 local function lrl_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local dx = xRf - xRi
@@ -264,23 +268,23 @@ local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delt
     local sign
     -- increasing case for clockwise
     if increasing then
-        if psi_end < psi_start then 
-            psi_end = psi_end + 2 * PI 
+        if psi_end < psi_start then
+            psi_end = psi_end + 2 * PI
         end
         sweep = psi_end - psi_start
         sign = 1
     -- else it's counterclockwise
     else
-        if psi_end > psi_start then 
-            psi_end = psi_end - 2 * PI 
+        if psi_end > psi_start then
+            psi_end = psi_end - 2 * PI
         end
         sweep = psi_start - psi_end
         sign = -1
     end
 
     -- Cap sweep at one full circle to prevent runaway on noisy inputs
-    if sweep > 2 * PI then 
-        sweep = 2 * PI 
+    if sweep > 2 * PI then
+        sweep = 2 * PI
     end
 
     -- Steps of delta_psi, starting AT psi_start + sign*delta_psi
@@ -322,8 +326,8 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local xRf, yRf = circle_center_right(xf, yf, psi_f, rho)
     local theta, straight_len = lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
     -- nil case for theta
-    if theta == nil then 
-        return nil, math.huge 
+    if theta == nil then
+        return nil, math.huge
     end
     -- Generate Left
     --generate_arc_points(LSR_points, xLi, yLi, rho, psi_i, theta, delta_psi, true)
@@ -340,10 +344,10 @@ local function generate_LSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- if #LSR_points == 0 then
     --     return nil, math.huge
     -- end
-    
+
     -- -- Straight
     -- local last = LSR_points[#LSR_points]
-    
+
     -- generate_straight_points(LSR_points, last.x, last.y, theta, straight_len, delta_d)
     -- Generate right
     --generate_arc_points(LSR_points, xRf, yRf, rho, theta, psi_f, delta_psi, false)
@@ -412,7 +416,7 @@ local function generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- local last = RSL_oints[#RSL_oints]
     -- generate_straight_points(RSL_oints, last.x, last.y, theta, straight_len, delta_d)
 
-    -- handle colinear case 
+    -- handle colinear case
     local sx, sy
     if #RSL_oints > 0 then
         sx, sy = RSL_oints[#RSL_oints].x, RSL_oints[#RSL_oints].y
@@ -441,7 +445,7 @@ local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- generate right
     generate_arc_points(RSR_points, xRi, yRi, rho, psi_i- PI/2, theta- PI/2, delta_psi, true)
 
-    -- handle colinear case 
+    -- handle colinear case
     local sx, sy
     if #RSR_points > 0 then
         sx, sy = RSR_points[#RSR_points].x, RSR_points[#RSR_points].y
@@ -486,7 +490,7 @@ local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     --local RSL_distance = RSL_points and (#RSL_points * delta_d) or math.huge
     --local RSR_distance = RSR_points and (#RSR_points * delta_d) or math.huge
 
-    -- candidate list: keeping all values together 
+    -- candidate list: keeping all values together
     local candidates = {
         {distance = LSR_distance, points = LSR_points, name = "LSR"},
         {distance = LSL_distance, points = LSL_points, name = "LSL"},
@@ -545,7 +549,8 @@ end
 
 -- ---------------------------------------------------------
 -- Section 7: Build Path
--- get the target location from the kangaroo bus (consumed in control.lua)
+-- get the target location from the kangaroo bus (consumed in control_pred.lua)
+-- Change vs original: total_length_m is now captured and returned in metadata.
 -- --------------------------------------------------------
 
 local function build_path(kangaroo_state)
@@ -583,7 +588,7 @@ local function build_path(kangaroo_state)
     local speed_f = math.sqrt(vn_f * vn_f + ve_f * ve_f)
     local psi_f
 
-    -- safety 
+    -- safety
     if speed_f > 0.5 then   -- only trust heading if target is actually moving
         psi_f = math.atan(ve_f, vn_f)
     else
@@ -594,7 +599,8 @@ local function build_path(kangaroo_state)
     -- tune these points
     --- optimal path
     --local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-    local _, rel_points, path_type = optimal_path(0.0, 0.0, yaw, rel_ne:y(), rel_ne:x(), psi_f, rho, math.rad(15), 50.0)
+    -- total_length_m captured here (was discarded as _ in the original)
+    local total_length_m, rel_points, path_type = optimal_path(0.0, 0.0, yaw, rel_ne:y(), rel_ne:x(), psi_f, rho, math.rad(15), 50.0)
 
     if rel_points == nil or #rel_points == 0 then
         return nil, "empty_relative_path"
@@ -610,11 +616,12 @@ local function build_path(kangaroo_state)
 
     -- otherwise return
     return abs_points, {
-        rho_m = rho,
+        rho_m             = rho,
+        total_length_m    = total_length_m,
         target_distance_m = math.sqrt(rel_ne:x() * rel_ne:x() + rel_ne:y() * rel_ne:y()),
-        point_count = #abs_points,
-        frame = "absolute",
-        path_type = path_type
+        point_count       = #abs_points,
+        frame             = "absolute",
+        path_type         = path_type
     }
 end
 

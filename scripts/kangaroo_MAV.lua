@@ -99,7 +99,7 @@ local KBUS_VE  = param_helpers.bind_add_param(KBUS_TABLE_KEY, KBUS_TABLE_PREFIX,
 -- ---------------------------------------------------------
 -- establish key for aparemeter table
 for key = 0, 200 do
-    if param:add_table(key, PARAM_TABLE_PREFIX, 23) then
+    if param:add_table(key, PARAM_TABLE_PREFIX, 24) then
         PARAM_TABLE_KEY = key
         gcs:send_text(MAV_SEVERITY.WARNING, string.format("KANG: using key %d", key))
         break
@@ -333,6 +333,15 @@ local KANG_REC_L = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
 --]]
 local KANG_REC_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "REC_HDG", 23, 0)
 
+--[[
+  // @Param: KANG_POINT
+  // @DisplayName: Kangaroo point
+  // @Description: Enable the virtual target as a static point - position set via KANG_STR_HDG, KANG_OFS_M, KANG_LAT_DISP
+  // @Values: 0:Disabled,1:Enabled
+  // @User: Standard
+--]]
+local KANG_POINT = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "POINT", 24, 0)
+
 -- local variables initisalising
 local anchor_loc = nil
 local target_loc = nil
@@ -365,16 +374,19 @@ local function get_radius_m()
 end
 
 local function get_active_mode()
-    if KANG_STRAIGHT:get() >= 1 then 
-        return "straight"  
+    if KANG_POINT:get() >= 1 then
+        return "point"
     end
-    if KANG_CIRCLE:get() >= 1 then 
-        return "circle"    
+    if KANG_STRAIGHT:get() >= 1 then
+        return "straight"
     end
-    if KANG_RECTANGLE:get() >= 1 then 
-        return "rectangle" 
+    if KANG_CIRCLE:get() >= 1 then
+        return "circle"
     end
-    if KANG_RANDOM:get() >= 1 then 
+    if KANG_RECTANGLE:get() >= 1 then
+        return "rectangle"
+    end
+    if KANG_RANDOM:get() >= 1 then
         return "random"
     end
     return nil
@@ -386,7 +398,8 @@ local function update_target_location()
     end
     target_loc = anchor_loc:copy()
     target_loc:offset(target_north, target_east)
-    target_loc:set_alt_m((anchor_loc:alt() * 0.01) + math_helpers.clamp(KANG_ALT_M:get(), 20, 300), ALT_FRAME_ABSOLUTE)
+    -- target_loc:set_alt_m((anchor_loc:alt() * 0.01) + math_helpers.clamp(KANG_ALT_M:get(), 20, 300), ALT_FRAME_ABSOLUTE)
+    target_loc:set_alt_m(anchor_loc:alt() * 0.01, ALT_FRAME_ABSOLUTE)
 end
 
 local function choose_heading(bound_m, turn_deg)
@@ -533,8 +546,13 @@ local function ensure_anchor(now_ms)
     local fwd_m = math_helpers.clamp(KANG_OFS_M:get(), 0, 20000)
     local mode = get_active_mode()
 
+    -- static point
+    if mode == "point" then
+        local pt = heading_frame_offset(math_helpers.clamp(KANG_STR_HDG:get(), 0, 360), fwd_m, disp_m)
+        target_north = pt.n
+        target_east  = pt.e
     -- random walk
-    if mode == "random" then
+    elseif mode == "random" then
         heading_deg  = start_hdg
         target_north = orbit_north
         target_east  = orbit_east
@@ -673,6 +691,13 @@ local function integrate_rectangle(dt)
     heading_deg  = math_helpers.wrap_360(math.deg(math.atan(de, dn)))
 end
 
+local function integrate_point()
+    speed_mps  = 0
+    target_vn  = 0
+    target_ve  = 0
+    heading_deg = 0
+end
+
 -- move the function forward in time
 local function integrate_target(now_ms)
     if not target_ready then
@@ -684,7 +709,8 @@ local function integrate_target(now_ms)
     last_update_ms = now_ms
 
     local mode = get_active_mode()
-    if     mode == "random"    then integrate_random(now_ms, dt)
+    if     mode == "point"     then integrate_point()
+    elseif mode == "random"    then integrate_random(now_ms, dt)
     elseif mode == "straight"  then integrate_straight(dt)
     elseif mode == "circle"    then integrate_circle(dt)
     elseif mode == "rectangle" then integrate_rectangle(dt)

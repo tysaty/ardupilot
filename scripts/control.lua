@@ -1,4 +1,6 @@
--- establish a control loop - state handling
+-- =========================================================
+-- Control loop 
+-- =========================================================
 
 -- if in gudied or auto
 local MODE_AUTO = 10
@@ -18,7 +20,6 @@ local last_report_ms = 0
 -- maintain aircraft 150m above virtual target altitude
 local PLANE_ABOVE_TARGET_M = 150.0
 local KANG_ALT_M_FALLBACK = 80.0
-
 
 -- KBUS_ bus params (owned by kangaroo_MAV.lua)
 -- bounded loosely because control.lua will boot first (alpha betical)
@@ -57,10 +58,11 @@ local param_helpers = require("param_helpers")
 gcs:send_text(4, "Control: loaded at boot")
 
 -- ---------------------------------------------------------
--- Parameter tabel for control variables
+-- Parameter table for control variables
 -- ---------------------------------------------------------
 local CTRL_TABLE_PREFIX = "CTRL_"
 local CTRL_TABLE_KEY = nil
+
 -- establish parameter table key
 for key = 0, 200 do
     if param:add_table(key, CTRL_TABLE_PREFIX, 9) then
@@ -201,7 +203,8 @@ function fly_to_dubins_point(point)
 
     local target_loc = point.loc:copy()
     target_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
-    local target_alt_m = home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
+    -- local target_alt_m = home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
+    local target_alt_m = home_alt_m + 150.0
     target_loc:set_alt_m(target_alt_m, ALT_FRAME_ABSOLUTE)
 
     return vehicle:set_target_location(target_loc)
@@ -212,13 +215,25 @@ end
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1
+
+-- replacing error with cost function
 -- error variables
 local cum_L1_error = 0.0
 local cum_L2_error = 0.0
 local error_samples = 0
 
+
+-- predictive step
+
+
+
+-- cost function
+
+
+
+
+
 -- local function get_point_accept_radius_m(point, next_point)
-    
 local function get_point_accept_radius_m(point, next_point)
     local accept_radius_m = CTRL_WP_RAD:get()
     if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
@@ -525,7 +540,6 @@ function update()
     if kangaroo_loc_latest then
         kangaroo_loc_pending = kangaroo_loc_latest
     end
-
    
     local pos = ahrs:get_position()
     -- establishing the state
@@ -649,7 +663,8 @@ function update()
             if home_alt_m then
                 local direct_loc = kangaroo_loc_pending.loc:copy()
                 direct_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
-                direct_loc:set_alt_m(home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M, ALT_FRAME_ABSOLUTE)
+                -- direct_loc:set_alt_m(home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M, ALT_FRAME_ABSOLUTE)
+                direct_loc:set_alt_m(home_alt_m + 150.0, ALT_FRAME_ABSOLUTE)
                 vehicle:set_target_location(direct_loc)
             end
         end
