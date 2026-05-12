@@ -56,6 +56,7 @@ function M.wrap_pi(i)
     return i
 end
 
+
 -- Euclidean distance
 function M.dist2d(x1, y1, x2, y2)
     local dx = x2 - x1

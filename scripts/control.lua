@@ -53,6 +53,16 @@ local last_bus_seq_seen = 0
 local dubins_points = require("dubins_weave_full")
 local math_helpers = require("math_helpers")
 local param_helpers = require("param_helpers")
+local kf = require("state_estimator")
+
+-- initialising for KF filter - NE Origin fixed
+local kf_ref_loc = nil
+-- latest state reading
+local kf_state = nil
+-- timestamp of last KF update (ms)
+local last_kf_t_ms = nil
+local kf_initialized = false
+
 
 -- boot message
 gcs:send_text(4, "Control: loaded at boot")
@@ -97,6 +107,11 @@ local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TAB
 local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
 -- Cooldown (ms) after a swap before another swap is allowed
 local CTRL_SWAP_COOL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_COOL", 8, 1000)
+
+
+--- receding time horizon for MPC
+--local T_Horizon_s = CTRL_REBUILD_MS:get() * 0.001
+
 
 
 -- -- -----------------------------------------------------------------------
@@ -168,6 +183,7 @@ local function get_home_alt_m()
     return nil
 end
 
+-- scrap
 -- local function broadcast_dubins_vis()
 --     if dubins_points_active == nil then 
 --         return 
@@ -210,27 +226,10 @@ function fly_to_dubins_point(point)
     return vehicle:set_target_location(target_loc)
 end
 
-
 -- Error function 
 -- flags for target reach
 local reached_streak = 0
 local reached_index = -1
-
--- replacing error with cost function
--- error variables
-local cum_L1_error = 0.0
-local cum_L2_error = 0.0
-local error_samples = 0
-
-
--- predictive step
-
-
-
--- cost function
-
-
-
 
 
 -- local function get_point_accept_radius_m(point, next_point)
@@ -415,24 +414,200 @@ local function get_path_final_loc(path)
     return last and last.loc or nil
 end
 
--- Swap to new Dubins path if its final point is closer to the kangaroo
-local function should_swap_dubins_path(kangaroo_loc, active_final_loc, new_final_loc, margin_m)
-    if not kangaroo_loc or not active_final_loc or not new_final_loc then
+-- -- Swap to new Dubins path if its final point is closer to the kangaroo
+-- local function should_swap_dubins_path(kangaroo_loc, active_final_loc, new_final_loc, margin_m)
+--     if not kangaroo_loc or not active_final_loc or not new_final_loc then
+--         return false
+--     end
+
+--     margin_m = margin_m or 0
+
+--     local active_dist = kangaroo_loc:get_distance(active_final_loc)
+--     local new_dist    = kangaroo_loc:get_distance(new_final_loc)
+
+--     -- swap only if new path is closer by at least margin_m
+--     if new_dist + margin_m < active_dist then
+--         return true, active_dist, new_dist
+--     end
+
+--     return false, active_dist, new_dist
+-- end
+
+-- replacing error with cost function
+-- error variables
+local cum_L1_error = 0.0
+local cum_L2_error = 0.0
+local error_samples = 0
+
+-- predictive step
+local function predict_position(kangaroo_state, t)
+    -- predict kangaroo values
+    local x = kangaroo_state.x + kangaroo_state.vx * t
+    local y = kangaroo_state.y + kangaroo_state.vy * t
+    local heading = math.atan(kangaroo_state.vy, kangaroo_state.vx)
+    return x, y, heading
+end
+
+
+-- update Kalman filter
+local function update_kf(sample)
+
+    -- first init
+    if not kf_initialized then
+        kf_ref_loc   = sample.loc:copy()
+        last_kf_t_ms = sample.timestamp_ms
+        kf.init(0, 0)
+        kf_initialized = true
+        return
+    end
+    -- time interval
+    local dt_s = (sample.timestamp_ms - last_kf_t_ms) * 0.001
+
+    -- guard against stale/reversed samples
+    if dt_s <= 0 or dt_s > 10.0 then 
+        return 
+    end 
+
+    -- convert lat/lon to NE metres relative to fixed origin
+    local ne = kf_ref_loc:get_distance_NE(sample.loc)
+    if ne == nil then 
+        return 
+    end
+
+    local result = kf.update(ne:x(), ne:y(), dt_s)
+    if result then
+        kf_state      = result
+        last_kf_t_ms  = sample.timestamp_ms
+    end
+end
+
+
+
+-- period (T) may require extended to match flight time
+-- in the event that the plane is further away than one rebuild
+---
+local function compute_lookahead_s(plane_loc, wp_loc)
+    -- rebuild interval is the minimum horizon
+    local floor_s = CTRL_REBUILD_MS:get() * 0.001
+
+    -- initisalising case
+    if plane_loc == nil or wp_loc == nil then 
+        return floor_s 
+    end
+
+    -- actual velocity
+    local vel = ahrs:get_velocity_NED()
+    local speed = vel and math.sqrt(vel:x()^2 + vel:y()^2) or 0
+    if speed < 5.0 then 
+        return floor_s 
+    end
+
+    -- location from waypoint
+    local dn = plane_loc:get_distance_NE(wp_loc)
+    if dn == nil then return floor_s end
+    local dist = math.sqrt(dn:x()^2 + dn:y()^2)
+
+    -- T >= rebuild interval; extend if flight time to wp is longer
+    return math.max(floor_s, dist / speed)
+end
+
+-- normalisation reference for distance terms (m)
+local REF_DIST_M = 1000.0
+-- weights — must sum to 1
+-- TO DO MAY 13 - add as parameter - adds to one 
+-- path endpoint closeness to predicted kangaroo
+local W_DIST_TO_KANG = 0.4
+-- path effort (plane to endpoint distance)
+local W_DIST_TO_PLANE = 0.2
+-- endpoint heading alignment with kangaroo direction
+local W_HDG_TO_KANG = 0.2
+-- heading change required from current plane heading
+local W_HDG_CHANGE = 0.2
+
+-- cost function
+-- next_loc: Location of next waypoint in path; next_psi: heading (rad) at that waypoint
+-- plane_loc: current plane Location; plane_heading: current plane heading (rad, from ahrs:get_yaw())
+-- kangaroo_loc: current kangaroo Location; kangaroo_state: KF output {x,y,vx,vy}
+-- lookahead_s: prediction horizon (s) for MPC
+-- 12 May update
+
+local function cost_function(next_loc, next_psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
+    -- guard against cost function being empty
+    -- the behaviour is that it locks back onto home when one of the values is nil
+    if not next_loc or not plane_loc or not kangaroo_loc or not kangaroo_state
+       or next_psi == nil or plane_heading == nil then
+        return math.huge
+    end
+
+    -- predict kangaroo location ahead by lookahead_s using KF velocity
+    local pred_loc = kangaroo_loc:copy()
+    pred_loc:offset(kangaroo_state.vx * lookahead_s, kangaroo_state.vy * lookahead_s)
+
+    -- distance between next step and the predicted value of the kangaroo
+    local dn1 = next_loc:get_distance_NE(pred_loc)
+    if not dn1 then return math.huge end
+    local dist_to_kang = math.sqrt(dn1:x()^2 + dn1:y()^2)
+
+    -- distance from the next spot to the plane (proxy for path effort)
+    local dn2 = plane_loc:get_distance_NE(next_loc)
+    if not dn2 then return math.huge end
+    local dist_to_change = math.sqrt(dn2:x()^2 + dn2:y()^2)
+
+    -- difference in kangaroo heading and trajecotry heading
+    if kangaroo_state.vx == nil or kangaroo_state.vy == nil then return math.huge end
+    local kang_heading = math.atan(kangaroo_state.vy, kangaroo_state.vx)
+    local heading_to_kang = math.abs(math_helpers.wrap_pi(next_psi - kang_heading))
+
+    -- difference in trajectory heading and the most recent heading (i.e. to prevent a massive change in direction)
+    local bearing_to_end = math.atan(dn2:y(), dn2:x())
+    local heading_change = math.abs(math_helpers.wrap_pi(plane_heading - bearing_to_end))
+
+    local J = W_DIST_TO_KANG  * (dist_to_kang  / REF_DIST_M)
+            + W_DIST_TO_PLANE * (dist_to_change / REF_DIST_M)
+            + W_HDG_TO_KANG   * (heading_to_kang / math.pi)
+            + W_HDG_CHANGE    * (heading_change   / math.pi)
+
+    return J
+end
+
+
+-- select optimal route — compares next waypoint of active path vs next waypoint of new path
+local function should_swap_dubin_path(plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
+    -- maintaining state machine
+    if not kangaroo_loc or not kangaroo_state then
+        return false
+    end
+    if dubins_points_active == nil or dubins_point_index == nil then
+        return false
+    end
+    if dubins_points_new == nil then
         return false
     end
 
-    margin_m = margin_m or 0
+    -- next waypoint of the active path (what the plane is currently flying toward)
+    local active_next = dubins_points_active[dubins_point_index]
 
-    local active_dist = kangaroo_loc:get_distance(active_final_loc)
-    local new_dist    = kangaroo_loc:get_distance(new_final_loc)
+    -- next waypoint of the newly generated path - index starts at 1
+    local new_next = dubins_points_new[1]
 
-    -- swap only if new path is closer by at least margin_m
-    if new_dist + margin_m < active_dist then
-        return true, active_dist, new_dist
+    if not active_next or not active_next.loc or not new_next or not new_next.loc then
+        return false
     end
 
-    return false, active_dist, new_dist
+    -- the current J of the active path next point
+    local J_active = cost_function(active_next.loc, active_next.psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
+    
+    -- newly updated J of the new path next point
+    local J_new    = cost_function(new_next.loc, new_next.psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
+
+    if J_new < J_active then
+        return true, J_active, J_new
+    end
+
+    return false, J_active, J_new
 end
+
+
 
 local function commit_dubins_path()
     dubins_points_active = dubins_points_new
@@ -462,7 +637,6 @@ end
 
 -- function to trigger the weaving functionality - else just follow per guided/auto
 local function engage_control_state(current_mode, dubins_point_active, dubins_point_index, pos_loc, target_loc)
-    
     -- nil guards
     if pos_loc == nil or target_loc == nil then
         return nil
@@ -490,7 +664,6 @@ local function engage_control_state(current_mode, dubins_point_active, dubins_po
     -- new trigger
     local trigger_met = dist_m <= min_distance and speed_ms <= min_speed
     -- old trigger (before 7 May)
-    -- note rerun autotest
     ---local trigger_met = dist_m <= min_distance or speed_ms <= min_speed
 
     if trigger_met then
@@ -511,9 +684,6 @@ local function engage_control_state(current_mode, dubins_point_active, dubins_po
 end
 
 
--- need to add hysterisis to deal with edge case
-
-
 -- -----------------------------------------------------------------------
 -- Revised update() — rebuild Dubins path every second from latest bus target,
 -- walk through points as they are reached.
@@ -522,9 +692,6 @@ end
 -- 1. kanagroo_loc_latest, the newest bus sample
 -- 2. kangaroo_loc_pending, the allocated target to build from
 -- 3. kangaroo_loc_active, the target currently being weaved in
-
---- 19 April to do 
---- dubins path - cost function for two paths - select optimal path
 
 -- -----------------------------------------------------------------------
 local last_rebuild_ms     = 0
@@ -535,10 +702,13 @@ function update()
 
     local now_ms = millis():toint()
 
-    -- always absorb the latest bus sample
+    -- always absorb the latest bus sample; track if KF ran this tick
+    local kf_ran = false
     local kangaroo_loc_latest = read_bus_target()
     if kangaroo_loc_latest then
         kangaroo_loc_pending = kangaroo_loc_latest
+        update_kf(kangaroo_loc_latest)
+        kf_ran = true
     end
    
     local pos = ahrs:get_position()
@@ -557,9 +727,23 @@ function update()
 
     -- rebuild every second from the latest known target
     if state.build then
-        if (now_ms - last_rebuild_ms) >= CTRL_REBUILD_MS:get() then
+        -- handling timing errors
+        if not kf_ran and (now_ms - last_rebuild_ms) >= CTRL_REBUILD_MS:get() then
             last_rebuild_ms = now_ms
-            local success, build_info = update_build(kangaroo_loc_pending)
+            --local success, build_info = update_build(kangaroo_loc_pending)
+            -- predicting based on future target
+            local build_target = kangaroo_loc_pending
+
+            if kf_state then
+                local T = CTRL_REBUILD_MS:get() * 0.001
+                local pred_loc = kangaroo_loc_pending.loc:copy()
+                pred_loc:offset(kf_state.vx * T, kf_state.vy * T)
+                build_target = {loc = pred_loc, vn = kangaroo_loc_pending.vn, ve = kangaroo_loc_pending.ve,
+                seq = kangaroo_loc_pending.seq, timestamp_ms = kangaroo_loc_pending.timestamp_ms
+                }
+            end
+
+            local success, build_info = update_build(build_target)
             if success then
                 if dubins_points_active == nil then
                     -- no active path yet, commit immediately
@@ -575,8 +759,20 @@ function update()
                     local new_final    = get_path_final_loc(dubins_points_new)
                     local kang_loc     = kangaroo_loc_pending and kangaroo_loc_pending.loc
                     -- manage switching trade off
-                    local swap, adist, ndist = should_swap_dubins_path(kang_loc, active_final, new_final, CTRL_SWAP_DIST:get())
+                    --local swap, adist, ndist = should_swap_dubins_path(kang_loc, active_final, new_final, CTRL_SWAP_DIST:get())
                     
+                    
+                    -- update w/ cost function
+                    local plane_heading = ahrs:get_yaw() or 0
+                    local next_wp = dubins_points_active[dubins_point_index]
+                    local lookahead_s = compute_lookahead_s(pos, next_wp and next_wp.loc)
+
+                    local swap, J_active, J_new = should_swap_dubin_path(pos, plane_heading, kang_loc, kf_state, lookahead_s)
+
+                    if kf_state == nil then 
+                        swap = false 
+                    end
+
                     -- cooldown - hystersisi 
                     local cooldown_elapsed = (now_ms - last_swap_ms) >= CTRL_SWAP_COOL:get()
                     -- guarding from swapping too quickly...
@@ -584,8 +780,8 @@ function update()
                         local n_pts = #dubins_points_new
                         commit_dubins_path()
                         last_swap_ms = now_ms
-                        gcs:send_text(4, string.format("Dubins swapped: %d pts new=%.0fm < active=%.0fm type=%s rho=%.0fm",
-                            n_pts, ndist, adist,
+                        gcs:send_text(4, string.format("Dubins swapped: %d pts J_new=%.3f J_act=%.3f type=%s rho=%.0fm",
+                            n_pts, J_new, J_active,
                             (type(build_info) == "table" and build_info.path_type) or "?",
                             (type(build_info) == "table" and build_info.rho_m) or 0))
                     end

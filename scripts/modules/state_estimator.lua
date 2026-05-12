@@ -70,9 +70,8 @@ function kf.update(meas_x, meas_y, dt)
     local x_col = math_helpers.vec_to_col(kf.x)
 
     -- -----------------------------------------------------
-    -- Predict
+    -- Predict step
     -- -----------------------------------------------------
-
 
     -- prediction of x: x_pred = F . x
     local x_pred = math_helpers.mat_mul(F, x_col)
@@ -91,7 +90,7 @@ function kf.update(meas_x, meas_y, dt)
     local z = math_helpers.vec_to_col({meas_x, meas_y})
 
     -- updating y values: y = z - H . x_pred
-    local y = math_helpers.at_sub(z, math_helpers.mat_mul(H, x_pred))
+    local y = math_helpers.mat_sub(z, math_helpers.mat_mul(H, x_pred))
 
     -- invoking covariance/resiudal covariance
     -- S = H . P_pred . H(transpose) + R
@@ -125,13 +124,14 @@ function kf.update(meas_x, meas_y, dt)
 
     -- Correct covariance
     -- update prediction -- P_new = (I - K.H) . P_pred
+    -- note this is simplified - check any issues
     local P_new = math_helpers.mat_mul(
         math_helpers.mat_sub(I, math_helpers.mat_mul(K, H)),
         P_pred
     )
 
     -- flipping values
-    kf.x = col_to_vec(x_new)
+    kf.x = math_helpers.col_to_vec(x_new)
     kf.P = P_new
 
     -- return values

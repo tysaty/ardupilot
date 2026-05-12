@@ -22,28 +22,8 @@ local PHI_MAX_RAD = math.rad(45)
 
 local math_helpers = require("math_helpers")
 
--- ---------------------------------------------------------
--- Section 2: Current state values - vehicle configuration 
--- this is from the actual vehicle - update code to process imu_sample from leader acrchitecture
--- ---------------------------------------------------------
-
-
--- ---------------------------------------------------------
--- Section 3: constructing Dubins curves
--- ---------------------------------------------------------
 
 local PI = math.pi
-
--- ---------------------------------------------------------
--- kinematic equations
--- ---------------------------------------------------------
--- local function dubins_kinematics(x, y, psi, Vt, omega, dt)
---     local x_next = x + Vt * math.cos(psi) * dt
---     local y_next = y + Vt * math.sin(psi) * dt
---     local psi_next = psi + omega * dt
---     return x_next, y_next, math_helpers.wrap_pi(psi_next)
--- end
-
 
 -- ---------------------------------------------------------
 -- Minimum turn radius (rho)
@@ -171,6 +151,91 @@ local function lrl_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     return theta, straight_length
 end
 
+-- ---------------------------------------------------------
+-- RLR Geometry using Shkel/Lumelsky Eq. (11)
+
+
+--   0 = North, positive = clockwise
+-- Shkel/Lumelsky alpha:
+--   0 = East, positive = counter-clockwise
+local function lua_heading_to_paper_alpha(psi)
+    return math_helpers.wrap_2pi((PI / 2.0) - psi)
+end
+
+-----------------------------------------------------------
+-- Inputs use Lua heading convention:
+--   psi = 0 North, positive clockwise
+-- Internally converted to:
+--   alpha = 0 East, positive counter-clockwise
+-- ---------------------------------------------------------
+local function rlr_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
+    local dx = xf - xi
+    local dy = yf - yi
+    local D = math.sqrt(dx * dx + dy * dy)
+    local d = D / rho
+    -- converting values
+    local alpha = lua_heading_to_paper_alpha(psi_i)
+    local beta  = lua_heading_to_paper_alpha(psi_f)
+
+    local value = (
+        6.0 - d * d + 2.0 * math.cos(alpha - beta)
+    + 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
+
+    if value < -1.0 or value > 1.0 then
+        return nil, nil, nil
+    end
+
+    local p = math.acos(math_helpers.clamp(value, -1.0, 1.0))
+
+    local atan_term = math.atan(
+        math.cos(alpha) - math.cos(beta),
+        d - math.sin(alpha) + math.sin(beta)
+    )
+
+    local t = wrap_2pi(alpha - atan_term + (p / 2.0))
+    local q = wrap_2pi(alpha - beta - t + p)
+
+    return t, p, q
+end
+
+
+-- ---------------------------------------------------------
+-- LRL Geometry using Shkel/Lumelsky Eq. (13)
+-- Inputs use Lua heading convention:
+--   psi = 0 North, positive clockwise
+-- Internally converted to:
+--   alpha = 0 East, positive counter-clockwise
+-- ---------------------------------------------------------
+local function lrl_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
+    local dx = xf - xi
+    local dy = yf - yi
+    local D = math.sqrt(dx * dx + dy * dy)
+    local d = D / rho
+
+    local alpha = lua_heading_to_paper_alpha(psi_i)
+    local beta  = lua_heading_to_paper_alpha(psi_f)
+
+    local value = (
+        6.0 - d * d+ 2.0 * math.cos(alpha - beta)
+        + 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
+
+    if value < -1.0 or value > 1.0 then
+        return nil, nil, nil
+    end
+
+    local p = math.acos(math_helpers.clamp(value, -1.0, 1.0))
+
+    local atan_term = math.atan(
+        -math.cos(alpha) + math.cos(beta),
+        d + math.sin(alpha) - math.sin(beta)
+    )
+
+    local t = wrap_2pi(-alpha + atan_term + (p / 2.0))
+    local q = wrap_2pi(beta - alpha - t + p)
+
+    return t, p, q
+end
+
 
 -- ---------------------------------------------------------
 -- Compute the angular sweep (radians) traversed by generate_arc_points
@@ -217,38 +282,7 @@ end
 -- Section 4: generating curves
 -- ---------------------------------------------------------
 
--- local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
---     local psi = psi_start
---     if increasing then
---         -- normalise so psi_end >= psi_start (left/CCW arc); cap at one full circle
---         if psi_end < psi_start then
---             psi_end = psi_end + 2 * PI
---         end
---         if psi_end - psi_start > 2 * PI then
---             psi_end = psi_start + 2 * PI
---         end
---         while psi <= psi_end + 1e-9 do
---             local x, y = arc_point(xc, yc, rho, psi)
---             points[#points + 1] = {x = x, y = y, psi = psi}
---             psi = psi + delta_psi
---         end
---     else
---         -- normalise so psi_end <= psi_start (right/CW arc); cap at one full circle
---         if psi_end > psi_start then
---             psi_end = psi_end - 2 * PI
---         end
---         if psi_start - psi_end > 2 * PI then
---             psi_end = psi_start - 2 * PI
---         end
---         while psi >= psi_end - 1e-9 do
---             local x, y = arc_point(xc, yc, rho, psi)
---             points[#points + 1] = {x = x, y = y, psi = psi}
---             psi = psi - delta_psi
---         end
---     end
--- end
 
--- alternate with degeneration
 
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
     -- Skip degenerate, zero sweep arcs
@@ -466,6 +500,96 @@ local function generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     return RSR_points, total_length
 end
 
+-- generate RLR loop
+local function generate_RLR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local RLR_points = {}
+
+    local t, p, q = rlr_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
+    if t == nil then
+        return nil, math.huge
+    end
+
+    local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
+
+    -- First R arc
+    local psi_1_end = psi_i - t
+    generate_arc_points(RLR_points, xRi, yRi, rho, psi_i - PI/2, psi_1_end - PI/2, delta_psi, true)
+
+    local x1, y1
+    if #RLR_points > 0 then
+        x1, y1 = RLR_points[#RLR_points].x, RLR_points[#RLR_points].y
+    else
+        x1, y1 = xi, yi
+    end
+
+    -- Middle L arc centre is to the left of heading psi_1_end
+    local xLm, yLm = circle_center_left(x1, y1, psi_1_end, rho)
+
+    local psi_2_end = psi_1_end + p
+    generate_arc_points(RLR_points, xLm, yLm, rho, psi_1_end + PI/2, psi_2_end + PI/2, delta_psi, false)
+
+    local x2, y2
+    if #RLR_points > 0 then
+        x2, y2 = RLR_points[#RLR_points].x, RLR_points[#RLR_points].y
+    else
+        x2, y2 = x1, y1
+    end
+
+    -- Final R arc centre is to the right of heading psi_2_end
+    local xRf, yRf = circle_center_right(x2, y2, psi_2_end, rho)
+
+    local psi_3_end = psi_2_end - q
+    generate_arc_points(RLR_points, xRf, yRf, rho, psi_2_end - PI/2, psi_3_end - PI/2, delta_psi, true)
+
+    local total_length = rho * (t + p + q)
+    return RLR_points, total_length
+end
+
+-- generate LRL loop
+local function generate_LRL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    local LRL_points = {}
+
+    local t, p, q = lrl_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
+    if t == nil then
+        return nil, math.huge
+    end
+
+    local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
+
+    -- First L arc
+    local psi_1_end = psi_i + t
+    generate_arc_points(LRL_points, xLi, yLi, rho, psi_i + PI/2, psi_1_end + PI/2, delta_psi, false)
+
+    local x1, y1
+    if #LRL_points > 0 then
+        x1, y1 = LRL_points[#LRL_points].x, LRL_points[#LRL_points].y
+    else
+        x1, y1 = xi, yi
+    end
+
+    -- Middle R arc centre is to the right of heading psi_1_end
+    local xRm, yRm = circle_center_right(x1, y1, psi_1_end, rho)
+
+    local psi_2_end = psi_1_end - p
+    generate_arc_points(LRL_points, xRm, yRm, rho, psi_1_end - PI/2, psi_2_end - PI/2, delta_psi, true)
+
+    local x2, y2
+    if #LRL_points > 0 then
+        x2, y2 = LRL_points[#LRL_points].x, LRL_points[#LRL_points].y
+    else
+        x2, y2 = x1, y1
+    end
+
+    -- Final L arc centre is to the left of heading psi_2_end
+    local xLf, yLf = circle_center_left(x2, y2, psi_2_end, rho)
+
+    local psi_3_end = psi_2_end + q
+    generate_arc_points(LRL_points, xLf, yLf, rho, psi_2_end + PI/2, psi_3_end + PI/2, delta_psi, false)
+
+    local total_length = rho * (t + p + q)
+    return LRL_points, total_length
+end
+
 
 -- ---------------------------------------------------------
 -- Section 5: Optimal paths
@@ -479,19 +603,24 @@ local function optimal_path(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local LSL_points, LSL_distance = generate_LSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSL_points, RSL_distance = generate_RSL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
     local RSR_points, RSR_distance = generate_RSR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
-
-    -- calculate distance - with guards if the value is a nil case
-    --local LSR_distance = LSR_points and (#LSR_points * delta_d) or math.huge
-    --local LSL_distance = LSL_points and (#LSL_points * delta_d) or math.huge
-    --local RSL_distance = RSL_points and (#RSL_points * delta_d) or math.huge
-    --local RSR_distance = RSR_points and (#RSR_points * delta_d) or math.huge
-
+    -- additional points for LRL and RLR
+    local RLR_points, RLR_distance = nil, math.huge
+    local LRL_points, LRL_distance = nil, math.huge
+    local D = math_helpers.dist2d(xi, yi, xf, yf)
+    -- only calculate the LRL and RLR curves if it fits the criteria around distance between point and rho
+    -- mathematical proof in Shkel and Lumelsky, 2001
+    if D < 4.0 * rho then
+        RLR_points, RLR_distance = generate_RLR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+        LRL_points, LRL_distance = generate_LRL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_d)
+    end
     -- candidate list: keeping all values together 
     local candidates = {
         {distance = LSR_distance, points = LSR_points, name = "LSR"},
         {distance = LSL_distance, points = LSL_points, name = "LSL"},
         {distance = RSL_distance, points = RSL_points, name = "RSL"},
         {distance = RSR_distance, points = RSR_points, name = "RSR"},
+        {distance = RLR_distance, points = RLR_points, name = "RLR"},
+        {distance = LRL_distance, points = LRL_points, name = "LRL"},
     }
 
     local min_val = nil
