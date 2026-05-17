@@ -1,5 +1,5 @@
 -- =========================================================
--- Control loop 
+-- Control function
 -- =========================================================
 
 -- if in gudied or auto
@@ -8,7 +8,6 @@ local MODE_GUIDED = 15
 local ALT_FRAME_ABSOLUTE = 0
 
 -- local variable states
-local controller_busy = nil
 local dubins_point_index = nil
 local dubins_point_count = nil
 local kangaroo_loc_pending = nil
@@ -19,7 +18,6 @@ local last_report_ms = 0
 
 -- maintain aircraft 150m above virtual target altitude
 local PLANE_ABOVE_TARGET_M = 150.0
-local KANG_ALT_M_FALLBACK = 80.0
 
 -- KBUS_ bus params (owned by kangaroo_MAV.lua)
 -- bounded loosely because control.lua will boot first (alpha betical)
@@ -43,8 +41,6 @@ local function ensure_kbus()
 end
 
 --
-local kang_alt_m_param = Parameter()
-local kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
 
 -- refresh for the bus
 local last_bus_seq_seen = 0
@@ -55,7 +51,8 @@ local math_helpers = require("math_helpers")
 local param_helpers = require("param_helpers")
 local kf = require("state_estimator")
 
--- initialising for KF filter - NE Origin fixed
+-- Kalman filter initialisiation for the filter
+-- initialising for KF filter - reference fised 
 local kf_ref_loc = nil
 -- latest state reading
 local kf_state = nil
@@ -64,7 +61,7 @@ local last_kf_t_ms = nil
 local kf_initialized = false
 
 
--- boot message
+-- boot message for MAV
 gcs:send_text(4, "Control: loaded at boot")
 
 -- ---------------------------------------------------------
@@ -75,7 +72,7 @@ local CTRL_TABLE_KEY = nil
 
 -- establish parameter table key
 for key = 0, 200 do
-    if param:add_table(key, CTRL_TABLE_PREFIX, 9) then
+    if param:add_table(key, CTRL_TABLE_PREFIX, 13) then
         CTRL_TABLE_KEY = key
         break
     end
@@ -83,7 +80,7 @@ end
 assert(CTRL_TABLE_KEY ~= nil, "CTRL: no free param table key")
 
 -- -- -----------------------------------------------------------------------
--- -- Paramater value declaration for control algorithm
+-- -- Paramater value declaration for control 
 -- -- -----------------------------------------------------------------------
 -- Dubins path rebuild interval (ms)
 local CTRL_REBUILD_MS = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "REBUILD_MS", 1, 6000)
@@ -107,60 +104,28 @@ local CTRL_DUBINS_ON_VEL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TAB
 local CTRL_SWAP_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_DIST", 7, 50)
 -- Cooldown (ms) after a swap before another swap is allowed
 local CTRL_SWAP_COOL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "SWAP_COOL", 8, 1000)
+-- Cost function weights (w1–w4); heading terms in rad^2, distance terms in m^2
+local CTRL_W_HDG_KANG = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_HDG_KANG",  9,  0.4)  -- w1: kangaroo heading alignment
+local CTRL_W_HDG_CHG  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_HDG_CHG",  10,  0.2)  -- w2: change in bearing to kangaroo
+local CTRL_W_DIST_PLN = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_DIST_PLN", 11,  0.2)  -- w3: plane travel to next waypoint
+local CTRL_W_DIST_KNG = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_DIST_KNG", 12,  0.2)  -- w4: next waypoint proximity to predicted kangaroo
 
-
---- receding time horizon for MPC
---local T_Horizon_s = CTRL_REBUILD_MS:get() * 0.001
-
-
-
--- -- -----------------------------------------------------------------------
--- -- MAVProxy map visualisation: broadcast each Dubins waypoint as an
--- -- ADSB_VEHICLE so they appear as dots on the MAVProxy map.
--- -- ICAO addresses 0xDB0001..0xDBFFFF are reserved for path points.
--- -- -----------------------------------------------------------------------
--- mavlink:init(1, 0)
-
--- local DUBINS_VIS_ICAO_BASE   = 0xDB0001
--- local DUBINS_VIS_INTERVAL_MS = 2000     -- re-send before MAVProxy times contacts out
--- local DUBINS_VIS_STRIDE      = 3        -- send every Nth point to reduce clutter
--- local last_vis_ms            = 0
-
--- local ADSB_VIS_FLAGS = 1 + 2 + 64      -- VALID_COORDS + VALID_ALTITUDE + SIMULATED
---                                         -- no VALID_CALLSIGN (16) = no label shown
-
--- local function send_vis_point(icao, lat_deg, lng_deg, alt_m)
---     local cs = string.sub("\0\0\0\0\0\0\0\0\0", 1, 9)  -- empty callsign
---     local payload = string.pack("<I4i4i4i4 I2I2i2I2I2 Bc9BB",
---         icao,
---         math.floor(lat_deg * 1e7),
---         math.floor(lng_deg * 1e7),
---         math.floor(alt_m   * 1000),
---         0, 0, 0,            -- heading, hor_velocity, ver_velocity
---         ADSB_VIS_FLAGS,
---         0,                  -- squawk
---         0,                  -- altitude_type
---         cs,
---         0,                  -- emitter_type
---         0)                  -- tslc
---     for chan = 0, 5 do
---         mavlink:send_chan(chan, 246, payload)
---     end
--- end
-
--- setting altitude (not captured in the )
-local function get_kangaroo_alt_m()
-    if not kang_alt_m_ready then
-        kang_alt_m_ready = kang_alt_m_param:init("KANG_ALT_M")
+-- -----------------------------------------------------------------------
+-- KF_ parameter table for Kalman filter noise tuning
+-- -----------------------------------------------------------------------
+local KF_TABLE_PREFIX = "KF_"
+local KF_TABLE_KEY = nil
+for key = 0, 200 do
+    if param:add_table(key, KF_TABLE_PREFIX, 2) then
+        KF_TABLE_KEY = key
+        break
     end
-    if kang_alt_m_ready then
-        local alt_m = kang_alt_m_param:get()
-        if alt_m ~= nil then
-            return alt_m
-        end
-    end
-    return KANG_ALT_M_FALLBACK
 end
+assert(KF_TABLE_KEY ~= nil, "CTRL: no free KF param table key")
+
+local KF_PROC_NOISE  = param_helpers.bind_add_param(KF_TABLE_KEY, KF_TABLE_PREFIX, "PROC_NOISE", 1, 0.1)  -- process noise (Q diagonal)
+local KF_MEAS_NOISE  = param_helpers.bind_add_param(KF_TABLE_KEY, KF_TABLE_PREFIX, "MEAS_NOISE", 2, 5.0)  -- measurement noise (R diagonal)
+
 
 -- get home altitude 
 local function get_home_alt_m()
@@ -183,29 +148,6 @@ local function get_home_alt_m()
     return nil
 end
 
--- scrap
--- local function broadcast_dubins_vis()
---     if dubins_points_active == nil then 
---         return 
---     end
-
---     local home_alt = get_home_alt_m()
---     local alt_m = (home_alt or 0) + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
-
---     local icao = DUBINS_VIS_ICAO_BASE
---     for i = 1, #dubins_points_active, DUBINS_VIS_STRIDE do
---         local pt = dubins_points_active[i]
---         if pt and pt.loc then
---             send_vis_point(
---                 icao,
---                 pt.loc:lat() * 1.0e-7,
---                 pt.loc:lng() * 1.0e-7,
---                 alt_m)
---             icao = icao + 1
---         end
---     end
--- end
-
 -- fly to point - point.loc is absolute from dubins_weave
 function fly_to_dubins_point(point)
     if point == nil or point.loc == nil then
@@ -219,22 +161,20 @@ function fly_to_dubins_point(point)
 
     local target_loc = point.loc:copy()
     target_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
-    -- local target_alt_m = home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
-    local target_alt_m = home_alt_m + 150.0
+    -- setting altitude to 150 
+    local target_alt_m = home_alt_m + PLANE_ABOVE_TARGET_M
     target_loc:set_alt_m(target_alt_m, ALT_FRAME_ABSOLUTE)
-
     return vehicle:set_target_location(target_loc)
 end
 
--- Error function 
--- flags for target reach
+-- Error function  - flags for target reach
 local reached_streak = 0
 local reached_index = -1
 
-
--- local function get_point_accept_radius_m(point, next_point)
+-- acceptance radius of the point being reached
 local function get_point_accept_radius_m(point, next_point)
     local accept_radius_m = CTRL_WP_RAD:get()
+    -- nil case
     if point == nil or point.loc == nil or next_point == nil or next_point.loc == nil then
         return accept_radius_m
     end
@@ -250,9 +190,8 @@ end
 
 
 
--- if the point has been reached...
+-- if the point has been reached.
 function dubins_point_reached(point, next_point)
-
     -- if no points, return a false
     if point == nil then
         reached_streak = 0
@@ -271,9 +210,6 @@ function dubins_point_reached(point, next_point)
         reached_streak = 0
         return false
     end
-
-    -- checking distance to the active Dubins point location
-    --local dist_m = pos:get_distance(point.loc)
 
     -- horizontal distance
     local dist_m = pos:get_distance_NE(point.loc)
@@ -301,7 +237,7 @@ function dubins_point_reached(point, next_point)
     return false
 end
 
--- ready bus target
+-- read bus target
 local function read_bus_target()
 
     -- not all values are ready
@@ -309,6 +245,7 @@ local function read_bus_target()
         return nil
     end
 
+    -- get sequence
     local seq_1 = kbus_seq_param:get()
     if seq_1 == nil then
         return nil
@@ -319,7 +256,7 @@ local function read_bus_target()
         return nil
     end
 
-    -- writing values
+    -- write values
     local t_s     = kbus_t_s_param:get()
     local lat_deg = kbus_lat_param:get()
     local lon_deg = kbus_lon_param:get()
@@ -367,10 +304,10 @@ local function read_bus_target()
     }
 end
 
--- to avoid a rebulid storm...
+-- to avoid a rebulid storm... for small arcs generated
 local MIN_DUBINS_POINTS = 5
 
--- staged (not yet committed) Dubins build
+-- to calculate the optimal next point
 local dubins_points_new = nil
 local dubins_new_info   = nil
 local kangaroo_loc_new  = nil
@@ -387,12 +324,6 @@ local function update_build(kangaroo_loc_target)
         build_result = nil
         build_info = "degenerate_path"
     end
-
-    -- -- reset counts (moved to commit_dubins_path)
-    -- dubins_points_active = build_result
-    -- dubins_point_index = 1
-    -- dubins_point_count = (dubins_points_active ~= nil) and #dubins_points_active or nil
-    -- controller_busy = (dubins_points_active ~= nil and #dubins_points_active > 0)
 
     if build_result == nil then
         if build_info ~= nil then
@@ -414,32 +345,13 @@ local function get_path_final_loc(path)
     return last and last.loc or nil
 end
 
--- -- Swap to new Dubins path if its final point is closer to the kangaroo
--- local function should_swap_dubins_path(kangaroo_loc, active_final_loc, new_final_loc, margin_m)
---     if not kangaroo_loc or not active_final_loc or not new_final_loc then
---         return false
---     end
-
---     margin_m = margin_m or 0
-
---     local active_dist = kangaroo_loc:get_distance(active_final_loc)
---     local new_dist    = kangaroo_loc:get_distance(new_final_loc)
-
---     -- swap only if new path is closer by at least margin_m
---     if new_dist + margin_m < active_dist then
---         return true, active_dist, new_dist
---     end
-
---     return false, active_dist, new_dist
--- end
-
--- replacing error with cost function
--- error variables
+-- Error Variables and cost function intilisation
 local cum_L1_error = 0.0
 local cum_L2_error = 0.0
 local error_samples = 0
+local min_J_seen = math.huge
 
--- predictive step
+-- predictive step - pull from state machine data
 local function predict_position(kangaroo_state, t)
     -- predict kangaroo values
     local x = kangaroo_state.x + kangaroo_state.vx * t
@@ -448,10 +360,8 @@ local function predict_position(kangaroo_state, t)
     return x, y, heading
 end
 
-
 -- update Kalman filter
 local function update_kf(sample)
-
     -- first init
     if not kf_initialized then
         kf_ref_loc   = sample.loc:copy()
@@ -462,8 +372,7 @@ local function update_kf(sample)
     end
     -- time interval
     local dt_s = (sample.timestamp_ms - last_kf_t_ms) * 0.001
-
-    -- guard against stale/reversed samples
+    -- guard against stale or reversed samples
     if dt_s <= 0 or dt_s > 10.0 then 
         return 
     end 
@@ -474,6 +383,9 @@ local function update_kf(sample)
         return 
     end
 
+    -- measurement noise 
+    kf.process_noise     = KF_PROC_NOISE:get()
+    kf.measurement_noise = KF_MEAS_NOISE:get()
     local result = kf.update(ne:x(), ne:y(), dt_s)
     if result then
         kf_state      = result
@@ -481,11 +393,8 @@ local function update_kf(sample)
     end
 end
 
-
-
--- period (T) may require extended to match flight time
+-- period (T) may require extension to match flight time
 -- in the event that the plane is further away than one rebuild
----
 local function compute_lookahead_s(plane_loc, wp_loc)
     -- rebuild interval is the minimum horizon
     local floor_s = CTRL_REBUILD_MS:get() * 0.001
@@ -511,61 +420,41 @@ local function compute_lookahead_s(plane_loc, wp_loc)
     return math.max(floor_s, dist / speed)
 end
 
--- normalisation reference for distance terms (m)
-local REF_DIST_M = 1000.0
--- weights — must sum to 1
--- TO DO MAY 13 - add as parameter - adds to one 
--- path endpoint closeness to predicted kangaroo
-local W_DIST_TO_KANG = 0.4
--- path effort (plane to endpoint distance)
-local W_DIST_TO_PLANE = 0.2
--- endpoint heading alignment with kangaroo direction
-local W_HDG_TO_KANG = 0.2
--- heading change required from current plane heading
-local W_HDG_CHANGE = 0.2
-
 -- cost function
--- next_loc: Location of next waypoint in path; next_psi: heading (rad) at that waypoint
--- plane_loc: current plane Location; plane_heading: current plane heading (rad, from ahrs:get_yaw())
--- kangaroo_loc: current kangaroo Location; kangaroo_state: KF output {x,y,vx,vy}
--- lookahead_s: prediction horizon (s) for MPC
--- 12 May update
+-- next_loc: next plane waypoint A(k+1)
+-- plane_loc: current plane position A(k); kangaroo_loc: current kangaroo position B(k)
+-- kangaroo_state: KF output {x,y,vx,vy}; lookahead_s: prediction horizon (s)
 
-local function cost_function(next_loc, next_psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
-    -- guard against cost function being empty
-    -- the behaviour is that it locks back onto home when one of the values is nil
-    if not next_loc or not plane_loc or not kangaroo_loc or not kangaroo_state
-       or next_psi == nil or plane_heading == nil then
+local function cost_function(next_loc, plane_loc, kangaroo_loc, kangaroo_state, lookahead_s)
+    if not next_loc or not plane_loc or not kangaroo_loc or not kangaroo_state then
         return math.huge
     end
+    if kangaroo_state.vx == nil or kangaroo_state.vy == nil then return math.huge end
 
-    -- predict kangaroo location ahead by lookahead_s using KF velocity
+    -- B(k+1): predict kangaroo ahead by lookahead_s
     local pred_loc = kangaroo_loc:copy()
     pred_loc:offset(kangaroo_state.vx * lookahead_s, kangaroo_state.vy * lookahead_s)
 
-    -- distance between next step and the predicted value of the kangaroo
+    -- dn1: next_loc → pred_loc  (psi_{A(k+1),B(k+1)} and term 4)
     local dn1 = next_loc:get_distance_NE(pred_loc)
     if not dn1 then return math.huge end
-    local dist_to_kang = math.sqrt(dn1:x()^2 + dn1:y()^2)
 
-    -- distance from the next spot to the plane (proxy for path effort)
+    -- dn2: plane_loc → next_loc  (term 3)
     local dn2 = plane_loc:get_distance_NE(next_loc)
     if not dn2 then return math.huge end
-    local dist_to_change = math.sqrt(dn2:x()^2 + dn2:y()^2)
 
-    -- difference in kangaroo heading and trajecotry heading
-    if kangaroo_state.vx == nil or kangaroo_state.vy == nil then return math.huge end
-    local kang_heading = math.atan(kangaroo_state.vy, kangaroo_state.vx)
-    local heading_to_kang = math.abs(math_helpers.wrap_pi(next_psi - kang_heading))
+    -- dn3: plane_loc → kangaroo_loc  (psi_{A(k),B(k)})
+    local dn3 = plane_loc:get_distance_NE(kangaroo_loc)
+    if not dn3 then return math.huge end
 
-    -- difference in trajectory heading and the most recent heading (i.e. to prevent a massive change in direction)
-    local bearing_to_end = math.atan(dn2:y(), dn2:x())
-    local heading_change = math.abs(math_helpers.wrap_pi(plane_heading - bearing_to_end))
+    local psi_B            = math.atan(kangaroo_state.vy, kangaroo_state.vx)
+    local psi_next_to_kang = math.atan(dn1:y(), dn1:x())  -- psi_{A(k+1),B(k+1)}
+    local psi_curr_to_kang = math.atan(dn3:y(), dn3:x())  -- psi_{A(k),B(k)}
 
-    local J = W_DIST_TO_KANG  * (dist_to_kang  / REF_DIST_M)
-            + W_DIST_TO_PLANE * (dist_to_change / REF_DIST_M)
-            + W_HDG_TO_KANG   * (heading_to_kang / math.pi)
-            + W_HDG_CHANGE    * (heading_change   / math.pi)
+    local J = CTRL_W_HDG_KANG:get() * math_helpers.wrap_pi(psi_B - psi_next_to_kang)^2
+            + CTRL_W_HDG_CHG:get()  * math_helpers.wrap_pi(psi_next_to_kang - psi_curr_to_kang)^2
+            + CTRL_W_DIST_PLN:get() * (dn2:x()^2 + dn2:y()^2)
+            + CTRL_W_DIST_KNG:get() * (dn1:x()^2 + dn1:y()^2)
 
     return J
 end
@@ -595,10 +484,10 @@ local function should_swap_dubin_path(plane_loc, plane_heading, kangaroo_loc, ka
     end
 
     -- the current J of the active path next point
-    local J_active = cost_function(active_next.loc, active_next.psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
-    
+    local J_active = cost_function(active_next.loc, plane_loc, kangaroo_loc, kangaroo_state, lookahead_s)
+
     -- newly updated J of the new path next point
-    local J_new    = cost_function(new_next.loc, new_next.psi, plane_loc, plane_heading, kangaroo_loc, kangaroo_state, lookahead_s)
+    local J_new    = cost_function(new_next.loc, plane_loc, kangaroo_loc, kangaroo_state, lookahead_s)
 
     if J_new < J_active then
         return true, J_active, J_new
@@ -613,7 +502,6 @@ local function commit_dubins_path()
     dubins_points_active = dubins_points_new
     dubins_point_index   = 1
     dubins_point_count   = #dubins_points_active
-    controller_busy      = true
     kangaroo_loc_active  = kangaroo_loc_new
     dubins_points_new    = nil
     dubins_new_info      = nil
@@ -636,7 +524,8 @@ local function compute_track_er(pos_loc, target_loc)
 end
 
 -- function to trigger the weaving functionality - else just follow per guided/auto
-local function engage_control_state(current_mode, dubins_point_active, dubins_point_index, pos_loc, target_loc)
+-- currentyl impemented as a state machine betewen idle and active, build is occuring every interval
+local function engage_control_state(current_mode, dubins_point_index, pos_loc, target_loc)
     -- nil guards
     if pos_loc == nil or target_loc == nil then
         return nil
@@ -648,9 +537,16 @@ local function engage_control_state(current_mode, dubins_point_active, dubins_po
     -- distance
     local dn = pos_loc:get_distance_NE(target_loc)
     local dist_m = dn and math.sqrt(dn:x()*dn:x() + dn:y()*dn:y()) or math.huge
-    -- 2d velocity
+    -- relative velocity between plane and kangaroo (closing rate)
     local plane_velocity = ahrs:get_velocity_NED()
-    local speed_ms = plane_velocity and math.sqrt(plane_velocity:x()*plane_velocity:x() + plane_velocity:y()*plane_velocity:y()) or math.huge
+    -- old: absolute plane speed — always ~20-30 m/s, so speed_ms <= min_speed was never true
+    ---local speed_ms = plane_velocity and math.sqrt(plane_velocity:x()*plane_velocity:x() + plane_velocity:y()*plane_velocity:y()) or math.huge
+    local rel_speed_ms = math.huge
+    if plane_velocity and kf_state then
+        local rel_vn = plane_velocity:x() - kf_state.vx
+        local rel_ve = plane_velocity:y() - kf_state.vy
+        rel_speed_ms = math.sqrt(rel_vn*rel_vn + rel_ve*rel_ve)
+    end
 
     -- handle negative case - IDLE
     if current_mode ~= MODE_AUTO and current_mode ~= MODE_GUIDED then
@@ -661,10 +557,12 @@ local function engage_control_state(current_mode, dubins_point_active, dubins_po
         }
     end
 
-    -- new trigger
-    local trigger_met = dist_m <= min_distance and speed_ms <= min_speed
+    -- trigger: close enough AND nearly caught up (low closing rate relative to kangaroo)
+    local trigger_met = dist_m <= min_distance and rel_speed_ms <= min_speed
     -- old trigger (before 7 May)
     ---local trigger_met = dist_m <= min_distance or speed_ms <= min_speed
+    -- absolute speed trigger (replaced 14 May — plane cruises at 20-30 m/s so condition was never true)
+    ---local trigger_met = dist_m <= min_distance and speed_ms <= min_speed
 
     if trigger_met then
         return {
@@ -691,8 +589,8 @@ end
 -- Three target states for state machine
 -- 1. kanagroo_loc_latest, the newest bus sample
 -- 2. kangaroo_loc_pending, the allocated target to build from
--- 3. kangaroo_loc_active, the target currently being weaved in
-
+-- 3. kangaroo_loc_active, the target currently being optmised through weaving behvaiour
+-- 4. 17 May - need to add radius bound (circling)
 -- -----------------------------------------------------------------------
 local last_rebuild_ms     = 0
 local last_swap_ms        = 0
@@ -712,8 +610,9 @@ function update()
     end
    
     local pos = ahrs:get_position()
+
     -- establishing the state
-    local state = engage_control_state(current_mode, dubins_point_active, dubins_point_index, pos, kangaroo_loc_pending and kangaroo_loc_pending.loc)
+    local state = engage_control_state(current_mode, dubins_point_index, pos, kangaroo_loc_pending and kangaroo_loc_pending.loc)
 
     -- handling nil case
     if state == nil then 
@@ -734,6 +633,7 @@ function update()
             -- predicting based on future target
             local build_target = kangaroo_loc_pending
 
+            -- if the kalman filter has a state response, build the target
             if kf_state then
                 local T = CTRL_REBUILD_MS:get() * 0.001
                 local pred_loc = kangaroo_loc_pending.loc:copy()
@@ -744,6 +644,7 @@ function update()
             end
 
             local success, build_info = update_build(build_target)
+            -- if it builds successfully
             if success then
                 if dubins_points_active == nil then
                     -- no active path yet, commit immediately
@@ -757,20 +658,20 @@ function update()
                 else
                     local active_final = get_path_final_loc(dubins_points_active)
                     local new_final    = get_path_final_loc(dubins_points_new)
-                    local kang_loc     = kangaroo_loc_pending and kangaroo_loc_pending.loc
-                    -- manage switching trade off
-                    --local swap, adist, ndist = should_swap_dubins_path(kang_loc, active_final, new_final, CTRL_SWAP_DIST:get())
-                    
-                    
+                    local kang_loc     = kangaroo_loc_pending and kangaroo_loc_pending.loc                    
                     -- update w/ cost function
                     local plane_heading = ahrs:get_yaw() or 0
                     local next_wp = dubins_points_active[dubins_point_index]
                     local lookahead_s = compute_lookahead_s(pos, next_wp and next_wp.loc)
 
                     local swap, J_active, J_new = should_swap_dubin_path(pos, plane_heading, kang_loc, kf_state, lookahead_s)
-
-                    if kf_state == nil then 
-                        swap = false 
+                    if J_active and J_active < math.huge then
+                        min_J_seen = math.min(min_J_seen, J_active)
+                        gcs:send_text(4, string.format("Dubins J:%.4f", J_active))
+                    end
+                    --manage k state
+                    if kf_state == nil then
+                        swap = false
                     end
 
                     -- cooldown - hystersisi 
@@ -790,18 +691,13 @@ function update()
         end
     end
 
-    -- -- periodically re-broadcast path points to MAVProxy map
-    -- if (now_ms - last_vis_ms) >= DUBINS_VIS_INTERVAL_MS then
-    --     last_vis_ms = now_ms
-    --     broadcast_dubins_vis()
-    -- end
-
     -- fly the active path
     if state.active then
         --- Establish current point and next point
         local point = dubins_points_active[dubins_point_index]
         local next_point = dubins_points_active[dubins_point_index + 1]
-
+       
+        -- second position pull for reporting
         local pos2 = ahrs:get_position()
 
         if pos2 and point and point.loc then
@@ -812,6 +708,7 @@ function update()
                 error_samples = error_samples + 1
             end
         end
+
         -- periodic distance report
         if dubins_point_count ~= nil and (now_ms - last_report_ms) >= REPORT_INTERVAL_MS then
 
@@ -828,8 +725,9 @@ function update()
             gcs:send_text(4, string.format("Dubins point %d/%d dist=%.1fm",
                 dubins_point_index, dubins_point_count, dist_2d))
             local n = math.max(error_samples, 1)
-            gcs:send_text(4, string.format("Dubins error L1 Norm:%.1fm L2 Norm:%.1fm",
-                cum_L1_error / n, cum_L2_error / n))
+            local j_report = min_J_seen < math.huge and min_J_seen or -1
+            gcs:send_text(4, string.format("Dubins error L1 Norm:%.1fm L2 Norm:%.1fm J_min:%.4f",
+                cum_L1_error / n, cum_L2_error / n, j_report))
             last_report_ms = now_ms
         end
 
@@ -840,8 +738,8 @@ function update()
                     dubins_point_index, dubins_point_count or 0))
                 dubins_point_index = dubins_point_index + 1
             end
-        -- debugging
-        -- no target
+
+        -- debugging - for no target case
         elseif point then
             gcs:send_text(4, "Failed to set target for Dubins point")
         end
@@ -859,8 +757,7 @@ function update()
             if home_alt_m then
                 local direct_loc = kangaroo_loc_pending.loc:copy()
                 direct_loc:change_alt_frame(ALT_FRAME_ABSOLUTE)
-                -- direct_loc:set_alt_m(home_alt_m + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M, ALT_FRAME_ABSOLUTE)
-                direct_loc:set_alt_m(home_alt_m + 150.0, ALT_FRAME_ABSOLUTE)
+                direct_loc:set_alt_m(home_alt_m + PLANE_ABOVE_TARGET_M, ALT_FRAME_ABSOLUTE)
                 vehicle:set_target_location(direct_loc)
             end
         end

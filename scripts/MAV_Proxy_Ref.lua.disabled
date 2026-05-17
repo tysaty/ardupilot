@@ -1,0 +1,68 @@
+-- -- -----------------------------------------------------------------------
+-- -- MAVProxy map visualisation: broadcast each Dubins waypoint as an
+-- -- ADSB_VEHICLE so they appear as dots on the MAVProxy map.
+-- -- ICAO addresses 0xDB0001..0xDBFFFF are reserved for path points.
+-- removed from control.lua but may be relevant later
+-- -- -----------------------------------------------------------------------
+-- mavlink:init(1, 0)
+
+-- local DUBINS_VIS_ICAO_BASE   = 0xDB0001
+-- resend before MAVProxy times contact out
+-- local DUBINS_VIS_INTERVAL_MS = 2000
+-- send every Nth point to reduce clutter
+-- local DUBINS_VIS_STRIDE      = 3
+-- local last_vis_ms            = 0
+
+-- VALID_COORDS + VALID_ALTITUDE + SIMULATED
+-- local ADSB_VIS_FLAGS = 1 + 2 + 64 
+-- no VALID_CALLSIGN (16) = no label shown
+
+-- local function send_vis_point(icao, lat_deg, lng_deg, alt_m)
+--     load an empty callsign
+--     local cs = string.sub("\0\0\0\0\0\0\0\0\0", 1, 9)
+--     local payload = string.pack("<I4i4i4i4 I2I2i2I2I2 Bc9BB",
+--         icao,
+--         math.floor(lat_deg * 1e7),
+--         math.floor(lng_deg * 1e7),
+--         math.floor(alt_m   * 1000),
+--         heading, hor_velocity, ver_velocity
+--         0, 0, 0,            
+--         ADSB_VIS_FLAGS,
+--         squawk
+--         0,
+--         altitude type
+--         0,
+--         cs,
+--         emitter type
+--         0,
+--         tslc
+--         0)
+--     for chan = 0, 5 do
+--         mavlink:send_chan(chan, 246, payload)
+--     end
+-- end
+
+
+
+-- scrap
+-- local function broadcast_dubins_vis()
+--     if dubins_points_active == nil then 
+--         return 
+--     end
+
+--     local home_alt = get_home_alt_m()
+--     local alt_m = (home_alt or 0) + get_kangaroo_alt_m() + PLANE_ABOVE_TARGET_M
+
+--     local icao = DUBINS_VIS_ICAO_BASE
+--     for i = 1, #dubins_points_active, DUBINS_VIS_STRIDE do
+--         local pt = dubins_points_active[i]
+--         if pt and pt.loc then
+--             send_vis_point(
+--                 icao,
+--                 pt.loc:lat() * 1.0e-7,
+--                 pt.loc:lng() * 1.0e-7,
+--                 alt_m)
+--             icao = icao + 1
+--         end
+--     end
+-- end

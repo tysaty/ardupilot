@@ -429,6 +429,8 @@ local function get_plane_groundspeed_mps()
     return math.max(0, speed_mps_now)
 end
 
+-- fix speed - bounding -- call somewhere...
+-- integrate 17 May
 local function get_capped_speed()
     local spd   = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
     local ratio = math_helpers.clamp(KANG_SPD_REL:get(), 0, 1)
@@ -465,8 +467,9 @@ local function choose_next_segment(now_ms)
         speed_mps = 0
         duration_ms = math_helpers.random_between(500, math.max(500, pause_max_s * 1000))
     end
-
+    -- to do 18 May
     local speed_ratio = math_helpers.clamp(KANG_SPD_REL:get(), 0, 1)
+    -- fix speed ratio
     if speed_ratio > 0 then
         local plane_speed = get_plane_groundspeed_mps()
         if plane_speed ~= nil then
@@ -489,7 +492,6 @@ local function heading_frame_offset(heading_deg_v, forward_m, lateral_m)
             e = math.sin(h) * forward_m + math.cos(h) * lateral_m,
         }
 end
-
 
 -- starting point for kangaroo random walk
 local function ensure_anchor(now_ms)
@@ -559,12 +561,8 @@ local function ensure_anchor(now_ms)
         choose_next_segment(now_ms)
     -- straight mode
     elseif mode == "straight" then
-
         straight_heading_deg = math_helpers.clamp(KANG_STR_HDG:get(), 0, 360)
-
         local hdg_rad = math.rad(straight_heading_deg)
-
-        straight_heading_deg = math_helpers.clamp(KANG_STR_HDG:get(), 0, 360)
         target_north  = math.cos(hdg_rad) * fwd_m - math.sin(hdg_rad) * disp_m
         target_east  = math.sin(hdg_rad) * fwd_m + math.cos(hdg_rad) * disp_m
     -- circle mode
@@ -639,7 +637,7 @@ local function integrate_random(now_ms, dt)
 end
 
 local function integrate_straight(dt)
-    speed_mps   = get_capped_speed()
+    speed_mps   = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
     heading_deg = straight_heading_deg
     local vn = math.cos(math.rad(heading_deg)) * speed_mps
     local ve = math.sin(math.rad(heading_deg)) * speed_mps
@@ -651,7 +649,7 @@ end
 
 local function integrate_circle(dt)
     local r   = math_helpers.clamp(KANG_CIR_R:get(), 50, 3000)
-    speed_mps = get_capped_speed()
+    speed_mps = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
     local omega   = speed_mps / r
     circle_angle_rad = circle_angle_rad + omega * dt
     target_north = orbit_north + r * math.cos(circle_angle_rad)
@@ -663,7 +661,7 @@ end
 
 local function integrate_rectangle(dt)
     if rect_corners == nil then return end
-    speed_mps = get_capped_speed()
+    speed_mps = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
     local function corner(i) return rect_corners[i % 4 + 1] end
     local s0 = corner(rect_side)
     local s1 = corner(rect_side + 1)

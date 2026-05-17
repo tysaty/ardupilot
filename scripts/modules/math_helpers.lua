@@ -56,6 +56,14 @@ function M.wrap_pi(i)
     return i
 end
 
+-- pi wrapping for full circle
+function M.wrap_2pi(a)
+    local r = math.fmod(a, 2 * math.pi)
+    if r < 0 then 
+        r = r + 2 * math.pi 
+    end
+    return r
+end
 
 -- Euclidean distance
 function M.dist2d(x1, y1, x2, y2)

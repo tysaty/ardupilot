@@ -168,32 +168,24 @@ end
 -- Internally converted to:
 --   alpha = 0 East, positive counter-clockwise
 -- ---------------------------------------------------------
+
 local function rlr_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
     local dx = xf - xi
     local dy = yf - yi
     local D = math.sqrt(dx * dx + dy * dy)
     local d = D / rho
-    -- converting values
-    local alpha = lua_heading_to_paper_alpha(psi_i)
-    local beta  = lua_heading_to_paper_alpha(psi_f)
+    local theta_goal = (D > 1e-9) and math.atan(dy, dx) or 0.0
+    local alpha = math_helpers.wrap_2pi(lua_heading_to_paper_alpha(psi_i) - theta_goal)
+    local beta  = math_helpers.wrap_2pi(lua_heading_to_paper_alpha(psi_f) - theta_goal)
 
-    local value = (
-        6.0 - d * d + 2.0 * math.cos(alpha - beta)
-    + 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
-
+    local value = (6.0 - d*d + 2.0 * math.cos(alpha - beta)+ 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
     if value < -1.0 or value > 1.0 then
         return nil, nil, nil
     end
-
-    local p = math.acos(math_helpers.clamp(value, -1.0, 1.0))
-
-    local atan_term = math.atan(
-        math.cos(alpha) - math.cos(beta),
-        d - math.sin(alpha) + math.sin(beta)
-    )
-
-    local t = wrap_2pi(alpha - atan_term + (p / 2.0))
-    local q = wrap_2pi(alpha - beta - t + p)
+    local p = math_helpers.wrap_2pi(2.0 * PI - math.acos(math_helpers.clamp(value, -1.0, 1.0)))
+    local atan_term = math.atan(math.cos(alpha) - math.cos(beta), d - math.sin(alpha) + math.sin(beta))
+    local t = math_helpers.wrap_2pi(alpha - atan_term + p / 2.0)
+    local q = math_helpers.wrap_2pi(alpha - beta - t + p)
 
     return t, p, q
 end
@@ -211,31 +203,20 @@ local function lrl_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
     local dy = yf - yi
     local D = math.sqrt(dx * dx + dy * dy)
     local d = D / rho
-
-    local alpha = lua_heading_to_paper_alpha(psi_i)
-    local beta  = lua_heading_to_paper_alpha(psi_f)
-
-    local value = (
-        6.0 - d * d+ 2.0 * math.cos(alpha - beta)
-        + 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
-
+    local theta_goal = (D > 1e-9) and math.atan(dy, dx) or 0.0
+    local alpha = math_helpers.wrap_2pi(lua_heading_to_paper_alpha(psi_i) - theta_goal)
+    local beta  = math_helpers.wrap_2pi(lua_heading_to_paper_alpha(psi_f) - theta_goal)
+    -- sin(beta) - sin(alpha), opposite sign to RLR
+    local value = (6.0 - d*d + 2.0 * math.cos(alpha - beta) + 2.0 * d * (math.sin(beta) - math.sin(alpha))) / 8.0
     if value < -1.0 or value > 1.0 then
         return nil, nil, nil
     end
-
-    local p = math.acos(math_helpers.clamp(value, -1.0, 1.0))
-
-    local atan_term = math.atan(
-        -math.cos(alpha) + math.cos(beta),
-        d + math.sin(alpha) - math.sin(beta)
-    )
-
-    local t = wrap_2pi(-alpha + atan_term + (p / 2.0))
-    local q = wrap_2pi(beta - alpha - t + p)
-
+    local p = math_helpers.wrap_2pi(2.0 * PI - math.acos(math_helpers.clamp(value, -1.0, 1.0)))
+    local atan_term = math.atan(-math.cos(alpha) + math.cos(beta), d + math.sin(alpha) - math.sin(beta))
+    local t = math_helpers.wrap_2pi(-alpha + atan_term + p / 2.0)
+    local q = math_helpers.wrap_2pi(beta - alpha - t + p)
     return t, p, q
 end
-
 
 -- ---------------------------------------------------------
 -- Compute the angular sweep (radians) traversed by generate_arc_points
@@ -281,8 +262,6 @@ end
 -- ---------------------------------------------------------
 -- Section 4: generating curves
 -- ---------------------------------------------------------
-
-
 
 local function generate_arc_points(points, xc, yc, rho, psi_start, psi_end, delta_psi, increasing)
     -- Skip degenerate, zero sweep arcs
@@ -512,7 +491,7 @@ local function generate_RLR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local xRi, yRi = circle_center_right(xi, yi, psi_i, rho)
 
     -- First R arc
-    local psi_1_end = psi_i - t
+    local psi_1_end = psi_i + t
     generate_arc_points(RLR_points, xRi, yRi, rho, psi_i - PI/2, psi_1_end - PI/2, delta_psi, true)
 
     local x1, y1
@@ -525,7 +504,7 @@ local function generate_RLR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- Middle L arc centre is to the left of heading psi_1_end
     local xLm, yLm = circle_center_left(x1, y1, psi_1_end, rho)
 
-    local psi_2_end = psi_1_end + p
+    local psi_2_end = psi_1_end - p
     generate_arc_points(RLR_points, xLm, yLm, rho, psi_1_end + PI/2, psi_2_end + PI/2, delta_psi, false)
 
     local x2, y2
@@ -538,7 +517,7 @@ local function generate_RLR(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- Final R arc centre is to the right of heading psi_2_end
     local xRf, yRf = circle_center_right(x2, y2, psi_2_end, rho)
 
-    local psi_3_end = psi_2_end - q
+    local psi_3_end = psi_2_end + q
     generate_arc_points(RLR_points, xRf, yRf, rho, psi_2_end - PI/2, psi_3_end - PI/2, delta_psi, true)
 
     local total_length = rho * (t + p + q)
@@ -557,7 +536,7 @@ local function generate_LRL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     local xLi, yLi = circle_center_left(xi, yi, psi_i, rho)
 
     -- First L arc
-    local psi_1_end = psi_i + t
+    local psi_1_end = psi_i - t
     generate_arc_points(LRL_points, xLi, yLi, rho, psi_i + PI/2, psi_1_end + PI/2, delta_psi, false)
 
     local x1, y1
@@ -570,7 +549,7 @@ local function generate_LRL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- Middle R arc centre is to the right of heading psi_1_end
     local xRm, yRm = circle_center_right(x1, y1, psi_1_end, rho)
 
-    local psi_2_end = psi_1_end - p
+    local psi_2_end = psi_1_end + p
     generate_arc_points(LRL_points, xRm, yRm, rho, psi_1_end - PI/2, psi_2_end - PI/2, delta_psi, true)
 
     local x2, y2
@@ -583,7 +562,7 @@ local function generate_LRL(xi, yi, psi_i, xf, yf, psi_f, rho, delta_psi, delta_
     -- Final L arc centre is to the left of heading psi_2_end
     local xLf, yLf = circle_center_left(x2, y2, psi_2_end, rho)
 
-    local psi_3_end = psi_2_end + q
+    local psi_3_end = psi_2_end - q
     generate_arc_points(LRL_points, xLf, yLf, rho, psi_2_end + PI/2, psi_3_end + PI/2, delta_psi, false)
 
     local total_length = rho * (t + p + q)

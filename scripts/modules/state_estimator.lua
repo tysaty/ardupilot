@@ -5,12 +5,11 @@
 -- calling helpers
 local math_helpers = require("math_helpers")
 
--- Tunable noise parameters
-local process_noise = 0.01
-local measurement_noise = 5.0
-
 -- intiialise estimator
 local kf = {}
+
+kf.process_noise     = 0.1  -- process noise (Q diagonal): higher = trust measurements more
+kf.measurement_noise = 5.0  -- measurement noise (R diagonal): higher = trust model more
 
 -- State vector
 -- x = {x, y, vx, vy}
@@ -50,20 +49,16 @@ function kf.update(meas_x, meas_y, dt)
         {0, 1, 0, 0}
     }
 
-    local q = 0.1
-
-    local r = 5.0
-
     local Q = {
-        {q, 0, 0, 0},
-        {0, q, 0, 0},
-        {0, 0, q, 0},
-        {0, 0, 0, q}
+        {kf.process_noise, 0, 0, 0},
+        {0, kf.process_noise, 0, 0},
+        {0, 0, kf.process_noise, 0},
+        {0, 0, 0, kf.process_noise}
     }
 
     local R = {
-        {r, 0},
-        {0, r}
+        {kf.measurement_noise, 0},
+        {0, kf.measurement_noise}
     }
 
     -- converting to column
