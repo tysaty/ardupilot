@@ -650,7 +650,6 @@ local function to_absolute_points(origin_loc_abs, rel_points)
     return abs_points
 end
 
-
 -- ---------------------------------------------------------
 -- Section 7: Build Path
 -- get the target location from the kangaroo bus (consumed in control.lua)
@@ -726,6 +725,31 @@ local function build_path(kangaroo_state)
     }
 end
 
+-- Building orbit behaviour - to do 18 May
+local function build_orbit_path()
+    -- read aircraft state
+
+    -- kx/ky using rel_ne:y() and rel_ne:x() - flipped convention
+    
+    --  rho via min_turn_radius
+    
+    -- tangent geometry
+
+    -- if orbit_dir ==0
+
+    -- orbit has three parts 
+
+    -- Part 1: generate straight points(rel_points, 0, 0, beta_t, D_t, delta_d)
+    
+    -- Part 2: generate the arc points for the half arc onto the circle
+    
+    -- note Part 3: handled in control.lua
+
+end
+
+
+
 return {
-    build_path = build_path
+    build_path = build_path,
+    build_orbit_path = build_orbit_path
 }

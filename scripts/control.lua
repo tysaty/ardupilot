@@ -72,7 +72,7 @@ local CTRL_TABLE_KEY = nil
 
 -- establish parameter table key
 for key = 0, 200 do
-    if param:add_table(key, CTRL_TABLE_PREFIX, 13) then
+    if param:add_table(key, CTRL_TABLE_PREFIX, 16) then
         CTRL_TABLE_KEY = key
         break
     end
@@ -109,6 +109,10 @@ local CTRL_W_HDG_KANG = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_
 local CTRL_W_HDG_CHG  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_HDG_CHG",  10,  0.2)  -- w2: change in bearing to kangaroo
 local CTRL_W_DIST_PLN = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_DIST_PLN", 11,  0.2)  -- w3: plane travel to next waypoint
 local CTRL_W_DIST_KNG = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "W_DIST_KNG", 12,  0.2)  -- w4: next waypoint proximity to predicted kangaroo
+-- additional control function for orbiting behaviour
+local CTRL_ORBIT_DIST = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "CTRL_ORBIT_DIST", 13,  0.2)  -- Distance for orbiting behaviour to kick in
+local CTRL_ORBIT_DIR = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "CTRL_ORBIT_DIR", 14,  0)  -- -1, Counter CW, 0 default, 1 CW
+
 
 -- -----------------------------------------------------------------------
 -- KF_ parameter table for Kalman filter noise tuning
