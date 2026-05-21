@@ -725,26 +725,111 @@ local function build_path(kangaroo_state)
     }
 end
 
--- Building orbit behaviour - to do 18 May
-local function build_orbit_path()
+-- curve onto orbit -- separate behaviour from the dubins sweep
+-- takes the kanagaroo state (read from the bus) and the orbit direction (CW or CCW)
+local function build_orbit_path(kangaroo_state, orbit_dir)
     -- read aircraft state
+    if kangaroo_state == nil or kangaroo_state.loc == nil then
+        return nil, "invalid_kangaroo_state"
+    end
+    -- current position of plane
+    local pos = ahrs:get_position()
+    local vel = ahrs:get_velocity_NED()
+    local yaw = ahrs:get_yaw_rad()
 
+    --nil case
+    if pos == nil or vel == nil or yaw == nil then
+        return nil, "missing_aircraft_state"
+    end
+
+    -- takes copy of predicted kangaroo state and changes frame to absolute reference
+    local pos_abs = pos:copy()
+    local target_abs = kangaroo_state.loc:copy()
+    pos_abs:change_alt_frame(ALT_FRAME_ABSOLUTE)
+
+    -- distance from kangaroo
+    local rel_ne = pos_abs:get_distance_NE(target_abs)
+    if rel_ne == nil then return nil, "rel_ne_unavailable" end
+    -- north and east distance from kangaroo state
+    -- ArduPilot: rel_ne:x() = North metres,  rel_ne:y() = East metres
     -- kx/ky using rel_ne:y() and rel_ne:x() - flipped convention
-    
-    --  rho via min_turn_radius
-    
+    local kx, ky = rel_ne:y(), rel_ne:x()
+
+    --  rho via min_turn_radius; velocity across two dimensions
+    local vt = math.sqrt(vel:x() * vel:x() + vel:y() * vel:y())
+    local rho = min_turn_radius(math.max(vt, 1.0), PHI_MAX_RAD, grav)
+
+    -- distance to kangaroo; plane must be outside the orbit circle to compute tangent
+    local d = math.sqrt(kx * kx + ky * ky)
+    if d <= rho then 
+        return nil, "inside_orbit_radius" 
+    end
+
     -- tangent geometry
+    -- from point (P) to kangaroo (k), extend a tangent (T) out by the given radius
+    -- generates two values - beta and alpha
+    -- beta value - bearing from plane to kangaroo
+    local beta = math.atan(kx, ky)
+    -- half angle of the tangent (i.e. the inner angle of the triangle KPT) 
+    local alpha = math.asin(math.min(rho / d, 1.0))
 
-    -- if orbit_dir ==0
+    -- straight tangent length between the kangaroo and the tangent
+    -- the plane will follow this ditance
+    local d_t = math.sqrt(d * d - rho * rho)
 
-    -- orbit has three parts 
+    -- beta_tangent (Clockwise): subtract alpha from bearing to kangaroo
+    local Beta_tangent_cw  = beta - alpha
+    -- beta tangent (counter clockwise): add alpha
+    local Beta_tangent_ccw = beta + alpha
 
-    -- Part 1: generate straight points(rel_points, 0, 0, beta_t, D_t, delta_d)
-    
+    -- select direction: orbit_dir 1=CW, -1=CCW, 0=auto (least heading change)
+    -- takes orbit direction param from control.lua
+    local dir = orbit_dir
+    -- create a figure for this one - for yaw (20 May)
+    if dir == 0 or (dir ~= 1 and dir ~= -1) then
+        local dh_right = math.abs(math_helpers.wrap_pi(Beta_tangent_cw  - yaw))
+        local dh_left  = math.abs(math_helpers.wrap_pi(Beta_tangent_ccw - yaw))
+        dir = (dh_right <= dh_left) and 1 or -1
+    end
+    local Beta_tangent = (dir == 1) and Beta_tangent_cw or Beta_tangent_ccw
+
+    -- tangent point T on the orbit circle (plane at origin)
+    local tx = d_t * math.sin(Beta_tangent)
+    local ty = d_t * math.cos(Beta_tangent)
+
+    -- bearing from orbit centre K to T — arc start angle on the orbit circle
+    local psi_KT = math.atan(tx - kx, ty - ky)
+
+    local rel_points = {}
+
+    -- orbit has three parts
+    -- Part 1: generate straight points from plane to tangent point T
+    generate_straight_points(rel_points, 0.0, 0.0, Beta_tangent, d_t, 50.0)
+    local orbit_start_idx = #rel_points + 1
+
     -- Part 2: generate the arc points for the half arc onto the circle
+    local psi_arc_end = psi_KT + dir * PI
+    generate_arc_points(rel_points, kx, ky, rho, psi_KT, psi_arc_end, math.rad(15), dir == 1)
     
-    -- note Part 3: handled in control.lua
+    -- combining points
+    local abs_points = to_absolute_points(pos_abs, rel_points)
 
+    -- note Part 3: handled in control.lua (append_orbit_arc extends arc as plane progresses)
+
+    -- returning for nil case
+    if abs_points == nil or #abs_points == 0 then
+        return nil, "absolute_conversion_failed"
+    end
+
+    -- else return points
+    return abs_points, {
+        rho             = rho,
+        dir             = dir,
+        psi_KT          = psi_KT,
+        psi_arc_end     = psi_arc_end,
+        orbit_start_idx = orbit_start_idx,
+        point_count     = #abs_points,
+    }
 end
 
 
