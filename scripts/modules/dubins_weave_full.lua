@@ -52,8 +52,8 @@ end
 -- LSR Geometry
 -- theta = eta + gamma - pi/2
 -- eta   = pi/2 + atan2(yRf - yLi, xRf - xLi)
--- l = distance(CL_i, CR_f) (i.e. distance between centroids)
---   straight_length = sqrt(l^2 - 4*rho^2)
+--  l = distance(CL_i, CR_f) (i.e. distance between centroids)
+--  straight_length = sqrt(l^2 - 4*rho^2)
 --  gamma = acos( clamp(2*rho / l, -1, 1) )
 -- ---------------------------------------------------------
 local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
@@ -62,16 +62,20 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
         return nil, nil 
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
-    local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
+    local phi = math.atan(yRf - yLi, xRf - xLi)
+    local eta = (PI / 2.0) + phi
+    -- commented out 24 May 
     local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
     --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-    -- math in paper
-    --local theta = eta + gamma - (PI / 2.0)
-    local phi = math.atan(yRf - yLi, xRf - xLi)
-    local theta = gamma - phi
+
+
+    --local phi = math.atan(yRf - yLi, xRf - xLi)
+    --local theta = gamma - phi
 
     -- appears to work better
-    --local theta = gamma - eta + (PI / 2.0)
+    -- changed back from 72/73
+        -- math in paper
+    local theta = eta + gamma - (PI / 2.0)
     return theta, straight_length
 end
 
@@ -104,9 +108,11 @@ local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
         return nil, nil 
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
-    local eta = (PI / 2.0) - math.atan(yLf - yRi, xLf - xRi)
-    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-    --local gamma = math.atan(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+    local phi = math.atan(yLf - yRi, xLf - xRi)
+    local eta = (PI / 2.0) - phi
+    --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+   --local gamma = math.atan(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+    local gamma = math.atan((2.0 * rho) / straight_length)
     local theta = eta - gamma + (PI/2.0)
     return theta, straight_length
 end
@@ -675,7 +681,6 @@ local function build_path(kangaroo_state)
     -- distance from kangaroo
     local rel_ne = pos_abs:get_distance_NE(target_abs)
 
-    -- ArduPilot: rel_ne:x() = North metres,  rel_ne:y() = East metres
     if rel_ne == nil then
         return nil, "rel_ne_unavailable"
     end
@@ -751,6 +756,8 @@ local function build_orbit_path(kangaroo_state, orbit_dir)
     local rel_ne = pos_abs:get_distance_NE(target_abs)
     if rel_ne == nil then return nil, "rel_ne_unavailable" end
     -- north and east distance from kangaroo state
+
+    -- Critical to impementation
     -- ArduPilot: rel_ne:x() = North metres,  rel_ne:y() = East metres
     -- kx/ky using rel_ne:y() and rel_ne:x() - flipped convention
     local kx, ky = rel_ne:y(), rel_ne:x()
