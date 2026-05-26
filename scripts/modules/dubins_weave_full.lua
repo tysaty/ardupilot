@@ -62,22 +62,46 @@ local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
         return nil, nil 
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
-    local phi = math.atan(yRf - yLi, xRf - xLi)
-    local eta = (PI / 2.0) + phi
-    -- commented out 24 May 
-    local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
-    --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
-
-
-    --local phi = math.atan(yRf - yLi, xRf - xLi)
-    --local theta = gamma - phi
+    -- local eta = (PI / 2.0) + math.atan(yRf - yLi, xRf - xLi)
+    -- local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+    -- --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
+    -- -- math in paper
+    -- --local theta = eta + gamma - (PI / 2.0)
+    -- local phi = math.atan(yRf - yLi, xRf - xLi)
+    -- local theta = gamma - phi
 
     -- appears to work better
-    -- changed back from 72/73
-        -- math in paper
-    local theta = eta + gamma - (PI / 2.0)
+    --local theta = gamma - eta + (PI / 2.0)
+
+    -- paper is wrong
+    local phi   = math.atan(yRf - yLi, xRf - xLi)
+    local alpha = math.asin(math_helpers.clamp(2.0 * rho / l, -1.0, 1.0))
+
+    local theta = (PI / 2.0) - (phi + alpha)
     return theta, straight_length
 end
+
+
+-- local function lsr_theta_and_distance(xLi, yLi, xRf, yRf, rho)
+--     local dx = xRf - xLi
+--     local dy = yRf - yLi
+--     local l = math.sqrt(dx * dx + dy * dy)
+
+--     if l < 2.0 * rho then
+--         return nil, nil
+--     end
+
+--     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
+--     -- phi is centre-line angle measured from East, CCW
+--     local phi = math.atan(dy, dx)
+--     -- beta is the internal tangent offset angle
+--     local beta = math.atan(2.0 * rho, straight_length)
+
+--     local theta = (PI / 2.0) - phi - beta
+
+--     return theta, straight_length
+-- end
+
 
 -- ---------------------------------------------------------
 -- LSL Geometry
@@ -96,7 +120,7 @@ end
 -- ---------------------------------------------------------
 -- RSL Geometry
 -- theta = eta - gamma + pi/2
--- eta   = pi/2 - atan2(yLf - yRi, xLf - xRi)
+-- eta = pi/2 - atan2(yLf - yRi, xLf - xRi)
 -- gamma = atan(2*rho / straight_length)
 -- l = distance(CR_i, CL_f)
 -- straight_length = sqrt(l^2 - 4*rho^2)
@@ -108,12 +132,19 @@ local function rsl_theta_and_distance(xRi, yRi, xLf, yLf, rho)
         return nil, nil 
     end
     local straight_length = math.sqrt(math.max(0.0, l * l - 4.0 * rho * rho))
-    local phi = math.atan(yLf - yRi, xLf - xRi)
-    local eta = (PI / 2.0) - phi
-    --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
-   --local gamma = math.atan(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
-    local gamma = math.atan((2.0 * rho) / straight_length)
-    local theta = eta - gamma + (PI/2.0)
+    -- local eta = (PI / 2.0) - math.atan(yLf - yRi, xLf - xRi)
+    -- --local gamma = math.acos(math_helpers.clamp((2.0 * rho) / l, -1.0, 1.0))
+
+    -- local gamma = math.acos(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+
+    -- --local gamma = math.atan(math_helpers.clamp((2.0 * rho) / straight_length, -1.0, 1.0))
+    -- local theta = eta - gamma + (PI/2.0)
+
+    -- geometry in paper is wrong
+    local phi   = math.atan(yLf - yRi, xLf - xRi)
+    local alpha = math.asin(math_helpers.clamp(2.0 * rho / l, -1.0, 1.0))
+    local theta = (PI / 2.0) - (phi - alpha)
+
     return theta, straight_length
 end
 
@@ -124,32 +155,6 @@ end
 -- no gamma because of external tangents 
 -- ---------------------------------------------------------
 local function rsr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
-    local dx = xRf - xRi
-    local dy = yRf - yRi
-    local straight_length = math.sqrt(dx * dx + dy * dy)
-    local theta = (PI / 2.0) - math.atan(dy, dx)
-    return theta, straight_length
-end
-
--- ---------------------------------------------------------
--- RLR Geometry
--- TBA
--- no gamma because of external tangents 
--- ---------------------------------------------------------
-local function rlr_theta_and_distance(xRi, yRi, xRf, yRf, rho)
-    local dx = xRf - xRi
-    local dy = yRf - yRi
-    local straight_length = math.sqrt(dx * dx + dy * dy)
-    local theta = (PI / 2.0) - math.atan(dy, dx)
-    return theta, straight_length
-end
-
--- ---------------------------------------------------------
--- LRL Geometry
--- TBA
--- no gamma because of external tangents 
--- ---------------------------------------------------------
-local function lrl_theta_and_distance(xRi, yRi, xRf, yRf, rho)
     local dx = xRf - xRi
     local dy = yRf - yRi
     local straight_length = math.sqrt(dx * dx + dy * dy)
@@ -173,6 +178,7 @@ end
 --   psi = 0 North, positive clockwise
 -- Internally converted to:
 --   alpha = 0 East, positive counter-clockwise
+-- no gamma because of external tangents 
 -- ---------------------------------------------------------
 
 local function rlr_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
@@ -200,9 +206,9 @@ end
 -- ---------------------------------------------------------
 -- LRL Geometry using Shkel/Lumelsky Eq. (13)
 -- Inputs use Lua heading convention:
---   psi = 0 North, positive clockwise
+--  psi = 0 North, positive clockwise
 -- Internally converted to:
---   alpha = 0 East, positive counter-clockwise
+--  alpha = 0 East, positive counter-clockwise
 -- ---------------------------------------------------------
 local function lrl_segments(xi, yi, psi_i, xf, yf, psi_f, rho)
     local dx = xf - xi
@@ -758,8 +764,8 @@ local function build_orbit_path(kangaroo_state, orbit_dir)
     -- north and east distance from kangaroo state
 
     -- Critical to impementation
-    -- ArduPilot: rel_ne:x() = North metres,  rel_ne:y() = East metres
-    -- kx/ky using rel_ne:y() and rel_ne:x() - flipped convention
+    -- ArduPilot uses rel_ne:x() = North metres,  rel_ne:y() = East metres
+    -- kx/ky using rel_ne:y() and rel_ne:x() - flipped convention to reflect this
     local kx, ky = rel_ne:y(), rel_ne:x()
 
     --  rho via min_turn_radius; velocity across two dimensions

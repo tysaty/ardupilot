@@ -172,7 +172,7 @@ local KANG_SPD_MIN = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: m/s
   // @User: Standard
 --]]
-local KANG_SPD_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MAX", 7, 20)
+local KANG_SPD_MAX = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "SPD_MAX", 7, 10)
 
 --[[
   // @Param: KANG_HOP_MIN
@@ -261,7 +261,7 @@ local KANG_PRT_S = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PRE
   // @Units: m
   // @User: Standard
 --]]
-local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 16, 500)
+local KANG_OFS_M = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "OFS_M", 16, 350)
 
 --[[
   // @Param: KANG_SPD_REL
@@ -291,7 +291,7 @@ local KANG_STR_HDG = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_P
   // @Units: m
   // @User: Standard
 --]]
-local KANG_LAT_DISP = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "LAT_DISP", 19, 200)
+local KANG_LAT_DISP = param_helpers.bind_add_param(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, "LAT_DISP", 19, 150)
 
 --[[
   // @Param: KANG_CIR_R
@@ -580,6 +580,7 @@ local function ensure_anchor(now_ms)
 
         target_north = orbit_north + r
         target_east = orbit_east
+
     -- generate work
     elseif mode == "rectangle" then
         rect_side = 0
@@ -707,10 +708,10 @@ local function integrate_target(now_ms)
     last_update_ms = now_ms
 
     local mode = get_active_mode()
-    if     mode == "point"     then integrate_point()
-    elseif mode == "random"    then integrate_random(now_ms, dt)
-    elseif mode == "straight"  then integrate_straight(dt)
-    elseif mode == "circle"    then integrate_circle(dt)
+    if     mode == "point" then integrate_point()
+    elseif mode == "random" then integrate_random(now_ms, dt)
+    elseif mode == "straight" then integrate_straight(dt)
+    elseif mode == "circle" then integrate_circle(dt)
     elseif mode == "rectangle" then integrate_rectangle(dt)
     end
 
