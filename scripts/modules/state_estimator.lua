@@ -102,8 +102,7 @@ function kf.update(meas_x, meas_y, dt)
 
     local R = {
         {kf.measurement_noise, 0},
-        {0, kf.measurement_noise}
-    }
+        {0, kf.measurement_noise}}
 
     -- converting to column
     local x_col = math_helpers.vec_to_col(kf.x)
@@ -111,8 +110,7 @@ function kf.update(meas_x, meas_y, dt)
     -- -----------------------------------------------------
     -- Predict step
     -- -----------------------------------------------------
-
-    -- prediction of x: x_pred = F . x
+    -- prediction of x: x_pred = Fx
     local x_pred = math_helpers.mat_mul(F, x_col)
     
     -- prediction of covariance matrix: P_pred = F . P . F(transpose) + Q
@@ -128,7 +126,7 @@ function kf.update(meas_x, meas_y, dt)
     -- calling observed value, reorgnaising
     local z = math_helpers.vec_to_col({meas_x, meas_y})
 
-    -- updating y values: y = z - H . x_pred
+    -- updating y values: y = z - H * x_pred
     local y = math_helpers.mat_sub(z, math_helpers.mat_mul(H, x_pred))
 
     -- invoking covariance/resiudal covariance
@@ -150,8 +148,7 @@ function kf.update(meas_x, meas_y, dt)
         return nil
     end
 
-    -- Kalman gain
-    -- K = P_pred . H(transpose) . inverse_S
+    -- Kalman gain - K = P_pred . H(transpose) . inverse_S
     local K = math_helpers.mat_mul(
         math_helpers.mat_mul(P_pred, math_helpers.transpose(H)),
         S_inv
@@ -178,7 +175,7 @@ function kf.update(meas_x, meas_y, dt)
     -- guard: check P_new is still symmetric positive-definite before committing
     local spd_ok, spd_reason = is_spd(P_new)
     if not spd_ok then
-        gcs:send_text(3, "KF WARNING: covariance degraded — " .. tostring(spd_reason))
+        gcs:send_text(3, "KF WARNING: covariance degraded - " .. tostring(spd_reason))
         return nil
     end
 

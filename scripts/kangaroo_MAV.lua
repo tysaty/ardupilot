@@ -429,19 +429,19 @@ local function get_plane_groundspeed_mps()
     return math.max(0, speed_mps_now)
 end
 
--- fix speed - bounding -- call somewhere...
--- integrate 17 May
-local function get_capped_speed()
-    local spd   = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
-    local ratio = math_helpers.clamp(KANG_SPD_REL:get(), 0, 1)
-    if ratio > 0 then
-        local plane_spd = get_plane_groundspeed_mps()
-        if plane_spd ~= nil and spd > plane_spd * ratio then
-            spd = plane_spd * ratio
-        end
-    end
-    return spd
-end
+-- -- fix speed - bounding -- call somewhere...
+-- -- integrate 17 May
+-- local function get_capped_speed()
+--     local spd   = math_helpers.clamp(KANG_SPD_MAX:get(), 1, 40)
+--     local ratio = math_helpers.clamp(KANG_SPD_REL:get(), 0, 1)
+--     if ratio > 0 then
+--         local plane_spd = get_plane_groundspeed_mps()
+--         if plane_spd ~= nil and spd > plane_spd * ratio then
+--             spd = plane_spd * ratio
+--         end
+--     end
+--     return spd
+-- end
 
 -- generate next point
 local function choose_next_segment(now_ms)

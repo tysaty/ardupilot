@@ -414,9 +414,11 @@ local function cost_function(next_loc, plane_loc, kangaroo_loc, kangaroo_state)
     end
 
     -- caluclating spi
-    local psi_B = math.atan(kangaroo_state.vy, kangaroo_state.vx)
     local psi_next_to_kang = math.atan(dn1:y(), dn1:x())  -- psi_{A(k+1),B(k+1)}
     local psi_curr_to_kang = math.atan(dn3:y(), dn3:x())  -- psi_{A(k),B(k)}
+    -- when target is stationary, heading is undefined — use approach direction so heading term drops to zero
+    local kang_speed_sq = kangaroo_state.vx^2 + kangaroo_state.vy^2
+    local psi_B = kang_speed_sq > 1e-4 and math.atan(kangaroo_state.vy, kangaroo_state.vx) or psi_next_to_kang
 
     -- normalise distance terms by DUB_DIST² so all four terms are dimensionless and
     -- comparable to the heading terms (rad²); w3 needs larger values than w4 because
@@ -924,7 +926,7 @@ function update()
             local n = math.max(error_samples, 1)
             -- Cost function reporting
             local j_report = min_J_seen < math.huge and min_J_seen or -1
-            gcs:send_text(4, string.format("Dubins error L1 Norm:%.1fm L2 Norm:%.1fm J_min:%.4f",
+            gcs:send_text(4, string.format("Dubins L1:%.1fm L2:%.1fm J:%.4f",
                 cum_L1_error / n, cum_L2_error / n, j_report))
 
             -- reporting on position
