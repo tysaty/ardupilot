@@ -40,13 +40,18 @@ local last_bus_seq_seen = 0
 local math_helpers = require("math_helpers")
 local param_helpers = require("param_helpers")
 local kf = require("state_estimator")
-local continuous_weave = require("continuous_weave")
+local continuous_weave = require("continuous_weave_centerline")
 
 
 -- continuous weave state (arc-length accumulator and phase)
 local cw_s        = 0.0
 local cw_phase    = 0.0
 local last_cw_ms  = nil
+
+-- fixed centerline anchor (plane NE position captured when weaving begins)
+-- the weave sinusoid is defined along the line anchor -> kangaroo
+local cw_anchor_n = nil
+local cw_anchor_e = nil
 
 -- Kalman filter initialisiation for the filter
 -- initialising for KF filter - reference fised 
@@ -80,35 +85,35 @@ assert(CTRL_TABLE_KEY ~= nil, "CTRL: no free param table key")
 -- Parameter value declaration — continuous weave
 -- -----------------------------------------------------------------------
 -- Weave spatial wavelength (m)
-local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 300)  -- original (R_min=150)
+-- local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 300)  -- original (R_min=150)
 -- local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 110)
 -- local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 20)
 -- local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 40)   -- ~8 cycles, A_eff ~1.6m
--- local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 60)     -- ~5 cycles, A_eff ~3.6m
+local CTRL_CW_LAMBDA  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LAMBDA", 1, 60)     -- ~5 cycles, A_eff ~3.6m
 -- Minimum aircraft turn radius (m)
---local CTRL_CW_RMIN    = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_RMIN",2, 150)  -- original
+-- local CTRL_CW_RMIN    = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_RMIN",2, 150)  -- original
 local CTRL_CW_RMIN    = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_RMIN",2, 20)
 -- Maximum weave amplitude cap (m)
-local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 80) -- original
+-- local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 80) -- original
 -- local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 20) -- prev
 -- local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 2)  -- prev (λ=40)
--- local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 5)          -- just above A_eff ~3.6m
+local CTRL_CW_ACAP = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ACAP", 3, 5)          -- just above A_eff ~3.6m
 -- Distance at which weave begins (d_start, must be > d_full)
-local CTRL_CW_DSTART = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DSTART", 4, 600)  -- original
+-- local CTRL_CW_DSTART = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DSTART", 4, 600)  -- original
 -- local CTRL_CW_DSTART = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DSTART", 4, 220) -- prev
--- local CTRL_CW_DSTART = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DSTART", 4, 300)
+local CTRL_CW_DSTART = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DSTART", 4, 300)
 -- Curvature safety margin (0–1)
 local CTRL_CW_ETA = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_ETA", 5, 0.8)
 
 -- Distance at which weave reaches full amplitude (d_full, must be < d_start)
-local CTRL_CW_DFULL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DFULL", 6, 150)   -- original
+-- local CTRL_CW_DFULL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DFULL", 6, 150)   -- original
 -- local CTRL_CW_DFULL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DFULL", 6, 55) -- prev
--- local CTRL_CW_DFULL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DFULL", 6, 60)
+local CTRL_CW_DFULL = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_DFULL", 6, 60)
 -- Look-ahead distance along approach vector (m), used to compute u
 -- achieved weave amplitude = A * lambda / (2*pi*L); smaller L => deeper weave (floor ~lambda/2pi)
-local CTRL_CW_LOOK  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LOOK", 7, 50) -- original
+-- local CTRL_CW_LOOK  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LOOK", 7, 50) -- original
 -- local CTRL_CW_LOOK  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LOOK", 7, 20) -- prev (achieved ~1.7m)
--- local CTRL_CW_LOOK  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LOOK", 7, 10)     -- achieved ~3.4m, matches commanded A
+local CTRL_CW_LOOK  = param_helpers.bind_add_param(CTRL_TABLE_KEY, CTRL_TABLE_PREFIX, "C_LOOK", 7, 10)     -- achieved ~3.4m, matches commanded A
 
 -- -----------------------------------------------------------------------
 -- KF_ parameter table for Kalman filter noise tuning
@@ -337,13 +342,20 @@ function update()
     local kang_n  = kf_state.x
     local kang_e  = kf_state.y
 
-    -- distance to kangaroo and look-ahead fraction
+    -- distance to kangaroo
     local dx      = kang_n - plane_n
     local dy      = kang_e - plane_e
     local dist    = math.sqrt(dx*dx + dy*dy)
-    local u       = dist > 0 and math.min(CTRL_CW_LOOK:get() / dist, 1.0) or 0
+    -- u/look-ahead fraction no longer used; centerline carrot uses an absolute look-ahead
+    -- local u       = dist > 0 and math.min(CTRL_CW_LOOK:get() / dist, 1.0) or 0
 
-    -- advance arc-length accumulator by distance flown this tick
+    -- capture the fixed centerline anchor on the first weave tick
+    if cw_anchor_n == nil then
+        cw_anchor_n = plane_n
+        cw_anchor_e = plane_e
+    end
+
+    -- advance arc-length accumulator by distance flown this tick (reporting only)
     if last_cw_ms == nil then last_cw_ms = now_ms end
     local dt_s     = (now_ms - last_cw_ms) * 0.001
     last_cw_ms     = now_ms
@@ -352,7 +364,8 @@ function update()
     cw_s = cw_s + speed_ms * dt_s
 
     -- generate next reference point from continuous_weave module
-    local ref_n, ref_e = continuous_weave.straight_weave(plane_n, plane_e,kang_n,  kang_e,u, cw_s,
+    -- centerline-anchored: pass the fixed anchor and an absolute look-ahead distance
+    local ref_n, ref_e = continuous_weave.straight_weave(plane_n, plane_e, cw_anchor_n, cw_anchor_e, kang_n, kang_e, CTRL_CW_LOOK:get(),
         CTRL_CW_LAMBDA:get(), CTRL_CW_RMIN:get(), CTRL_CW_ACAP:get(), CTRL_CW_DSTART:get(), CTRL_CW_DFULL:get(), CTRL_CW_ETA:get(), cw_phase)
 
     -- command the reference point at the required altitude
