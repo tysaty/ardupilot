@@ -1,12 +1,41 @@
 # Offline geometric validation harness
 
-**Status: skeleton. No geometry is implemented and nothing here is verified.**
+**Status: running, and nothing here is verified.** Three geometries work;
+`continuous_weave` is still a stub, so the shipping guidance law has no
+comparison yet (`ACT-2026-06-25-04`).
 
-Structure only, created under
-`tasks/active/TASK-001-python-geometric-validation-harness.md` to satisfy
-`ACT-2026-06-25-03` (interface contract) and `ACT-2026-06-25-06` (destination
-directory). Porting algorithms in is `ACT-2026-06-25-04` and `-05`, both still
-open.
+Tracked by `tasks/active/TASK-001-python-geometric-validation-harness.md`.
+
+## Configuration and the infeasible turn radius
+
+Parameters live in `config.py` — one immutable module, units and provenance on
+every value. Directed 2026-07-22: airspeed **25 m/s**, turn radius **45 m**,
+orbit radius **70 m**. The **45-degree** bank limit is held as governing.
+
+At 25 m/s that limit gives a minimum turn radius of **63.73 m**, so the
+configured 45 m is **infeasible** — it would need 54.78 degrees and 1.73 g
+against 1.41 g at the limit. The harness refuses to run rather than flying a
+path the aircraft cannot:
+
+```
+$ python3 -m py_harness.run_harness --algorithm dubins
+REFUSED: configuration violates the 45.0 deg bank limit: ...
+```
+
+Pass `--allow-infeasible` to proceed; every history sample and the plot title
+are then stamped infeasible.
+
+## Commanded is not achieved
+
+A guidance point placed a look-ahead ahead on the ring is chased from **inside**
+it, so the flown circle settles near `max(R·cos(L/R), turn radius)`, not `R`. At
+the configured 70 m ring and 50 m look-ahead the aircraft flies about **64 m**
+when the turn radius is feasible, and about **54 m** at the directed 45 m — 77%
+of what was commanded. The harness measures and prints this on every orbit run.
+
+This is the same commanded-versus-achieved gap that `A-DEC-009` records for the
+weave's amplitude, from a different cause. It is reported, **not** corrected;
+reducing the look-ahead to about 10 m recovers roughly 99%.
 
 ## Why this exists
 
@@ -26,10 +55,25 @@ means writing a fifth self-contained script with its own plotting code.
 
 | File | Responsibility |
 |---|---|
+| `config.py` | Flight parameters, derived bank angles, the feasibility check. Immutable. |
 | `interface.py` | The algorithm contract: snapshot fields, return value, units, frame, no-solution convention. No geometry. |
 | `state.py` | Plane and target state, fixed-step time advance, recorded history, and the read-only plotter. No geometry. |
-| `algorithms.py` | Substitutable geometric algorithms and the name registry. All geometry lives here. |
-| `run_harness.py` | Entry point. Selecting an algorithm is a change to `--algorithm` and nothing else. |
+| `algorithms.py` | Thin adapters and the name registry. Converts frames, calls geometry, picks one guidance point. **No maths.** |
+| `geometry/dubins.py` | Six Dubins families, ported from `../py_plots/dubins_path.py`. Stateless. |
+| `geometry/orbit.py` | Ring tangents, orbit direction and sampling, ported from `dubins_path.py`, `combined.py` and `constrained_curve.py`. Stateless. |
+| `run_harness.py` | Entry point. Selecting a geometry is a change to `--algorithm` and nothing else. |
+
+`geometry/` holds no state at all — no globals, no matplotlib, no time. That is
+what lets the same functions serve the harness and a later Lua port.
+
+## Geometries
+
+| `--algorithm` | Behaviour |
+|---|---|
+| `dubins` | Shortest of six families to the target. Terminates on arrival. |
+| `orbit` | Circles the target on the 70 m ring. |
+| `dubins_orbit` | Approach tangent to the ring, then circle. The `combined.py` behaviour. |
+| `continuous_weave` | **Stub.** `ACT-2026-06-25-04`. |
 
 Two modules with separated responsibilities, per `DEC-2026-06-25-01`. The
 plotter sits with state by request (`DEC-2026-06-25-03`); the mitigation for
@@ -74,11 +118,27 @@ gitlink. Commit changes here in the nested repository. See
 
 ```bash
 cd src/ardupilot/scripts
-python3 -m py_harness.run_harness --algorithm continuous_weave
+python3 -m py_harness.run_harness --algorithm dubins_orbit --allow-infeasible
+python3 -m py_harness.run_harness --algorithm orbit --turn-radius-m 63.8
 ```
 
-This currently raises `NotImplementedError`, by design.
+Plotting needs `matplotlib`, which is **not installed** in the current
+environment — `plot_history` has therefore never been executed. Use `--no-plot`
+until it is available.
 
-Structural contract tests live in the parent repository at
-`tests/unit/test_py_harness_contract.py`. They verify the shape of the
-contract, not any geometry.
+## Tests
+
+In the parent repository, because `tests/` belongs there:
+
+```bash
+cd /Users/samueltyrie/ResearchProject && python3 -m pytest tests/unit -q
+```
+
+| File | What it covers |
+|---|---|
+| `test_py_harness_geometry.py` | The port reproduces `py_plots/dubins_path.py` to 1e-12 across all six families. Guards `A-VAL-002`/`A-VAL-004`. |
+| `test_py_harness_config.py` | The feasibility arithmetic, refusal behaviour, immutability. |
+| `test_py_harness_contract.py` | Interface shape, substitution, turn-rate limit, no-solution handling. |
+
+These show the port is **faithful**, not that the geometry is **correct** — the
+originals carry no tests either. No Lua file is under test.
