@@ -62,6 +62,12 @@ SNAPSHOT_FIELDS = {
         "accumulated state — for example the continuous weave's arc-length "
         "accumulator — without holding module-level state. See A-VAL-003."
     ),
+    "target_est": (
+        "Estimated target state as {n_m, e_m, vn_ms, ve_ms} in metres and "
+        "metres per second, from the state estimator (TASK-012), or None when no "
+        "estimator is running. An algorithm that estimates the target trajectory "
+        "(TASK-010) reads this rather than the true target_n_m/target_e_m."
+    ),
 }
 
 #: Fields an algorithm returns.

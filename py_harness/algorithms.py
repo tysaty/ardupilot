@@ -30,9 +30,36 @@ geometry bug.
 
 import math
 
+from .geometry import amplitude as amplitude_geom
+from .geometry import amplitude_orbit as amplitude_orbit_geom
 from .geometry import dubins as dubins_geom
+from .geometry import dubins_orbit as dubins_orbit_geom
+from .geometry import heading as heading_geom
 from .geometry import orbit as orbit_geom
 from .interface import GeometricAlgorithm, NoSolution
+
+
+def _target_ea(snapshot):
+    """Target ``(east, north)`` for guidance: the estimate if present, else true.
+
+    An algorithm reads the estimated target (`target_est`, from the state
+    estimator) when one is running, otherwise the true target — the same call
+    site works with or without estimation (``TASK-010``/``TASK-012``).
+    """
+    est = snapshot.get("target_est")
+    if est is not None:
+        return est["e_m"], est["n_m"]
+    return snapshot["target_e_m"], snapshot["target_n_m"]
+
+
+def _weave_phase_m(snapshot):
+    """Weave arc-length phase ``s`` from the snapshot: speed x elapsed time.
+
+    Derived from ``t_s`` and ``plane_speed_ms`` rather than accumulated in the
+    algorithm, so the adapter stays stateless (``A-VAL-003``). Constant speed
+    makes along-track distance ``= speed * t``.
+    """
+    return snapshot["plane_speed_ms"] * snapshot["t_s"]
 
 
 def _heading_to_geometry(hdg_rad):
@@ -45,36 +72,88 @@ def _heading_to_geometry(hdg_rad):
     return hdg_rad
 
 
-class ContinuousWeaveAlgorithm(GeometricAlgorithm):
-    """Port of the shipping continuous weave law.
+class AmplitudeAlgorithm(GeometricAlgorithm):
+    """Amplitude weave, ported from ``continuous_weave.lua`` (``TASK-004``).
 
-    To be transliterated from ``modules/continuous_weave.lua``, whose
-    ``straight_weave`` (line 37) is the shipping guidance law and the only one
-    the controller currently calls. Porting it in first gives the harness a
-    known-behaviour reference against which a second algorithm can be judged
-    (``ACT-2026-06-25-04``).
+    Discharges ``ACT-2026-06-25-04``: the shipping weave law as a harness
+    algorithm. The geometry lives in :mod:`py_harness.geometry.amplitude`; this
+    adapter only converts frames, derives the phase ``s`` from the snapshot and
+    returns one guidance point, so it holds no geometry and no state.
 
-    Two properties of the Lua source must survive the port, or the harness is
-    validating something the aircraft does not fly:
+    The weave is **plane-anchored** — the reference line is recomputed from the
+    aircraft's position each cycle — reproducing the achieved-amplitude behaviour
+    of ``A-DEC-009`` rather than correcting it. The amplitude is curvature-limited
+    by the safety factor ``eta``; ``eta = 1`` sits at the ``1/R_min`` limit.
 
-    * the weave is **plane-anchored** — the reference line is recomputed from
-      the aircraft's current position every cycle, which is the source of the
-      achieved-amplitude discrepancy recorded in ``ADR-001`` and
-      ``A-DEC-009``. The port must reproduce the defect, not silently fix it.
-    * the sinusoid's phase argument is the **arc-length accumulator**, not
-      elapsed time. It is accumulated state, so it travels through the
-      snapshot's ``algorithm_state`` field rather than a module global
-      (``DEC-2026-06-25-04``, ``A-VAL-003``).
+    Also registered under the alias ``continuous_weave`` (``ACT-2026-06-25-04``).
 
-    Status: SKELETON. Still open as ``ACT-2026-06-25-04``.
+    Configuration used: ``turn_radius_m`` (as ``R_min``), ``look_ahead_m``,
+    ``weave_lambda_m``, ``weave_a_cap_m``, ``weave_d_start_m``,
+    ``weave_d_full_m``, ``weave_eta``.
     """
 
-    name = "continuous_weave"
+    name = "amplitude"
 
     def guidance_point(self, snapshot):
-        raise NotImplementedError(
-            "Port of continuous_weave.lua straight_weave is ACT-2026-06-25-04."
-        )
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        try:
+            g = amplitude_geom.guidance(
+                px, py, psi_i, tx, ty, _weave_phase_m(snapshot),
+                cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
+                cfg["weave_d_start_m"], cfg["weave_d_full_m"], cfg["weave_eta"],
+                cfg["look_ahead_m"], cfg.get("weave_envelope", "smoothstep"),
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": {
+                "amplitude_m": g["amplitude"],
+                "curvature": g["curvature"],
+            },
+        }
+
+
+class AmplitudeOrbitAlgorithm(GeometricAlgorithm):
+    """Amplitude weave handed off to the orbit via the ramp (``TASK-004``).
+
+    The amplitude weave is the approach; within a look-ahead of the ring it ramps
+    into the orbit about the target, keeping the on-orbit behaviour for a fixed or
+    moving target. Geometry in :mod:`py_harness.geometry.amplitude_orbit`; this
+    adapter stays a thin, stateless translator.
+
+    Configuration used: as :class:`AmplitudeAlgorithm` plus ``orbit_radius_m``.
+    """
+
+    name = "amplitude_orbit"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        try:
+            g = amplitude_orbit_geom.guidance(
+                px, py, psi_i, tx, ty, _weave_phase_m(snapshot),
+                cfg["orbit_radius_m"], cfg["look_ahead_m"],
+                cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
+                cfg["weave_d_start_m"], cfg["weave_d_full_m"], cfg["weave_eta"],
+                cfg.get("weave_envelope", "smoothstep"),
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        state = {"phase": g["phase"]}
+        if g["amplitude"] is not None:
+            state["amplitude_m"] = g["amplitude"]
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
 
 
 class DubinsAlgorithm(GeometricAlgorithm):
@@ -174,12 +253,14 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
     The behaviour of ``py_plots/combined.py``: fly a Dubins path to a tangent
     entry point on the ring of radius ``orbit_radius_m`` about the target, then
     circle. Outside the ring the guidance point comes from the approach path;
-    once within one look-ahead of the ring it comes from the orbit.
+    once within one look-ahead of the ring a **ramp** blends it into the orbit
+    (``TASK-002``), so the guidance point is continuous across the handoff rather
+    than stepping at a hard distance test.
 
-    The handoff is a distance test rather than a mode flag, so the algorithm
-    stays stateless and the harness keeps no behaviour state — the property
-    ``ADR-001`` removed from the controller and which the supervisor asked to
-    keep simple here.
+    All the geometry — the tangent entry, the shortest Dubins family, the orbit
+    point and the ramp — lives in :mod:`py_harness.geometry.dubins_orbit`. This
+    adapter only converts frames and wraps the result, so it stays stateless: the
+    ``phase`` it reports is the ramp weight, computed each call, not stored.
 
     Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
     ``delta_psi_rad``, ``delta_d_m``.
@@ -192,65 +273,96 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
         px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
         tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
         psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
-        R = cfg["orbit_radius_m"]
 
-        range_m = math.hypot(px - tx, py - ty)
-        entries = orbit_geom.tangent_points(px, py, tx, ty, R)
-
-        # On or inside the ring, or within a look-ahead of it: orbit.
-        if not entries or range_m <= R + cfg["look_ahead_m"]:
-            if range_m < 1e-6:
-                raise NoSolution("aircraft is at the ring centre; no orbit angle")
-            psi0 = orbit_geom.entry_angle(px, py, tx, ty)
-            direction = orbit_geom.orbit_direction(psi0, psi_i)
-            gx, gy, psi = orbit_geom.orbit_point_at_arc_length(
-                tx, ty, R, psi0, direction, cfg["look_ahead_m"]
+        try:
+            g = dubins_orbit_geom.guidance(
+                px, py, psi_i, tx, ty,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
             )
-            return {
-                "guidance_n_m": gy,
-                "guidance_e_m": gx,
-                "algorithm_state": {"phase": 1.0, "ring_angle_rad": psi},
-            }
+        except ValueError as exc:
+            raise NoSolution(str(exc))
 
-        # Outside: Dubins to the first tangent entry, arriving along the tangent.
-        ex, ey, psi_f, _sign = entries[0]
-        best = dubins_geom.shortest(
-            px,
-            py,
-            psi_i,
-            ex,
-            ey,
-            psi_f,
-            cfg["turn_radius_m"],
-            cfg["delta_psi_rad"],
-            cfg["delta_d_m"],
-        )
-        if best is None:
-            raise NoSolution("no Dubins family reaches the ring entry point")
-        family, pts, length = best
-        gx, gy = orbit_geom.point_at_arc_length(pts, cfg["look_ahead_m"])
+        state = {"phase": g["phase"]}
+        if g["family"] is not None:
+            state["family"] = g["family"]
+        if g["ring_angle_rad"] is not None:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
         return {
-            "guidance_n_m": gy,
-            "guidance_e_m": gx,
-            "algorithm_state": {
-                "phase": 0.0,
-                "approach_length_m": length,
-                "family": family,
-            },
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
         }
+
+
+class HeadingAAlgorithm(GeometricAlgorithm):
+    """Heading-alignment fly-to (``TASK-010``): aim at the estimated kangaroo.
+
+    The simple baseline to compare against the Dubins and weave families. It reads
+    the **estimated** target (``target_est``, from the state estimator, `TASK-012`)
+    when one is running, else the true target, and places the guidance point a
+    look-ahead along the bearing to it. Geometry in
+    :mod:`py_harness.geometry.heading`; this adapter only translates.
+
+    Configuration used: ``look_ahead_m``.
+    """
+
+    name = "heading_a"
+
+    def guidance_point(self, snapshot):
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = _target_ea(snapshot)
+        try:
+            gx, gy = heading_geom.guidance(px, py, tx, ty,
+                                           self.config["look_ahead_m"])
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        return {"guidance_n_m": gy, "guidance_e_m": gx, "algorithm_state": {}}
+
+
+class HeadingAOrbitAlgorithm(GeometricAlgorithm):
+    """Heading fly-to ramped into the orbit about the estimated kangaroo.
+
+    ``heading_a`` on approach, then the orbit via the shared ramp (`TASK-010`).
+
+    Configuration used: ``orbit_radius_m``, ``look_ahead_m``.
+    """
+
+    name = "heading_a_orbit"
+
+    def guidance_point(self, snapshot):
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        tx, ty = _target_ea(snapshot)
+        try:
+            gx, gy, phase = heading_geom.guidance_orbit(
+                px, py, psi_i, tx, ty,
+                self.config["orbit_radius_m"], self.config["look_ahead_m"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        return {"guidance_n_m": gy, "guidance_e_m": gx,
+                "algorithm_state": {"phase": phase}}
 
 
 #: Name-to-class registry. Selecting an algorithm is a lookup here and nothing
 #: else; no other part of the harness may branch on algorithm identity.
 REGISTRY = {
-    ContinuousWeaveAlgorithm.name: ContinuousWeaveAlgorithm,
+    AmplitudeAlgorithm.name: AmplitudeAlgorithm,
+    AmplitudeOrbitAlgorithm.name: AmplitudeOrbitAlgorithm,
     DubinsAlgorithm.name: DubinsAlgorithm,
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
+    HeadingAAlgorithm.name: HeadingAAlgorithm,
+    HeadingAOrbitAlgorithm.name: HeadingAOrbitAlgorithm,
+    # Alias: continuous_weave is the amplitude weave (ACT-2026-06-25-04).
+    "continuous_weave": AmplitudeAlgorithm,
 }
 
-#: Algorithms with geometry implemented. ``continuous_weave`` is still a stub.
-IMPLEMENTED = ("dubins", "orbit", "dubins_orbit")
+#: Algorithms with geometry implemented; ``continuous_weave`` is an alias of
+#: ``amplitude``.
+IMPLEMENTED = ("amplitude", "amplitude_orbit", "dubins", "orbit", "dubins_orbit",
+               "heading_a", "heading_a_orbit")
 
 
 def build(name, config):
@@ -297,4 +409,9 @@ def config_dict(cfg):
         "turn_radius_bank_deg": cfg.turn_radius_bank_deg,
         "orbit_bank_deg": cfg.orbit_bank_deg,
         "bank_limited_turn_radius_m": cfg.bank_limited_turn_radius_m,
+        "weave_lambda_m": cfg.weave_lambda_m,
+        "weave_a_cap_m": cfg.weave_a_cap_m,
+        "weave_d_start_m": cfg.weave_d_start_m,
+        "weave_d_full_m": cfg.weave_d_full_m,
+        "weave_eta": cfg.weave_eta,
     }

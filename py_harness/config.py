@@ -11,17 +11,19 @@ The four flight values below come from user direction on 2026-07-22 under
 ``TASK-001``. They have not been derived from airframe data and have not been
 reviewed (`SR-003`).
 
-The governing bank limit is **45 degrees**, which is what
-`modules/dubins_weave_full.lua` implements and what `docs/ARCHITECTURE.md` and
-`docs/PROJECT_CONTEXT.md` record. It is held here rather than raised.
+The **flight code** holds a 45-degree bank limit — what
+`modules/dubins_weave_full.lua` implements and what `docs/ARCHITECTURE.md`,
+`docs/PROJECT_CONTEXT.md` and the `SR` requirements record. The **harness** bank
+limit was raised to **60 degrees** on 2026-07-27 by direction (`ADR-002`), so the
+harness deliberately **diverges** from the flight code. This is a modelling
+choice for the offline harness, not an approved limit (`SR-004`).
 
-The consequence is deliberate and visible: at 25 m/s a 45-degree bank gives a
-minimum turn radius of **63.73 m**, so the requested 45 m turn radius is
-**infeasible**. The harness refuses to run with it unless
-``--allow-infeasible`` is passed. This is the opposite of the `CTRL_C_RMIN`
-pattern, where 20 m is configured against a 41-92 m bank-limited radius and
-`docs/TRACEABILITY.md` calls the resulting clip "permissive rather than
-protective".
+The consequence: at 25 m/s a 60-degree bank gives a minimum turn radius of
+**36.80 m** (2.0 g), so the requested 45 m turn radius is now **feasible** (it
+needs 54.8 degrees, 1.73 g). At the flight code's 45 degrees the floor would be
+63.73 m and the 45 m radius would be infeasible; that comparison is preserved in
+`ADR-002`. The harness still refuses any radius below its 36.80 m floor unless
+``--allow-infeasible`` is passed.
 
 Conventions (`IR-001` to `IR-005`)
 -----------------------------------
@@ -39,8 +41,9 @@ import math
 #: acceleration, so this is both the commanded and the achieved speed.
 AIRSPEED_MS = 25.0
 
-#: Requested minimum turn radius, m. **Infeasible at the governing bank limit**
-#: — see BANK_LIMIT_DEG and bank_limited_turn_radius().
+#: Requested minimum turn radius, m. Feasible since the harness bank limit was
+#: raised to 60 degrees on 2026-07-27 (needs 54.8 deg, 1.73 g) — see
+#: BANK_LIMIT_DEG, ADR-002 and bank_limited_turn_radius().
 TURN_RADIUS_M = 45.0
 
 #: Radius of the orbit ring projected around the target, m. This is the ring
@@ -48,13 +51,16 @@ TURN_RADIUS_M = 45.0
 ORBIT_RADIUS_M = 70.0
 
 # --------------------------------------------------------------------------
-# Governing limits — from the existing project documents, not user direction
+# Harness bank limit — raised to 60 deg on 2026-07-27 (ADR-002)
 # --------------------------------------------------------------------------
 
-#: Maximum bank angle, degrees. Implemented in
-#: `modules/dubins_weave_full.lua`; recorded in `docs/ARCHITECTURE.md` and
-#: `docs/PROJECT_CONTEXT.md`. Held as governing per the 2026-07-22 decision.
-BANK_LIMIT_DEG = 45.0
+#: Maximum bank angle, degrees, used by the harness for its feasibility check.
+#: **Raised from 45 to 60 degrees on 2026-07-27 by direction (ADR-002)** so the
+#: directed 45 m turn radius is flyable in the harness. This **diverges from the
+#: flight code**, where `modules/dubins_weave_full.lua` and the `SR` requirements
+#: still hold 45 degrees; the harness value is a modelling choice, not an
+#: approved limit (`SR-004`). At 60 degrees the load factor is 2.0 g.
+BANK_LIMIT_DEG = 60.0
 
 #: Gravitational acceleration, m/s^2. The `py_plots/` scripts use 9.8; this
 #: uses the standard value, which changes derived radii by about 0.07%.
@@ -80,9 +86,33 @@ DELTA_D_M = 0.5
 #: Fixed simulation time step, s. Matches the controller's 100 ms loop.
 DT_S = 0.1
 
+# --------------------------------------------------------------------------
+# Amplitude weave parameters (TASK-004) — harness-only, illustrative
+# --------------------------------------------------------------------------
+# The names mirror `modules/continuous_weave.lua`. These are **not** tuned from
+# airframe data or the shipping `CTRL_*` values; they are illustrative harness
+# settings (`SR-004`) chosen so the curvature cap binds near the target and the
+# safety-factor comparison is visible.
+
+#: Weave wavelength, m. Sine argument is 2*pi*s/lambda.
+WEAVE_LAMBDA_M = 150.0
+
+#: Maximum desired weave amplitude far from the constraint, m.
+WEAVE_A_CAP_M = 40.0
+
+#: Distance at which the weave begins, m (d_start > d_full).
+WEAVE_D_START_M = 400.0
+
+#: Distance at which the weave reaches full desired amplitude, m.
+WEAVE_D_FULL_M = 120.0
+
+#: Curvature safety factor, 0 < eta <= 1. eta = 1 sits at the curvature limit
+#: 1/R_min; eta < 1 keeps a margin. The TASK-004 comparison is eta vs eta = 1.
+WEAVE_ETA = 0.8
+
 
 class InfeasibleConfiguration(Exception):
-    """Raised when a configuration violates the governing bank limit.
+    """Raised when a configuration violates the harness bank limit.
 
     Carries the numbers rather than a bare message, because the whole point of
     refusing is to show what would have to change.
@@ -137,6 +167,11 @@ class HarnessConfig:
         "delta_psi_rad",
         "delta_d_m",
         "dt_s",
+        "weave_lambda_m",
+        "weave_a_cap_m",
+        "weave_d_start_m",
+        "weave_d_full_m",
+        "weave_eta",
         "_frozen",
     )
 
@@ -151,6 +186,11 @@ class HarnessConfig:
         delta_psi_rad=DELTA_PSI_RAD,
         delta_d_m=DELTA_D_M,
         dt_s=DT_S,
+        weave_lambda_m=WEAVE_LAMBDA_M,
+        weave_a_cap_m=WEAVE_A_CAP_M,
+        weave_d_start_m=WEAVE_D_START_M,
+        weave_d_full_m=WEAVE_D_FULL_M,
+        weave_eta=WEAVE_ETA,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -162,7 +202,55 @@ class HarnessConfig:
         self.delta_psi_rad = float(delta_psi_rad)
         self.delta_d_m = float(delta_d_m)
         self.dt_s = float(dt_s)
+        self.weave_lambda_m = float(weave_lambda_m)
+        self.weave_a_cap_m = float(weave_a_cap_m)
+        self.weave_d_start_m = float(weave_d_start_m)
+        self.weave_d_full_m = float(weave_d_full_m)
+        self.weave_eta = float(weave_eta)
+        self._check_parameters()
         object.__setattr__(self, "_frozen", True)
+
+    def _check_parameters(self):
+        """Reject a malformed configuration at construction (``TASK-004``).
+
+        These are domain and geometric-ordering violations that would otherwise
+        surface as a division by zero, a NaN or a silently inverted envelope. An
+        *infeasible* configuration (a turn radius below the bank-limited floor) is
+        different — that is a flyability judgement handled by :meth:`validate`,
+        which warns rather than refuses to construct.
+        """
+        if self.turn_radius_m <= 0.0:
+            raise ValueError(
+                "turn_radius_m must be positive (it is R_min), got %r"
+                % self.turn_radius_m
+            )
+        if self.look_ahead_m <= 0.0:
+            raise ValueError(
+                "look_ahead_m must be positive, got %r" % self.look_ahead_m
+            )
+        if self.weave_lambda_m <= 0.0:
+            raise ValueError(
+                "weave_lambda_m must be positive, got %r" % self.weave_lambda_m
+            )
+        if self.weave_a_cap_m < 0.0:
+            raise ValueError(
+                "weave_a_cap_m must be non-negative, got %r" % self.weave_a_cap_m
+            )
+        if self.weave_d_full_m < 0.0:
+            raise ValueError(
+                "weave_d_full_m must be non-negative, got %r" % self.weave_d_full_m
+            )
+        if self.weave_d_start_m <= self.weave_d_full_m:
+            raise ValueError(
+                "weave_d_start_m must exceed weave_d_full_m (the weave ramps up "
+                "as distance falls), got d_start=%r <= d_full=%r"
+                % (self.weave_d_start_m, self.weave_d_full_m)
+            )
+        if not (0.0 < self.weave_eta <= 1.0):
+            raise ValueError(
+                "weave_eta must be in (0, 1] (eta > 1 exceeds the 1/R_min "
+                "curvature limit), got %r" % self.weave_eta
+            )
 
     def __setattr__(self, name, value):
         if getattr(self, "_frozen", False):
@@ -240,7 +328,7 @@ class HarnessConfig:
         return problems
 
     def validate(self, allow_infeasible=False):
-        """Raise unless the configuration respects the governing bank limit.
+        """Raise unless the configuration respects the harness bank limit.
 
         Args:
             allow_infeasible: When True, return the violations instead of
@@ -268,7 +356,7 @@ class HarnessConfig:
         return "\n".join(
             [
                 "airspeed            %.1f m/s" % self.airspeed_ms,
-                "bank limit          %.1f deg (governing, %.2f g)"
+                "bank limit          %.1f deg (harness, %.2f g; flight code holds 45 deg)"
                 % (self.bank_limit_deg, load_factor(self.bank_limit_deg)),
                 "bank-limited radius %.2f m" % self.bank_limited_turn_radius_m,
                 "turn radius         %.1f m -> %.2f deg, %.2f g  [%s]"

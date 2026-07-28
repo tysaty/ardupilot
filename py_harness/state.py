@@ -1,26 +1,27 @@
-"""Plane and target state, time stepping, recorded history and the plotter.
+"""Plane and target state, time stepping and recorded history.
 
 This is the state module of the two-module harness required by
 ``DEC-2026-06-25-01``. It owns:
 
-1. the state of the plane and the target at a given time;
-2. advancing that state by one fixed time step; and
-3. the plotter (``DEC-2026-06-25-03``).
+1. the state of the plane and the target at a given time; and
+2. advancing that state by one fixed time step, recording each instant.
 
 It owns no geometry. It calls a :class:`~interface.GeometricAlgorithm` to
 obtain each guidance point and knows nothing about how that point is derived.
 
-Recorded tension (``DEC-2026-06-25-03``)
-----------------------------------------
-``ARCHITECTURE.md`` requires component responsibilities and data ownership to
-stay explicit and independently testable. Co-locating the plotter with state
-weakens that. The plotter was placed here by request, and the mitigation is
-part of the decision rather than an implementation detail: the plotter reads a
-recorded state history and shall not mutate state or call the algorithm.
+Plotter split out, 2026-07-22 (``DEC-2026-07-22-01``)
+-----------------------------------------------------
+``DEC-2026-06-25-03`` placed the plotter here, and was recorded as "Agreed,
+with a recorded tension" against ``ARCHITECTURE.md``'s requirement that
+component responsibilities stay explicit and independently testable. The
+meeting note said to revisit that rather than quietly relax it. It was
+revisited by direction on 2026-07-22 and the plotter now lives in
+:mod:`py_harness.plotter`.
 
-If the plotter later needs to drive the algorithm — to sweep a parameter
-interactively, as the existing ``py_plots/`` sliders do — this separation is
-under pressure and must be revisited rather than quietly relaxed.
+The read-only mitigation is **strengthened, not relaxed**: that module does not
+import this one, so it cannot mutate harness state or call an algorithm. It
+consumes recorded histories, in memory or from JSON. Producing a run and
+drawing it are now separate steps.
 
 Modelling limitation (``A-VAL-001``)
 ------------------------------------
@@ -106,6 +107,8 @@ class Harness:
         dt_s=0.1,
         turn_radius_m=None,
         infeasible=False,
+        kangaroo=None,
+        estimator=None,
     ):
         """
         Args:
@@ -121,6 +124,16 @@ class Harness:
             infeasible: True when the configuration violated the bank limit and
                 the run proceeded anyway. Stamped on every history sample so no
                 output can be mistaken for a flyable trajectory.
+            kangaroo: Optional ``kangaroo(t) -> (n, e, vn, ve)`` target-motion
+                model (``TASK-009``). When given, the target follows the mode at
+                each step; when ``None``, it advances on its constant velocity.
+                The algorithm is unaffected either way — it reads the target from
+                the snapshot.
+            estimator: Optional state estimator with ``update(meas_x, meas_y, dt)``
+                (``TASK-012``). When given, the harness feeds it the target
+                position each step and exposes its estimate as the snapshot's
+                ``target_est``; this is a state-side concern, so the estimator is
+                never held by the algorithm.
         """
         self.plane = plane
         self.target = target
@@ -128,6 +141,10 @@ class Harness:
         self.dt_s = float(dt_s)
         self.turn_radius_m = None if turn_radius_m is None else float(turn_radius_m)
         self.infeasible = bool(infeasible)
+        self.kangaroo = kangaroo
+        self.estimator = estimator
+        #: Latest {n_m, e_m, vn_ms, ve_ms} estimate, or None.
+        self.target_est = None
         self.t_s = 0.0
         self.history = []
         self.algorithm_state = {}
@@ -140,7 +157,8 @@ class Harness:
         Returns:
             Plain dict with the keys in ``interface.SNAPSHOT_FIELDS``.
         """
-        snap = {"t_s": self.t_s, "algorithm_state": dict(self.algorithm_state)}
+        snap = {"t_s": self.t_s, "algorithm_state": dict(self.algorithm_state),
+                "target_est": dict(self.target_est) if self.target_est else None}
         snap.update(self.plane.as_dict())
         snap.update(self.target.as_dict())
         return snap
@@ -165,6 +183,15 @@ class Harness:
                 because choosing a safe fallback is a controller decision
                 governed by ``SR-007``.
         """
+        # State-side estimation (TASK-012): feed the estimator the current target
+        # position and expose its estimate in the snapshot. The algorithm consumes
+        # it via target_est; it never holds the estimator.
+        if self.estimator is not None:
+            out = self.estimator.update(self.target.n_m, self.target.e_m, self.dt_s)
+            if out is not None:
+                self.target_est = {"n_m": out["x"], "e_m": out["y"],
+                                   "vn_ms": out["vx"], "ve_ms": out["vy"]}
+
         snap = self.snapshot()
         result = self.algorithm.guidance_point(snap)
 
@@ -186,9 +213,15 @@ class Harness:
         self.plane.n_m += d * math.cos(self.plane.hdg_rad)
         self.plane.e_m += d * math.sin(self.plane.hdg_rad)
 
-        # Advance the target on its constant-velocity model.
-        self.target.n_m += self.target.vn_ms * self.dt_s
-        self.target.e_m += self.target.ve_ms * self.dt_s
+        # Advance the target: a kangaroo mode model if given (TASK-009),
+        # otherwise its constant-velocity model.
+        if self.kangaroo is not None:
+            n, e, vn, ve = self.kangaroo(self.t_s + self.dt_s)
+            self.target.n_m, self.target.e_m = n, e
+            self.target.vn_ms, self.target.ve_ms = vn, ve
+        else:
+            self.target.n_m += self.target.vn_ms * self.dt_s
+            self.target.e_m += self.target.ve_ms * self.dt_s
 
         self.t_s += self.dt_s
 
@@ -248,75 +281,3 @@ class Harness:
                 s["plane_n_m"] - s["target_n_m"], s["plane_e_m"] - s["target_e_m"]
             )
         return total / len(tail)
-
-
-def plot_history(history, axes=None, title=None, orbit_radius_m=None):
-    """Draw a recorded state history.
-
-    This function is **read-only by contract** (``DEC-2026-06-25-03``). It does
-    not mutate ``history``, does not construct or call a
-    :class:`~interface.GeometricAlgorithm`, and does not advance a
-    :class:`Harness`. It takes a completed history and draws it.
-
-    ``matplotlib`` is imported here rather than at module scope so the harness
-    and its tests import cleanly in a headless environment.
-
-    Args:
-        history: The list produced by :attr:`Harness.history`.
-        axes: Optional matplotlib axes to draw into. A new figure is created
-            when omitted.
-        title: Optional title. An infeasible run overrides it with a warning.
-        orbit_radius_m: When given, draw the ring about the final target
-            position for reference.
-
-    Returns:
-        The axes drawn into.
-
-    Raises:
-        ValueError: If ``history`` is empty.
-    """
-    if not history:
-        raise ValueError("plot_history needs a non-empty history")
-
-    import matplotlib.pyplot as plt
-
-    if axes is None:
-        _fig, axes = plt.subplots(figsize=(7, 7))
-
-    plane_e = [s["plane_e_m"] for s in history]
-    plane_n = [s["plane_n_m"] for s in history]
-    target_e = [s["target_e_m"] for s in history]
-    target_n = [s["target_n_m"] for s in history]
-    guide_e = [s["guidance_e_m"] for s in history]
-    guide_n = [s["guidance_n_m"] for s in history]
-
-    axes.plot(plane_e, plane_n, color="tab:blue", linewidth=2, label="aircraft")
-    axes.plot(
-        guide_e, guide_n, color="tab:orange", linewidth=0.8, alpha=0.6,
-        label="guidance point",
-    )
-    axes.plot(target_e, target_n, color="tab:green", linewidth=2, label="target")
-    axes.plot(plane_e[0], plane_n[0], "o", color="tab:blue", label="start")
-    axes.plot(target_e[-1], target_n[-1], "x", color="tab:green", markersize=10)
-
-    if orbit_radius_m:
-        ring_e, ring_n = [], []
-        for i in range(101):
-            a = 2.0 * math.pi * i / 100.0
-            ring_e.append(target_e[-1] + orbit_radius_m * math.sin(a))
-            ring_n.append(target_n[-1] + orbit_radius_m * math.cos(a))
-        axes.plot(ring_e, ring_n, "--", color="grey", linewidth=1, label="orbit ring")
-
-    if history[0].get("infeasible"):
-        axes.set_title(
-            "INFEASIBLE CONFIGURATION — violates the bank limit; not a flyable path"
-        )
-    elif title:
-        axes.set_title(title)
-
-    axes.set_xlabel("East (m)")
-    axes.set_ylabel("North (m)")
-    axes.set_aspect("equal")
-    axes.grid(True)
-    axes.legend(loc="best", fontsize="small")
-    return axes

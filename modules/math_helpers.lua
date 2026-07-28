@@ -1,4 +1,7 @@
--- Math helpers 
+-- =========================================================
+--  Helper table
+-- =========================================================
+
 -- local table
 local M = {}
 
@@ -53,6 +56,15 @@ function M.wrap_pi(i)
     return i
 end
 
+-- pi wrapping for full circle
+function M.wrap_2pi(a)
+    local r = math.fmod(a, 2 * math.pi)
+    if r < 0 then 
+        r = r + 2 * math.pi 
+    end
+    return r
+end
+
 -- Euclidean distance
 function M.dist2d(x1, y1, x2, y2)
     local dx = x2 - x1
@@ -69,6 +81,119 @@ function M.deg_to_e7(deg)
         return math.floor(deg * 1.0e7 + 0.5)
     end
     return math.ceil(deg * 1.0e7 - 0.5)
+end
+
+-- ---------------------------------------------------------
+-- Matrix helpers
+-- ---------------------------------------------------------
+
+-- multiplication
+function M.mat_mul(A, B)
+    local res = {}
+    for i=1, #A do
+        res[i] = {}
+        for j=1,#B[1] do
+            res[i][j] = 0
+            for k=1, #B do
+                res[i][j] = res[i][j] + A[i][k] * B[k][j]
+            end
+        end
+    end
+    return res
+end
+
+-- addition
+function M.mat_add(A, B)
+    local res = {}
+    for i=1, #A do
+        res[i] = {}
+        for j=1,#A[1] do
+            res[i][j] = A[i][j] + B[i][j]
+        end
+    end
+    return res
+end
+
+-- subtraction
+function M.mat_sub(A, B)
+    local res = {}
+    for i = 1, #A do
+        res[i] = {}
+        for j = 1, #A[1] do
+            res[i][j] = A[i][j] - B[i][j]
+        end
+    end
+    return res
+end
+
+-- transpose
+function M.transpose(A)
+    local res = {}
+    for i=1,#A[1] do
+        res[i] = {}
+        for j=1,#A do
+            res[i][j] = A[j][i]
+        end
+    end
+    return res
+end
+
+-- zeroes
+function M.zeros(r, c)
+    local res = {}
+    for i = 1, r do
+        res[i] = {}
+        for j = 1, c do
+            res[i][j] = 0
+        end
+    end
+    return res
+end
+
+-- identity matrix
+function M.eye(n)
+    local res = M.zeros(n, n)
+    for i = 1, n do
+        res[i][i] = 1
+    end
+    return res
+end
+
+-- vector to column
+function M.vec_to_col(v)
+    local res = {}
+    for i = 1, #v do
+        res[i] = {v[i]}
+    end
+    return res
+end
+
+-- column to vector
+function M.col_to_vec(A)
+    local res = {}
+    for i = 1, #A do
+        res[i] = A[i][1]
+    end
+    return res
+end
+
+-- 2x2 matrix inversion
+function M.invert_22(A)
+    local a = A[1][1]
+    local b = A[1][2]
+    local c = A[2][1]
+    local d = A[2][2]
+    -- determinant
+    local det = a * d - b * c
+    -- handle nil case or negative
+    if math.abs(det) < 1e-9 then
+        return nil
+    end
+    -- else return the matrix inverted
+    return {
+        { d / det, -b / det},
+        {-c / det,  a / det}
+    }
 end
 
 return M
