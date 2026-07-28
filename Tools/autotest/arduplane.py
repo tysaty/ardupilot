@@ -10,6 +10,12 @@ import operator
 import os
 import signal
 import time
+# additional improts for arduplane - dubins weave test runs
+import csv
+import itertools
+import re
+import shutil
+import glob
 
 from pymavlink import mavextra
 from pymavlink import mavutil
@@ -8670,6 +8676,384 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise NotAchievedException("Large roll error %0.1f > %0.1f" % (max_roll_error, roll_threshold))
 
         self.progress("Roll error check passed %0.1f <= %0.1f" % (max_roll_error, roll_threshold))
+    # ---------------------------------------------------------
+    # Dubins parameter sweep - added 5 May
+    # ---------------------------------------------------------
+
+    ####### Grid sweeps - parameters
+    # two separate sweeps - one for key params, one for the weights
+    # Grid parameters to be sweeped
+    DUBINS_SWEEP_GRID = {
+        # controller timing / acceptance
+        # rebuild rate (ms)
+        "CTRL_REBUILD_MS": [2000, 3000],
+        # number of hits within range to register as a hit
+        "CTRL_STREAK": [1, 2],
+        # kalman filter noise — varied across orders of magnitude
+        # Q diagonal: sluggish/stable (0.001) to responsive/noisy (10.0)
+        "KF_PROC_NOISE":[0.001, 0.01, 0.1, 1.0, 10.0],
+        # R diagonal: trust measurements tightly (0.5) to smooth heavily (10.0)
+        "KF_MEAS_NOISE": [0.5, 2.0, 5.0, 10.0],
+    }
+
+    # Cost-weight sweep — controller timing fixed at best-found values from the param sweep phase of Dubins Sweep.
+    # terms are normalised in main code,
+    DUBINS_COST_SWEEP_GRID = {
+        # cost function weights (w1-w4)
+        # w1: kangaroo heading alignment
+        "CTRL_W_HDG_KANG":[0.1, 0.2, 0.4],
+        # w2: change in bearing to the next point
+        "CTRL_W_HDG_CHG": [0.1, 0.2, 0.4],
+         # w3: plane travel to next waypoint       
+        "CTRL_W_DIST_PLN": [0.1, 0.2, 0.4],
+        # w4: next waypoint proximity to kangaroo
+        "CTRL_W_DIST_KNG": [0.1, 0.2, 0.4],
+    }
+
+    # reset kang modes at each start
+    DUBINS_KANG_MODES = [
+        {"kang_mode": "point",     "KANG_POINT": 1, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
+        {"kang_mode": "straight",  "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 1, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
+        {"kang_mode": "circle",    "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 1, "KANG_RECTANGLE": 0},
+        {"kang_mode": "rectangle", "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 1},
+        # {"kang_mode": "random",    "KANG_POINT": 0, "KANG_RANDOM": 1, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
+    ]
+
+    # interested in the error in the L1, L2 norm, the cost function and the kalman filter prediction error
+    #error values
+    DUBINS_ERROR_RE = re.compile(r"Dubins L1:([\d.]+)m L2:([\d.]+)m J:([-\d.]+)")
+
+    # cost function error
+    DUBINS_J_RE = re.compile(r"Dubins J:([\d.]+)")
+
+    # kalman filter prediction error
+    DUBINS_KF_ERR_RE = re.compile(r"KF err: ([\d.]+)m \(N([-\d.]+) E([-\d.]+)\) vel N([-\d.]+) E([-\d.]+) m/s")
+
+    ####### Grid sweeps - two separate girs
+    # build grid to handle kangaroo modes, parameters, KF filter measurement and processing noise
+    def _dubins_build_grid(self):
+        keys = list(self.DUBINS_SWEEP_GRID.keys())
+        for mode in self.DUBINS_KANG_MODES:
+            kang_params = {k: v for k, v in mode.items() if k != "kang_mode"}
+            for combo in itertools.product(*self.DUBINS_SWEEP_GRID.values()):
+                vals = dict(zip(keys, combo))
+                name = mode["kang_mode"] + "_" + "_".join(
+                    f"{k.replace('CTRL_', '').lower()}{v}" for k, v in vals.items()
+                )
+                yield {"name": name, "kang_mode": mode["kang_mode"],
+                       **kang_params, **vals}
+
+    # build grid for cost-weight sweep to handle kangaroo modes, cost function weights
+    def _dubins_cost_build_grid(self):
+        keys = list(self.DUBINS_COST_SWEEP_GRID.keys())
+        for mode in self.DUBINS_KANG_MODES:
+            kang_params = {k: v for k, v in mode.items() if k != "kang_mode"}
+            for combo in itertools.product(*self.DUBINS_COST_SWEEP_GRID.values()):
+                vals = dict(zip(keys, combo))
+                name = mode["kang_mode"] + "_" + "_".join(
+                    f"{k.replace('CTRL_', '').lower()}{v}" for k, v in vals.items()
+                )
+                extra = {}
+                if mode["kang_mode"] == "point":
+                    extra["CTRL_DUB_VEL"] = 50
+                    extra["CTRL_REBUILD_MS"] = 10000
+                yield {"name": name, "kang_mode": mode["kang_mode"], **kang_params, **vals, **extra}
+
+    
+    # copy binary file
+    def _dubins_copy_bin(self, trial_name, dest_dir):
+        log_dir = self.buildlogs_dirpath()
+        bins = sorted(glob.glob(os.path.join(log_dir, "logs", "*.bin")))
+        if not bins:
+            # fallback: SITL writes logs/ relative to its working dir
+            bins = sorted(glob.glob("logs/*.bin"))
+        if not bins:
+            self.progress(f"WARNING: no .bin found for trial {trial_name}")
+            return ""
+        latest = bins[-1]
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, f"{trial_name}.bin")
+        shutil.copy2(latest, dest)
+        self.progress(f".bin saved: {dest}")
+        return dest
+
+    # copy kangaroo values to csv
+    # tracks kangaroo values
+    def _dubins_copy_trace_csv(self, trial_name, dest_dir):
+        # directory path
+        log_dir = self.buildlogs_dirpath()
+        csvs = sorted(glob.glob(os.path.join(log_dir, "logs", "kangaroo_plane_trace_boot*.csv")))
+        if not csvs:
+            csvs = sorted(glob.glob("APM/logs/kangaroo_plane_trace_boot*.csv"))
+        if not csvs:
+            self.progress(f"WARNING: no trace CSV found for trial {trial_name}")
+            return ""
+        # take the directory and save
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, f"{trial_name}_trace.csv")
+        shutil.copy2(csvs[-1], dest)
+        self.progress(f"CSV saved: {dest}")
+        return dest
+
+    #create csv for processing
+    def _dubins_write_csv(self, results, path, grid=None, fixed=None):
+        # grid
+        grid = grid if grid is not None else self.DUBINS_SWEEP_GRID
+        fixed = fixed or {}
+        kang_keys = [k for k in self.DUBINS_KANG_MODES[0] if k != "kang_mode"]
+        param_keys = list(grid.keys()) + list(fixed.keys())
+        fieldnames = ["trial", "name", "kang_mode"] + kang_keys + param_keys + ["l1_error_m", "l2_error_m", "j_min", "kf_err_mean_m", "kf_vel_mean_ms", "bin", "trace", "error"]
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            w.writeheader()
+            for i, r in enumerate(results, 1):
+                w.writerow({"trial": i, **r})
+        self.progress(f"CSV saved: {path}")
+
+    # double check that the connection is right before the next trial
+    def _dubins_ensure_sitl_alive(self):
+        #Ping SITL; if the connection is dead, hard-restart it before the next trial
+        try:
+            self.get_parameter('STAT_BOOTCNT', attempts=1, timeout_in_wallclock=True)
+        except Exception:
+            self.progress("  SITL connection dead - hard restarting")
+            try:
+                self.stop_SITL()
+            except Exception:
+                pass
+            self.start_SITL(wipe=False)
+
+    # dubins trial, over a collection time of 60 seconds
+    def _dubins_run_trial(self, params, trial_name, collect_s=60):
+        # reboot SITL, wiat for lua to lood w/ parameters
+        # rapidly switch between takeoff and guided modes
+        # collect the statustext
+        self._dubins_ensure_sitl_alive()
+        # ensure vehicle is disarmed before rebooting (previous trial may have left it armed)
+        if self.armed():
+            self.disarm_vehicle(force=True)
+        #  STATUSTEXT before reboot so boot messages aren't missed
+        self.context_collect('STATUSTEXT')
+        try:
+            self.reboot_sitl()
+            self.wait_ready_to_arm(timeout=300)
+            # Confirm control loaded and registered CTRL_* param tables
+            self.wait_statustext("Control: loaded at boot", timeout=60, check_context=True)
+        finally:
+            try:
+                self.context_stop_collecting('STATUSTEXT')
+            except Exception:
+                pass
+        # setting parameters
+        self.progress(f"  Setting params for {trial_name}")
+        # setting parameter loop
+        for k, v in params.items():
+            self.set_parameter(k, v)
+        # arming vehcile
+        self.arm_vehicle()
+        # trying takeoff, guided
+        try:
+            self.change_mode("TAKEOFF")
+            #self.delay_sim_time(3)
+            self.delay_sim_time(2)
+            self.change_mode("GUIDED")
+
+            # initialising text and error values
+            l1, l2, j_min = None, None, None
+            kf_err_samples = []
+            kf_vel_samples = []
+            tstart = self.get_sim_time()
+
+            # starting collection
+            while self.get_sim_time_cached() - tstart < collect_s:
+                m = self.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.05)
+                if m is None:
+                    continue
+                # dubins error
+                hit = self.DUBINS_ERROR_RE.search(m.text)
+                if hit:
+                    l1 = float(hit.group(1))
+                    l2 = float(hit.group(2))
+                    j_val = float(hit.group(3))
+                    # -1 means no J was recorded this trial (controller never entered swap logic)
+                    if j_val >= 0:
+                        j_min = j_val if j_min is None else min(j_min, j_val)
+                # filter error
+                hit_kf = self.DUBINS_KF_ERR_RE.search(m.text)
+                if hit_kf:
+                    kf_err_samples.append(float(hit_kf.group(1)))
+                    vel_n = float(hit_kf.group(4))
+                    vel_e = float(hit_kf.group(5))
+                    import math as _math
+                    kf_vel_samples.append(_math.sqrt(vel_n**2 + vel_e**2))
+            # taking the mean kalman filter error
+            kf_err_mean = round(sum(kf_err_samples) / len(kf_err_samples), 3) if kf_err_samples else None
+            kf_vel_mean = round(sum(kf_vel_samples) / len(kf_vel_samples), 3) if kf_vel_samples else None
+
+            self.progress(f"{trial_name}: L1={l1} L2={l2} J_min={j_min} KF_err={kf_err_mean}m KF_vel={kf_vel_mean}m/s")
+        finally:
+            self.disarm_vehicle(force=True)
+        #directory path for values
+        sweep_dir = os.path.join(self.buildlogs_dirpath(), "dubins_sweep_bins")
+        bin_path = self._dubins_copy_bin(trial_name, dest_dir=sweep_dir)
+        trace_path = self._dubins_copy_trace_csv(trial_name, dest_dir=sweep_dir)
+        return l1, l2, j_min, kf_err_mean, kf_vel_mean, bin_path, trace_path
+
+    # incrementally add the trial output to the csv
+    def _dubins_run_sweep(self, combos, csv_path, label, grid=None, fixed=None):
+        total = len(combos)
+        results = []
+        for i, trial in enumerate(combos, 1):
+            name = trial["name"]
+            self.progress(f"=== {label} {i}/{total}: {name} ===")
+            try:
+                l1, l2, j_min, kf_err_mean, kf_vel_mean, bin_path, trace_path = self._dubins_run_trial(
+                    {k: v for k, v in trial.items() if k not in ("name", "kang_mode")}, name,)
+                results.append({
+                    "name": name, **trial,
+                    "l1_error_m": l1,
+                    "l2_error_m": l2,
+                    "j_min": j_min,
+                    "kf_err_mean_m": kf_err_mean,
+                    "kf_vel_mean_ms": kf_vel_mean,
+                    "bin": bin_path,
+                    "trace": trace_path,
+                    "error": None,
+                })
+            # throw an exception if an error
+            except Exception as e:
+                self.progress(f"  Trial {name} FAILED: {e}")
+                results.append({
+                    "name": name, **trial,
+                    "l1_error_m": None, "l2_error_m": None,
+                    "j_min": None,
+                    "kf_err_mean_m": None, "kf_vel_mean_ms": None,
+                    "bin": "", "trace": "", "error": str(e),
+                })
+            self._dubins_write_csv(results, csv_path, grid=grid, fixed=fixed)
+        self.progress(f"{label} complete: {csv_path}")
+
+    #search the csv file for the best configuration
+    def _dubins_find_best_config(self):
+        import csv as _csv
+        csvs = sorted(glob.glob(os.path.join(self.buildlogs_dirpath(), "dubins_sweep_*.csv")))
+        if not csvs:
+            raise Exception("No dubins_sweep_*.csv found in buildlogs - run DubinsSweep first")
+        latest = csvs[-1]
+        self.progress(f"  Reading sweep CSV: {latest}")
+        best = None
+        with open(latest) as f:
+            for row in _csv.DictReader(f):
+                raw = row.get("j_min", "")
+                if raw in ("", "None", None):
+                    continue
+                try:
+                    j = float(raw)
+                except ValueError:
+                    continue
+                if best is None or j < float(best["j_min"]):
+                    best = row
+        if best is None:
+            raise Exception("No trials with valid j_min in latest sweep CSV")
+        # return the best
+        self.progress(f"  Best config: {best.get('name')} j_min={best['j_min']}")
+        return best
+
+    # take the best configuration
+    # rebuilt the J values over each instant
+    def _dubins_run_best_trial(self, best_row, stamp, collect_s=60):
+        # parameters
+        NON_PARAM = {"trial", "name", "kang_mode", "l1_error_m", "l2_error_m", "j_min", "bin", "trace", "error"}
+        params = {k: float(v) for k, v in best_row.items()
+                  if k not in NON_PARAM and v not in ("", None)}
+        # ensure vehicle is disarmed before rebooting (previous trial may have left it armed)
+        if self.armed():
+            self.disarm_vehicle(force=True)
+        #  STATUSTEXT before reboot so boot messages aren't missed
+        self.context_collect("STATUSTEXT")
+        # timeouts and forced restart
+        try:
+            self.reboot_sitl()
+            self.wait_ready_to_arm(timeout=300)
+            # Confirm control loaded and registered CTRL_* param tables
+            self.wait_statustext("Control: loaded at boot", timeout=60, check_context=True)
+        finally:
+            self.context_stop_collecting("STATUSTEXT")
+        # setting parameters
+        # setting parameter loop
+        for k, v in params.items():
+            self.set_parameter(k, v)
+        # arming vehcile
+        self.arm_vehicle()
+        # cost function
+        # initialising J series
+        j_series = []
+        # trying takeoff, guided
+        try:
+            self.change_mode("TAKEOFF")
+            self.delay_sim_time(2)
+            self.change_mode("GUIDED")
+            tstart = self.get_sim_time()
+            # starting collection
+            while self.get_sim_time_cached() - tstart < collect_s:
+                m = self.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.05)
+                if m is None:
+                    continue
+                # J cost value
+                hit = self.DUBINS_J_RE.search(m.text)
+                if hit:
+                    t = round(self.get_sim_time_cached() - tstart, 2)
+                    j_series.append({"sim_time_s": t, "J": float(hit.group(1))})
+        finally:
+            self.disarm_vehicle(force=True)
+
+        path = os.path.join(self.buildlogs_dirpath(), f"dubins_best_J_{stamp}.csv")
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["sim_time_s", "J"])
+            w.writeheader()
+            w.writerows(j_series)
+        self.progress(f"Best trial J series ({len(j_series)} pts): {path}")
+        return path
+
+    ##### Key functions - Dubins Sweep, and the Best Trial
+    # Best trial pulls from the best trial for the cost function, re-generates the output to track J value over time
+
+    # main sweep function
+    def DubinsSweep(self):
+        """Run Dubins path parameter sweep and cost sweep."""
+        # running the parameter sweep and the cost sweep
+        import datetime
+        self.set_parameter("SCR_ENABLE", 1)
+        self.set_parameter("SCR_HEAP_SIZE", 1000000)
+        self.reboot_sitl()
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        #parameter sweep for KF, params
+        param_csv = os.path.join(self.buildlogs_dirpath(), f"dubins_sweep_{stamp}.csv")
+        self._dubins_run_sweep(
+            list(self._dubins_build_grid()),
+            param_csv,
+            label="PARAM SWEEP",
+        )
+        # weights for cost function
+        cost_csv = os.path.join(self.buildlogs_dirpath(), f"dubins_cost_sweep_{stamp}.csv")
+        self._dubins_run_sweep(
+            list(self._dubins_cost_build_grid()),
+            cost_csv,
+            label="COST SWEEP",
+            grid=self.DUBINS_COST_SWEEP_GRID,
+        )
+
+    # take the best trial
+    def DubinsBestTrial(self):
+        # best configuration from the sweep csv
+        # must be run after DubinsSweep
+        """best configuration from the sweep csv, must be run after DubinsSweep"""
+        import datetime
+        self.set_parameter("SCR_ENABLE", 1)
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        best_row = self._dubins_find_best_config()
+        self._dubins_run_best_trial(best_row, stamp)
+
 
     def tests(self):
         '''return list of all tests'''
@@ -8874,6 +9258,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.EK3HeightDatumResetFlushesBuffers,
             self.PPPPeriph,
             self.steplessAHRSSwitch,
+            self.DubinsSweep,
+            self.DubinsBestTrial,
         ]
 
     def UTMGlobalPositionWaypoint(self):
