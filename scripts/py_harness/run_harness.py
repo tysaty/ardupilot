@@ -159,6 +159,12 @@ def build_parser():
         help="Distance at which the weave reaches full desired amplitude, m.",
     )
     parser.add_argument(
+        "--weave-vaw-lead-s", type=float, default=None,
+        help="Variable-amplitude weave onset lead time, s (TASK-014). The weave "
+        "begins at d_full + lead * relative_speed; larger starts it farther out. "
+        "Only var_amplitude/vaw use it.",
+    )
+    parser.add_argument(
         "--compare-eta",
         action="store_true",
         help="For amplitude algorithms, run twice — with the safety factor and "
@@ -267,6 +273,8 @@ def build_config(args, weave_eta=None):
         overrides["weave_d_start_m"] = args.weave_d_start
     if args.weave_d_full is not None:
         overrides["weave_d_full_m"] = args.weave_d_full
+    if args.weave_vaw_lead_s is not None:
+        overrides["weave_vaw_lead_s"] = args.weave_vaw_lead_s
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)
         overrides["weave_eta"] = weave_eta
     return HarnessConfig(**overrides)

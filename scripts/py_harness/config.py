@@ -110,6 +110,12 @@ WEAVE_D_FULL_M = 120.0
 #: 1/R_min; eta < 1 keeps a margin. The TASK-004 comparison is eta vs eta = 1.
 WEAVE_ETA = 0.8
 
+#: Variable-amplitude weave onset lead time, s (TASK-014). The weave begins at
+#: `d_full + WEAVE_VAW_LEAD_S * relative_speed`, so faster closing starts it
+#: farther out. Only the `var_amplitude`/`vaw` algorithms read it. Provisional
+#: and **not approved** (`MTG-2026-07-28-01`, `DEC-2026-07-28-04`).
+WEAVE_VAW_LEAD_S = 8.0
+
 
 class InfeasibleConfiguration(Exception):
     """Raised when a configuration violates the harness bank limit.
@@ -172,6 +178,7 @@ class HarnessConfig:
         "weave_d_start_m",
         "weave_d_full_m",
         "weave_eta",
+        "weave_vaw_lead_s",
         "_frozen",
     )
 
@@ -191,6 +198,7 @@ class HarnessConfig:
         weave_d_start_m=WEAVE_D_START_M,
         weave_d_full_m=WEAVE_D_FULL_M,
         weave_eta=WEAVE_ETA,
+        weave_vaw_lead_s=WEAVE_VAW_LEAD_S,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -207,6 +215,7 @@ class HarnessConfig:
         self.weave_d_start_m = float(weave_d_start_m)
         self.weave_d_full_m = float(weave_d_full_m)
         self.weave_eta = float(weave_eta)
+        self.weave_vaw_lead_s = float(weave_vaw_lead_s)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -250,6 +259,11 @@ class HarnessConfig:
             raise ValueError(
                 "weave_eta must be in (0, 1] (eta > 1 exceeds the 1/R_min "
                 "curvature limit), got %r" % self.weave_eta
+            )
+        if self.weave_vaw_lead_s <= 0.0:
+            raise ValueError(
+                "weave_vaw_lead_s must be positive (it scales the weave onset "
+                "with relative speed), got %r" % self.weave_vaw_lead_s
             )
 
     def __setattr__(self, name, value):

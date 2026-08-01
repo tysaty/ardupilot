@@ -139,7 +139,7 @@ way.txt
 *.wbproj
 *.wbproj
 segv_*out
-/scripts/
+
 /scripts/rubbish/
 /repl/
 /Rover/scripts/

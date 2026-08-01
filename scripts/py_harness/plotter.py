@@ -366,7 +366,7 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
                             label="%s planned Dubins" % name)[0]
             toggle_map[name].append(plan)
 
-    ax2.legend(loc="upper right", fontsize=8)
+    ax2.legend(loc="lower left", fontsize=8)
 
     ax_check = plt.axes([0.01, 0.4, 0.18, 0.4])
     ax_check.set_title("show", fontsize=9)
@@ -413,7 +413,7 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
                 color="deepskyblue", alpha=0.15,
             )
 
-        ax.legend(loc="upper right", fontsize=8)
+        ax.legend(loc="lower left", fontsize=8)
         figures["3d"] = fig
 
     if save_path:

@@ -36,6 +36,8 @@ from .geometry import dubins as dubins_geom
 from .geometry import dubins_orbit as dubins_orbit_geom
 from .geometry import heading as heading_geom
 from .geometry import orbit as orbit_geom
+from .geometry import var_amplitude_weave as var_amplitude_weave_geom
+from .geometry import vaw_orbit as vaw_orbit_geom
 from .interface import GeometricAlgorithm, NoSolution
 
 
@@ -60,6 +62,24 @@ def _weave_phase_m(snapshot):
     makes along-track distance ``= speed * t``.
     """
     return snapshot["plane_speed_ms"] * snapshot["t_s"]
+
+
+def _relative_speed(snapshot):
+    """Relative speed magnitude between the aircraft and the target, m/s.
+
+    ``|v_UAV - v_target|`` in the (East, North) plane, driving the variable-
+    amplitude weave's onset (``TASK-014``). The aircraft velocity is its ground
+    speed on its heading; the target velocity is the true ``target_v*_ms``. The
+    estimate (``target_est``) carries a velocity too and could be substituted
+    here, but the true value is used so this compares fairly against the
+    fixed-amplitude ``amplitude``, which also reads the true target.
+    """
+    v = snapshot["plane_speed_ms"]
+    hdg = snapshot["plane_hdg_rad"]
+    uav_ve = v * math.sin(hdg)
+    uav_vn = v * math.cos(hdg)
+    return math.hypot(uav_ve - snapshot["target_ve_ms"],
+                      uav_vn - snapshot["target_vn_ms"])
 
 
 def _heading_to_geometry(hdg_rad):
@@ -147,6 +167,88 @@ class AmplitudeOrbitAlgorithm(GeometricAlgorithm):
         except ValueError as exc:
             raise NoSolution(str(exc))
         state = {"phase": g["phase"]}
+        if g["amplitude"] is not None:
+            state["amplitude_m"] = g["amplitude"]
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
+
+
+class VarAmplitudeAlgorithm(GeometricAlgorithm):
+    """Variable-amplitude weave (``TASK-014``); alias ``vaw``.
+
+    Sibling of :class:`AmplitudeAlgorithm`. The geometry lives in
+    :mod:`py_harness.geometry.var_amplitude_weave`; this adapter converts frames,
+    derives the phase ``s`` and the relative speed ``v_rel`` from the snapshot,
+    and returns one guidance point, holding no geometry and no state.
+
+    The amplitude is minimised (straight) far from the target and grows as the
+    aircraft closes, with the onset scaled by ``v_rel`` — a **provisional**,
+    unapproved law (``DEC-2026-07-28-04``). It stays **plane-anchored**
+    (``A-DEC-009``) and curvature-limited by ``eta`` (``|kappa| <= 1/R_min``).
+
+    Configuration used: as :class:`AmplitudeAlgorithm` but ``weave_vaw_lead_s``
+    replaces ``weave_d_start_m`` (the onset is derived from ``v_rel``).
+    """
+
+    name = "var_amplitude"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        v_rel = _relative_speed(snapshot)
+        try:
+            g = var_amplitude_weave_geom.guidance(
+                px, py, psi_i, tx, ty, _weave_phase_m(snapshot), v_rel,
+                cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
+                cfg["weave_d_full_m"], cfg["weave_vaw_lead_s"], cfg["weave_eta"],
+                cfg["look_ahead_m"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": {
+                "amplitude_m": g["amplitude"],
+                "curvature": g["curvature"],
+                "relative_speed_ms": v_rel,
+            },
+        }
+
+
+class VarAmplitudeOrbitAlgorithm(GeometricAlgorithm):
+    """Variable-amplitude weave handed off to the orbit via the ramp (``TASK-014``).
+
+    Alias ``vaw_orbit``. As :class:`VarAmplitudeAlgorithm` for the approach, then
+    ramps into the orbit about the (possibly moving) target. Geometry in
+    :mod:`py_harness.geometry.vaw_orbit`; a thin, stateless translator.
+
+    Configuration used: as :class:`VarAmplitudeAlgorithm` plus ``orbit_radius_m``.
+    """
+
+    name = "var_amplitude_orbit"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        v_rel = _relative_speed(snapshot)
+        try:
+            g = vaw_orbit_geom.guidance(
+                px, py, psi_i, tx, ty, _weave_phase_m(snapshot), v_rel,
+                cfg["orbit_radius_m"], cfg["look_ahead_m"],
+                cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
+                cfg["weave_d_full_m"], cfg["weave_vaw_lead_s"], cfg["weave_eta"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        state = {"phase": g["phase"], "relative_speed_ms": v_rel}
         if g["amplitude"] is not None:
             state["amplitude_m"] = g["amplitude"]
         return {
@@ -350,6 +452,8 @@ class HeadingAOrbitAlgorithm(GeometricAlgorithm):
 REGISTRY = {
     AmplitudeAlgorithm.name: AmplitudeAlgorithm,
     AmplitudeOrbitAlgorithm.name: AmplitudeOrbitAlgorithm,
+    VarAmplitudeAlgorithm.name: VarAmplitudeAlgorithm,
+    VarAmplitudeOrbitAlgorithm.name: VarAmplitudeOrbitAlgorithm,
     DubinsAlgorithm.name: DubinsAlgorithm,
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
@@ -357,11 +461,15 @@ REGISTRY = {
     HeadingAOrbitAlgorithm.name: HeadingAOrbitAlgorithm,
     # Alias: continuous_weave is the amplitude weave (ACT-2026-06-25-04).
     "continuous_weave": AmplitudeAlgorithm,
+    # Aliases: vaw / vaw_orbit are the variable-amplitude weave (TASK-014).
+    "vaw": VarAmplitudeAlgorithm,
+    "vaw_orbit": VarAmplitudeOrbitAlgorithm,
 }
 
 #: Algorithms with geometry implemented; ``continuous_weave`` is an alias of
 #: ``amplitude``.
-IMPLEMENTED = ("amplitude", "amplitude_orbit", "dubins", "orbit", "dubins_orbit",
+IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
+               "var_amplitude_orbit", "dubins", "orbit", "dubins_orbit",
                "heading_a", "heading_a_orbit")
 
 
@@ -414,4 +522,5 @@ def config_dict(cfg):
         "weave_d_start_m": cfg.weave_d_start_m,
         "weave_d_full_m": cfg.weave_d_full_m,
         "weave_eta": cfg.weave_eta,
+        "weave_vaw_lead_s": cfg.weave_vaw_lead_s,
     }
