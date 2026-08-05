@@ -86,6 +86,12 @@ DELTA_D_M = 0.5
 #: Fixed simulation time step, s. Matches the controller's 100 ms loop.
 DT_S = 0.1
 
+#: State-estimate look-ahead horizon, in whole steps (TASK-017). 0 = off (the
+#: default; unchanged behaviour). When >= 1 and an estimator runs, the target
+#: estimate is projected this many steps ahead (horizon = LOOKAHEAD_STEPS * DT_S)
+#: on constant velocity, and guidance aims at the prediction. Serves FR-003.
+LOOKAHEAD_STEPS = 0
+
 # --------------------------------------------------------------------------
 # Amplitude weave parameters (TASK-004) — harness-only, illustrative
 # --------------------------------------------------------------------------
@@ -179,6 +185,7 @@ class HarnessConfig:
         "weave_d_full_m",
         "weave_eta",
         "weave_vaw_lead_s",
+        "lookahead_steps",
         "_frozen",
     )
 
@@ -199,6 +206,7 @@ class HarnessConfig:
         weave_d_full_m=WEAVE_D_FULL_M,
         weave_eta=WEAVE_ETA,
         weave_vaw_lead_s=WEAVE_VAW_LEAD_S,
+        lookahead_steps=LOOKAHEAD_STEPS,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -216,6 +224,7 @@ class HarnessConfig:
         self.weave_d_full_m = float(weave_d_full_m)
         self.weave_eta = float(weave_eta)
         self.weave_vaw_lead_s = float(weave_vaw_lead_s)
+        self.lookahead_steps = int(lookahead_steps)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -264,6 +273,11 @@ class HarnessConfig:
             raise ValueError(
                 "weave_vaw_lead_s must be positive (it scales the weave onset "
                 "with relative speed), got %r" % self.weave_vaw_lead_s
+            )
+        if self.lookahead_steps < 0:
+            raise ValueError(
+                "lookahead_steps must be >= 0 (0 disables the look-ahead), got %r"
+                % self.lookahead_steps
             )
 
     def __setattr__(self, name, value):

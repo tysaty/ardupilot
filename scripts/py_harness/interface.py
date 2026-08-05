@@ -66,7 +66,12 @@ SNAPSHOT_FIELDS = {
         "Estimated target state as {n_m, e_m, vn_ms, ve_ms} in metres and "
         "metres per second, from the state estimator (TASK-012), or None when no "
         "estimator is running. An algorithm that estimates the target trajectory "
-        "(TASK-010) reads this rather than the true target_n_m/target_e_m."
+        "(TASK-010) reads this rather than the true target_n_m/target_e_m. When a "
+        "look-ahead horizon is configured (TASK-017, lookahead_steps >= 1), this "
+        "is the estimate projected that many steps ahead on constant velocity — "
+        "the prediction guidance should aim at; with lookahead_steps = 0 it is the "
+        "current estimate unchanged. The projection is state-side, so the "
+        "algorithm is unaware of it (it just reads the field)."
     ),
 }
 

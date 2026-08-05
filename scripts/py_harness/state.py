@@ -33,6 +33,7 @@ evidence for ``SR-001`` to ``SR-003``.
 
 import math
 
+from . import lookahead
 from .interface import NoSolution
 
 
@@ -109,6 +110,7 @@ class Harness:
         infeasible=False,
         kangaroo=None,
         estimator=None,
+        lookahead_steps=0,
     ):
         """
         Args:
@@ -134,6 +136,12 @@ class Harness:
                 position each step and exposes its estimate as the snapshot's
                 ``target_est``; this is a state-side concern, so the estimator is
                 never held by the algorithm.
+            lookahead_steps: State-estimate look-ahead horizon in whole steps
+                (``TASK-017``). When ``>= 1`` (and an estimator is running), the
+                estimate is projected ``lookahead_steps`` intervals ahead on its
+                constant velocity and that *predicted* target populates the
+                snapshot's ``target_est``, so guidance aims where the target will
+                be. ``0`` (default) is the identity — unchanged behaviour.
         """
         self.plane = plane
         self.target = target
@@ -143,8 +151,12 @@ class Harness:
         self.infeasible = bool(infeasible)
         self.kangaroo = kangaroo
         self.estimator = estimator
-        #: Latest {n_m, e_m, vn_ms, ve_ms} estimate, or None.
+        self.lookahead_steps = int(lookahead_steps)
+        #: Latest {n_m, e_m, vn_ms, ve_ms} estimate the algorithm sees: the
+        #: look-ahead prediction when a horizon is set, else the raw estimate.
         self.target_est = None
+        #: The raw (un-projected) Kalman estimate, kept for the plot comparison.
+        self.target_est_raw = None
         self.t_s = 0.0
         self.history = []
         self.algorithm_state = {}
@@ -189,8 +201,13 @@ class Harness:
         if self.estimator is not None:
             out = self.estimator.update(self.target.n_m, self.target.e_m, self.dt_s)
             if out is not None:
-                self.target_est = {"n_m": out["x"], "e_m": out["y"],
-                                   "vn_ms": out["vx"], "ve_ms": out["vy"]}
+                raw = {"n_m": out["x"], "e_m": out["y"],
+                       "vn_ms": out["vx"], "ve_ms": out["vy"]}
+                self.target_est_raw = raw
+                # Look-ahead (TASK-017): aim where the target will be. n = 0 is the
+                # identity, so target_est == the raw estimate when it is off.
+                self.target_est = lookahead.predict(raw, self.dt_s,
+                                                    self.lookahead_steps)
 
         snap = self.snapshot()
         result = self.algorithm.guidance_point(snap)
@@ -236,6 +253,14 @@ class Harness:
                 "guidance_n_m": gn,
                 "guidance_e_m": ge,
                 "infeasible": self.infeasible,
+                # Look-ahead comparison data (TASK-017): the prediction the
+                # algorithm aimed at, and the raw estimate. None when no estimator.
+                "target_est_n_m": self.target_est["n_m"] if self.target_est else None,
+                "target_est_e_m": self.target_est["e_m"] if self.target_est else None,
+                "target_est_raw_n_m":
+                    self.target_est_raw["n_m"] if self.target_est_raw else None,
+                "target_est_raw_e_m":
+                    self.target_est_raw["e_m"] if self.target_est_raw else None,
             }
         )
 

@@ -106,6 +106,12 @@ def build_parser():
         "estimated target via the snapshot. Required for the heading_a family.",
     )
     parser.add_argument(
+        "--lookahead-steps", type=int, default=None,
+        help="State-estimate look-ahead horizon in steps (TASK-017, FR-003). "
+        "With --estimate, aim where the target will be n steps ahead "
+        "(horizon = n * DT_S). 0 = off (default).",
+    )
+    parser.add_argument(
         "--plane-heading-deg",
         type=float,
         default=0.0,
@@ -275,6 +281,8 @@ def build_config(args, weave_eta=None):
         overrides["weave_d_full_m"] = args.weave_d_full
     if args.weave_vaw_lead_s is not None:
         overrides["weave_vaw_lead_s"] = args.weave_vaw_lead_s
+    if args.lookahead_steps is not None:
+        overrides["lookahead_steps"] = args.lookahead_steps
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)
         overrides["weave_eta"] = weave_eta
     return HarnessConfig(**overrides)
@@ -371,6 +379,7 @@ def main(argv=None):
             infeasible=bool(problems),
             kangaroo=kang,
             estimator=_new_estimator(args, target_n0, target_e0),
+            lookahead_steps=cfg.lookahead_steps,
         )
         harness.run(args.duration_s)
 
