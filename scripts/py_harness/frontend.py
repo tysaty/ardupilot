@@ -56,7 +56,11 @@ _CONFIG_FLAGS = {
     "weave_d_full_m": "--weave-d-full",
     "weave_eta": "--eta",
     "weave_vaw_lead_s": "--weave-vaw-lead-s",
+    "lookahead_steps": "--lookahead-steps",
 }
+
+# Config keys whose flag takes an int, not a float (emitted without decimals).
+_CONFIG_INT_FLAGS = ("lookahead_steps",)
 
 _PLANE_FLAGS = {"heading_deg": "--plane-heading-deg"}
 
@@ -78,7 +82,11 @@ _KANG_FLAGS = {
     "length_m": "--kang-length-m",
     "width_m": "--kang-width-m",
     "speed_ms": "--kang-speed-ms",
+    "seed": "--kang-seed",
 }
+
+# Kangaroo keys whose flag takes an int, not a float.
+_KANG_INT_FLAGS = ("seed",)
 
 _RUN_BOOL_FLAGS = {
     "estimate": "--estimate",
@@ -157,7 +165,10 @@ def spec_to_argv(spec):
     _reject_unknown("config", config, _CONFIG_FLAGS)
     for key, flag in _CONFIG_FLAGS.items():
         if key in config:
-            argv += [flag, repr(float(config[key]))]
+            if key in _CONFIG_INT_FLAGS:
+                argv += [flag, str(int(config[key]))]
+            else:
+                argv += [flag, repr(float(config[key]))]
 
     plane = spec.get("plane", {})
     _reject_unknown("plane", plane, _PLANE_FLAGS)
@@ -180,7 +191,10 @@ def spec_to_argv(spec):
     for key, flag in _KANG_FLAGS.items():
         if key == "mode" or key not in kang:
             continue
-        argv += [flag, repr(float(kang[key]))]
+        if key in _KANG_INT_FLAGS:
+            argv += [flag, str(int(kang[key]))]
+        else:
+            argv += [flag, repr(float(kang[key]))]
 
     run = spec.get("run", {})
     _reject_unknown("run", run, set(_RUN_BOOL_FLAGS) | set(_RUN_VALUE_FLAGS))

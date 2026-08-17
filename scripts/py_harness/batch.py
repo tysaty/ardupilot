@@ -60,7 +60,8 @@ def _run_variant(base_spec, label, override, out_dir):
 
 
 def run_batch(base_spec, variants, out_dir, orbit_radius_m=None,
-              combined_save=None, separate=False, show=False):
+              combined_save=None, separate=False, show=False, show_carrot=True,
+              animate_save=None):
     """Run every variant under the shared ``base_spec`` and collate the results.
 
     Args:
@@ -107,16 +108,22 @@ def run_batch(base_spec, variants, out_dir, orbit_radius_m=None,
     if orbit is None:
         orbit = collected[0][2].get("orbit_radius_m")
 
+    runs = [(name, history) for name, history, _meta, _path in collected]
+
     if separate:
         for name, history, _meta, path in collected:
             plotter.plot_runs([(name, history)], orbit_radius_m=orbit,
                               save_path=path.rsplit(".", 1)[0] + ".png",
-                              show=False)
+                              show=False, show_carrot=show_carrot)
+
+    if animate_save:
+        # Animate all variants overlaid over time (TASK-011 animator).
+        plotter.animate_runs(runs, orbit_radius_m=orbit, save_path=animate_save)
 
     if combined_save or show:
-        runs = [(name, history) for name, history, _meta, _path in collected]
         plotter.plot_runs(runs, orbit_radius_m=orbit,
-                          save_path=combined_save, show=show)
+                          save_path=combined_save, show=show,
+                          show_carrot=show_carrot)
 
     return [(name, history, path) for name, history, _meta, path in collected]
 
@@ -135,6 +142,12 @@ def main(argv=None):
     parser.add_argument("--separate", action="store_true",
                         help="Also write one PNG per run.")
     parser.add_argument("--show", action="store_true", help="Show the plots.")
+    parser.add_argument("--no-carrot", action="store_true",
+                        help="Hide the dotted guidance-point (carrot) trail for "
+                        "clarity (kept as a feature).")
+    parser.add_argument("--animate", default=None,
+                        help="Write a GIF animating all variants overlaid over "
+                        "time, e.g. --animate out.gif (TASK-011).")
     parser.add_argument("--orbit-radius-m", type=float, default=None,
                         help="Ring radius for the plots (default from run metadata).")
     args = parser.parse_args(argv)
@@ -150,6 +163,7 @@ def main(argv=None):
             data.get("base", {}), data["variants"], args.out_dir,
             orbit_radius_m=args.orbit_radius_m or data.get("orbit_radius_m"),
             combined_save=args.combined, separate=args.separate, show=args.show,
+            show_carrot=not args.no_carrot, animate_save=args.animate,
         )
     except ValueError as exc:
         print("INVALID BATCH: %s" % exc)

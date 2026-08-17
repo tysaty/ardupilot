@@ -184,6 +184,38 @@ def cylinder_surface(cx, cy, radius_m, z0, z1, n_th=40, n_z=20):
     return X, Y, Z
 
 
+def swept_ring_surface(target_e, target_n, target_t, radius_m, n_th=40, n_rings=48):
+    """A tube of orbit rings following the target through ``z = time``.
+
+    At each of ``n_rings`` decimated time samples, the orbit ring of ``radius_m``
+    is centred on the target's position *at that time* and lifted to ``z = t``, so
+    the surface **sweeps along the (moving) target's path** instead of standing as
+    a vertical cylinder — the 3D counterpart of the travelling ring (`TASK-003`).
+    It collapses to a vertical cylinder for a stationary target. Returns
+    ``(X, Y, Z)`` nested lists (transliterable), as :func:`plot_surface` accepts.
+
+    Raises:
+        ValueError: For fewer than two samples, angles or rings.
+    """
+    m = len(target_e)
+    if m < 2 or n_th < 2 or n_rings < 2:
+        raise ValueError("swept_ring_surface needs >= 2 samples, angles and rings")
+    X, Y, Z = [], [], []
+    for j in range(n_rings):
+        k = int(round((m - 1) * j / (n_rings - 1)))
+        cx, cy, z = target_e[k], target_n[k], target_t[k]
+        row_x, row_y, row_z = [], [], []
+        for i in range(n_th):
+            a = 2.0 * math.pi * i / (n_th - 1)
+            row_x.append(cx + radius_m * math.sin(a))
+            row_y.append(cy + radius_m * math.cos(a))
+            row_z.append(z)
+        X.append(row_x)
+        Y.append(row_y)
+        Z.append(row_z)
+    return X, Y, Z
+
+
 def compute_reach(runs, orbit_radius_m=None, margin=1.1):
     """Half-extent for fixed, symmetric axis limits.
 
@@ -253,7 +285,7 @@ def any_infeasible(runs):
 # --------------------------------------------------------------------------
 
 def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
-              save_path=None, show=False):
+              save_path=None, show=False, show_carrot=True):
     """Overlay recorded runs on shared axes.
 
     Read-only: this draws ``runs`` and touches nothing else. There is no code
@@ -354,9 +386,14 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
         data = series(history)
         track = ax2.plot(data["plane_e"], data["plane_n"], color=colour, linewidth=2,
                          label=legend_label(name, history, orbit_radius_m))[0]
-        carrot = ax2.plot(data["guide_e"], data["guide_n"], color=colour,
-                          linewidth=0.7, alpha=0.5, linestyle=":")[0]
-        toggle_map[name] = [track, carrot]
+        artists = [track]
+        if show_carrot:
+            # Faint dotted guidance-point ("carrot") trail. Optional for clarity
+            # (--no-carrot); kept as a feature, not removed.
+            carrot = ax2.plot(data["guide_e"], data["guide_n"], color=colour,
+                              linewidth=0.7, alpha=0.5, linestyle=":")[0]
+            artists.append(carrot)
+        toggle_map[name] = artists
 
         # Exact planned Dubins geometry (TASK-002), overlaid on the flown track.
         if planned and index < len(planned) and planned[index]:
@@ -402,12 +439,16 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
                     linestyle=":", linewidth=1)
 
         if orbit_radius_m:
-            span = max(s["t"][-1] for s in (series(h) for _n, h in runs))
-            X, Y, Z = cylinder_surface(
-                first["target_e"][-1], first["target_n"][-1], orbit_radius_m, 0.0, span
+            # Sweep the orbit tube along the (possibly moving) target's path, so
+            # it leans with the kangaroo instead of standing as a vertical
+            # cylinder at the final position. Uses the first run's target track
+            # (all runs share the same kangaroo).
+            s0 = series(runs[0][1])
+            X, Y, Z = swept_ring_surface(
+                s0["target_e"], s0["target_n"], s0["t"], orbit_radius_m
             )
-            # cylinder_surface returns nested lists (kept transliterable and
-            # tested as such); plot_surface needs arrays with an ndim.
+            # Nested lists (kept transliterable and tested as such); plot_surface
+            # needs arrays with an ndim.
             ax.plot_surface(
                 np.asarray(X), np.asarray(Y), np.asarray(Z),
                 color="deepskyblue", alpha=0.15,
@@ -508,6 +549,299 @@ def animate_runs(runs, orbit_radius_m=None, save_path=None, frames=120, fps=20):
                          interval=1000.0 / fps, blit=False)
     if save_path:
         anim.save(save_path, writer=PillowWriter(fps=fps))
+    return anim
+
+
+def convergence_series(records, group_by=("mode", "start", "speed")):
+    """Group sweep records into ``(label, [(look-ahead, min-distance), ...])`` series.
+
+    ``records`` is a list of dicts, each with ``lookahead_steps``,
+    ``min_orbit_distance_m`` and the ``group_by`` keys (`TASK-019`). One series per
+    distinct ``group_by`` tuple, points sorted by look-ahead. Pure — no plotting.
+    """
+    groups = {}
+    order = []
+    for r in records:
+        key = tuple(r.get(k) for k in group_by)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((r["lookahead_steps"], r["min_orbit_distance_m"]))
+    series = []
+    for key in order:
+        pts = sorted(groups[key], key=lambda p: p[0])
+        series.append((" / ".join(str(x) for x in key), pts))
+    return series
+
+
+def plot_convergence(records, group_by=("mode", "start", "speed"),
+                     save_path=None, show=False, title=None):
+    """Plot minimum on-orbit distance vs look-ahead (`TASK-020`).
+
+    x-axis = look-ahead horizon (`lookahead_steps`); y = min on-orbit distance,
+    metres (`TASK-018`); one line per group. Read-only: takes data only and
+    imports no harness module (`DEC-2026-07-22-01`).
+
+    Raises:
+        ValueError: If ``records`` is empty.
+    """
+    series = convergence_series(records, group_by)
+    if not series:
+        raise ValueError("plot_convergence needs at least one record")
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for label, pts in series:
+        ax.plot([p[0] for p in pts], [p[1] for p in pts], marker="o", label=label)
+    ax.set_xlabel("look-ahead horizon (steps)")
+    ax.set_ylabel("min on-orbit distance (m) — 0 = on the ring")
+    ax.set_title(title or "Look-ahead convergence onto the kangaroo orbit")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    if save_path:
+        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
+
+def construction_reach(construction, margin=1.1):
+    """Fixed-limit reach covering the whole static Dubins construction (``TASK-023``).
+
+    Pure: the largest absolute East/North coordinate over the start, target, ring
+    extent, tangent entries and every family point, times ``margin`` so the
+    drawing does not touch the frame. Mirrors :func:`compute_reach` for recorded
+    runs. Never returns zero.
+    """
+    coords = []
+    sx, sy, _psi = construction["start"]
+    tx, ty = construction["target"]
+    coords += [sx, sy, tx, ty]
+    R = construction.get("ring_radius_m") or 0.0
+    if R > 0.0:
+        coords += [tx - R, tx + R, ty - R, ty + R]
+    for px, py, _psi_f, _sign in construction.get("entries", []):
+        coords += [px, py]
+    for fam in construction["families"].values():
+        for x, y in fam["points"]:
+            coords += [x, y]
+    reach = max((abs(v) for v in coords), default=1.0)
+    return max(reach * margin, 1.0)
+
+
+def plot_dubins_construction(construction, save_path=None, show=False, title=None):
+    """Draw the static, plan-once Dubins construction (``TASK-023``).
+
+    Takes the plain dict from
+    :func:`py_harness.dubins_static.build_construction` and draws, in one figure:
+    the ring about the target, the two tangent lines and their entry points, and
+    all six Dubins families routed to the chosen entry — each labelled with its
+    length, ``dubins_path.py``-style, and the shortest drawn bold. Read-only: the
+    whole interface is the dict, so this imports no harness module
+    (``DEC-2026-07-22-01``).
+
+    Off-screen by default so it is headless-safe. Returns the top-down figure.
+    """
+    import matplotlib.pyplot as plt
+
+    reach = construction_reach(construction)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title(title or "Static Dubins geometry (plan-once)")
+    ax.set_xlabel("East (x)")
+    ax.set_ylabel("North (y)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlim(-reach, reach)
+    ax.set_ylim(-reach, reach)
+
+    sx, sy, _psi = construction["start"]
+    tx, ty = construction["target"]
+    ax.plot([sx], [sy], "ks", markersize=8, label="start")
+    ax.plot([tx], [ty], "k*", markersize=14, label="target")
+
+    R = construction.get("ring_radius_m") or 0.0
+    if R > 0.0:
+        ring_e, ring_n = ring_points(tx, ty, R)
+        ax.plot(ring_e, ring_n, color="grey", linestyle="--", linewidth=1,
+                label="ring")
+
+    # Tangent construction: both entry options, the chosen one solid.
+    chosen = construction.get("entry_index")
+    for i, (px, py, _psi_f, _sign) in enumerate(construction.get("entries", [])):
+        is_chosen = (i == chosen)
+        ax.plot([sx, px], [sy, py], color="black",
+                linestyle="-" if is_chosen else ":",
+                linewidth=1.2 if is_chosen else 0.8, alpha=0.8)
+        ax.plot([px], [py], "ko", markersize=7 if is_chosen else 5)
+
+    # The six Dubins families to the goal, each labelled with its length.
+    shortest = construction.get("shortest")
+    colours = iter(RUN_COLOURS)
+    for name, fam in construction["families"].items():
+        colour = next(colours, "tab:gray")
+        if fam["solved"]:
+            xs = [p[0] for p in fam["points"]]
+            ys = [p[1] for p in fam["points"]]
+            bold = (name == shortest)
+            label = "%s (%.1f m)%s" % (
+                name, fam["length"], " — shortest" if bold else "")
+            ax.plot(xs, ys, color=colour, linewidth=2.5 if bold else 1.2,
+                    label=label)
+        else:
+            ax.plot([], [], color=colour, label="%s (n/a)" % name)
+
+    ax.legend(loc="best", fontsize=8)
+    if save_path:
+        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
+
+def _target_circle_reach(construction, margin=1.1):
+    """Fixed-limit reach over a single-shot target-circle construction (``TASK-024/025``)."""
+    coords = []
+    sx, sy, _psi = construction["start"]
+    tx, ty = construction["target"]
+    coords += [sx, sy, tx, ty]
+    R = construction["orbit_radius_m"]
+    coords += [tx - R, tx + R, ty - R, ty + R]
+    for seq in (construction.get("approach", []), construction.get("orbit", [])):
+        for x, y in seq:
+            coords += [x, y]
+    reach = max((abs(v) for v in coords), default=1.0)
+    return max(reach * margin, 1.0)
+
+
+def _draw_target_circle_furniture(ax, construction):
+    """Ring, start and target markers shared by the static and animated views."""
+    sx, sy, _psi = construction["start"]
+    tx, ty = construction["target"]
+    re, rn = ring_points(tx, ty, construction["orbit_radius_m"])
+    ax.plot(re, rn, "--", color="grey", linewidth=1, label="ring")
+    ax.plot([sx], [sy], "ks", markersize=8, label="start")
+    ax.plot([tx], [ty], "k*", markersize=14, label="target")
+
+
+def plot_target_circle_static(construction, save_path=None, show=False, title=None):
+    """Draw the single-shot altered Dubins construction (``TASK-024``/``TASK-025``).
+
+    Takes the plain dict from :func:`py_harness.dubins_target_static.build` and
+    draws the ring, the committed approach (arc + straight into the tangent), the
+    tangency point and — when present — the exact orbit continuation. Read-only:
+    imports no harness module (``DEC-2026-07-22-01``). Off-screen by default.
+    """
+    import matplotlib.pyplot as plt
+
+    reach = _target_circle_reach(construction)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title(title or "Top-down (X-Y)")
+    ax.set_xlabel("East (x)")
+    ax.set_ylabel("North (y)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlim(-reach, reach)
+    ax.set_ylim(-reach, reach)
+
+    _draw_target_circle_furniture(ax, construction)
+    ap = construction.get("approach", [])
+    if ap:
+        ax.plot([p[0] for p in ap], [p[1] for p in ap], "-", color="tab:blue",
+                linewidth=2, label="approach (arc + straight)")
+    orb = construction.get("orbit", [])
+    if orb:
+        ax.plot([p[0] for p in orb], [p[1] for p in orb], "-", color="tab:green",
+                linewidth=2, label="orbit (exact %g m)" % construction["orbit_radius_m"])
+    a = construction["arrival"]
+    ax.plot([a[0]], [a[1]], "o", color="tab:red", markersize=8, label="tangency")
+
+    ax.legend(loc="best", fontsize=8)
+    if save_path:
+        fig.savefig(save_path, dpi=120, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
+
+def animate_target_circle_static(construction, save_path=None, show=False,
+                                 frames=150, fps=20):
+    """Animate the aircraft traversing the single-shot committed path (``TASK-024/025``).
+
+    The plane walks the approach (blue) then the orbit (green) at a **constant
+    speed**: the path is resampled by **arc length** so every frame advances an
+    equal distance, regardless of how densely the arc, straight and orbit segments
+    were sampled — so the motion does not speed up or slow down between segments.
+    Read-only. Writes a GIF to ``save_path`` (Pillow) and/or shows a window.
+
+    Raises:
+        ValueError: If the construction has fewer than two path points.
+    """
+    import bisect
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    approach = list(construction.get("approach", []))
+    orbit = list(construction.get("orbit", []))
+    traj = approach + orbit
+    if len(traj) < 2:
+        raise ValueError("animate_target_circle_static needs a path to animate")
+
+    # Cumulative arc length along the committed path, and the length at which the
+    # approach hands off to the orbit (for the two-colour trail).
+    cum = [0.0]
+    for i in range(1, len(traj)):
+        cum.append(cum[-1] + math.hypot(traj[i][0] - traj[i - 1][0],
+                                        traj[i][1] - traj[i - 1][1]))
+    total = cum[-1] or 1.0
+    approach_len = cum[len(approach) - 1] if approach else 0.0
+
+    def at_arclength(s):
+        """Position a distance ``s`` along the path (linear interpolation)."""
+        if s <= 0.0:
+            return traj[0]
+        if s >= total:
+            return traj[-1]
+        j = max(1, min(bisect.bisect_left(cum, s), len(cum) - 1))
+        seg = cum[j] - cum[j - 1]
+        t = 0.0 if seg <= 0.0 else (s - cum[j - 1]) / seg
+        return (traj[j - 1][0] + t * (traj[j][0] - traj[j - 1][0]),
+                traj[j - 1][1] + t * (traj[j][1] - traj[j - 1][1]))
+
+    # Equal arc-length samples — constant speed per frame.
+    s_of = [total * k / (frames - 1) for k in range(frames)]
+    samp = [at_arclength(s) for s in s_of]
+
+    reach = _target_circle_reach(construction)
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_title("Top-down (X-Y)")
+    ax.set_xlabel("East (x)")
+    ax.set_ylabel("North (y)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    ax.set_xlim(-reach, reach)
+    ax.set_ylim(-reach, reach)
+    _draw_target_circle_furniture(ax, construction)
+
+    a_trail, = ax.plot([], [], "-", color="tab:blue", linewidth=2)
+    o_trail, = ax.plot([], [], "-", color="tab:green", linewidth=2)
+    plane, = ax.plot([], [], "o", color="tab:blue", markersize=7)
+
+    def update(f):
+        aseg = [samp[k] for k in range(f + 1) if s_of[k] <= approach_len]
+        oseg = [samp[k] for k in range(f + 1) if s_of[k] > approach_len]
+        if oseg and aseg:
+            oseg = [aseg[-1]] + oseg          # join the two trails, no gap
+        a_trail.set_data([p[0] for p in aseg], [p[1] for p in aseg])
+        o_trail.set_data([p[0] for p in oseg], [p[1] for p in oseg])
+        plane.set_data([samp[f][0]], [samp[f][1]])
+        return a_trail, o_trail, plane
+
+    anim = FuncAnimation(fig, update, frames=frames, interval=1000.0 / fps, blit=True)
+    if save_path:
+        anim.save(save_path, writer=PillowWriter(fps=fps))
+    if show:
+        plt.show()
     return anim
 
 

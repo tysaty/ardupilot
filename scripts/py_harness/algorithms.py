@@ -34,6 +34,8 @@ from .geometry import amplitude as amplitude_geom
 from .geometry import amplitude_orbit as amplitude_orbit_geom
 from .geometry import dubins as dubins_geom
 from .geometry import dubins_orbit as dubins_orbit_geom
+from .geometry import dubins_target_circle as dubins_target_circle_geom
+from .geometry import dubins_target_orbit as dubins_target_orbit_geom
 from .geometry import heading as heading_geom
 from .geometry import orbit as orbit_geom
 from .geometry import var_amplitude_weave as var_amplitude_weave_geom
@@ -279,7 +281,9 @@ class DubinsAlgorithm(GeometricAlgorithm):
         cfg = self.config
         # (north, east) -> geometry (x = East, y = North). IR-008.
         xi, yi = snapshot["plane_e_m"], snapshot["plane_n_m"]
-        xf, yf = snapshot["target_e_m"], snapshot["target_n_m"]
+        # Estimate/prediction when an estimator runs (TASK-017 look-ahead flows
+        # through target_est); the true target otherwise. Unchanged without --estimate.
+        xf, yf = _target_ea(snapshot)
         psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
 
         dx, dy = xf - xi, yf - yi
@@ -311,6 +315,95 @@ class DubinsAlgorithm(GeometricAlgorithm):
         }
 
 
+class DubinsTargetCircleAlgorithm(GeometricAlgorithm):
+    """Dubins path whose final turn circle is the target-centred ring (``TASK-024``).
+
+    Unlike :class:`DubinsAlgorithm`, which aims a terminal *pose* at the target and
+    offsets the final turn circle to its left or right, this flies a Dubins path
+    whose **final circle is centred on the target** (radius ``orbit_radius_m``), so
+    the aircraft arrives **tangent to the ring**. The geometry
+    (:mod:`py_harness.geometry.dubins_target_circle`) tries both initial turn senses
+    and both ring senses and returns the least-cost approach; the clockwise /
+    counter-clockwise sense is therefore fixed by geometry. Curvature is bounded by
+    construction: ``orbit_radius_m >= turn_radius_m`` (else ``NoSolution``).
+
+    **Reaching** the ring is this adapter's job; **continuing** around it is
+    ``TASK-025``. Stateless, like the other adapters.
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
+    ``delta_psi_rad``, ``delta_d_m``.
+    """
+
+    name = "dubins_target_circle"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = _target_ea(snapshot)  # estimate/prediction if --estimate, else true
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        try:
+            g = dubins_target_circle_geom.guidance(
+                px, py, psi_i, tx, ty,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": {
+                "direction": g["direction"],
+                "reach_length_m": g["reach_length_m"],
+                "curvature": g["curvature"],
+            },
+        }
+
+
+class DubinsTargetOrbitAlgorithm(GeometricAlgorithm):
+    """Approach on the target-centred circle, then orbit — ramp-free (``TASK-025``).
+
+    The station-keeping successor to :class:`DubinsTargetCircleAlgorithm`: it flies
+    the same target-centred final-circle Dubins approach while **outside** the ring,
+    then **continues to orbit** the target once **on** it. Unlike
+    :class:`DubinsOrbitAlgorithm`, there is **no ramp** — the tangent arrival of the
+    ``TASK-024`` circle makes the switch continuous by geometry
+    (:mod:`py_harness.geometry.dubins_target_orbit`). Stateless: the orbit sense is
+    re-derived from the heading each tick, not stored.
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
+    ``delta_psi_rad``, ``delta_d_m``.
+    """
+
+    name = "dubins_target_orbit"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = _target_ea(snapshot)  # estimate/prediction if --estimate, else true
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        try:
+            g = dubins_target_orbit_geom.guidance(
+                px, py, psi_i, tx, ty,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        state = {
+            "phase": g["phase"],
+            "direction": g["direction"],
+            "curvature": g["curvature"],
+        }
+        if "ring_angle_rad" in g:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
+
+
 class OrbitAlgorithm(GeometricAlgorithm):
     """Circle the target on a ring of radius ``orbit_radius_m``.
 
@@ -329,7 +422,7 @@ class OrbitAlgorithm(GeometricAlgorithm):
     def guidance_point(self, snapshot):
         cfg = self.config
         px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
-        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        tx, ty = _target_ea(snapshot)  # estimate/prediction if --estimate, else true
         R = cfg["orbit_radius_m"]
 
         if math.hypot(px - tx, py - ty) < 1e-6:
@@ -373,7 +466,7 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
     def guidance_point(self, snapshot):
         cfg = self.config
         px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
-        tx, ty = snapshot["target_e_m"], snapshot["target_n_m"]
+        tx, ty = _target_ea(snapshot)  # estimate/prediction if --estimate, else true
         psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
 
         try:
@@ -455,6 +548,8 @@ REGISTRY = {
     VarAmplitudeAlgorithm.name: VarAmplitudeAlgorithm,
     VarAmplitudeOrbitAlgorithm.name: VarAmplitudeOrbitAlgorithm,
     DubinsAlgorithm.name: DubinsAlgorithm,
+    DubinsTargetCircleAlgorithm.name: DubinsTargetCircleAlgorithm,
+    DubinsTargetOrbitAlgorithm.name: DubinsTargetOrbitAlgorithm,
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
     HeadingAAlgorithm.name: HeadingAAlgorithm,
@@ -469,8 +564,9 @@ REGISTRY = {
 #: Algorithms with geometry implemented; ``continuous_weave`` is an alias of
 #: ``amplitude``.
 IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
-               "var_amplitude_orbit", "dubins", "orbit", "dubins_orbit",
-               "heading_a", "heading_a_orbit")
+               "var_amplitude_orbit", "dubins", "dubins_target_circle",
+               "dubins_target_orbit", "orbit", "dubins_orbit", "heading_a",
+               "heading_a_orbit")
 
 
 def build(name, config):

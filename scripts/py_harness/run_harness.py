@@ -20,7 +20,7 @@ import argparse
 import math
 import sys
 
-from . import algorithms, kangaroo, plotter
+from . import algorithms, kangaroo, metrics, plotter
 from .config import HarnessConfig, InfeasibleConfiguration
 from .estimator import KalmanFilter
 from .geometry import dubins_orbit as dubins_orbit_geom
@@ -82,9 +82,20 @@ def build_parser():
         help="Plot the 2D top-down view only; omit the z = time 3D view.",
     )
     parser.add_argument(
-        "--kang-mode", choices=kangaroo.MODES, default=None,
-        help="Kangaroo target-motion mode (TASK-009). Overrides the --target-* "
-        "placement and velocity when set.",
+        "--no-carrot",
+        action="store_true",
+        help="Hide the faint dotted guidance-point (carrot) trail for clarity. "
+        "The carrot stays a feature; this only toggles it off for the plot.",
+    )
+    parser.add_argument(
+        "--kang-mode", choices=kangaroo.ALL_MODES, default=None,
+        help="Kangaroo target-motion mode (TASK-009; `kangaroo_rand` is TASK-021). "
+        "Overrides the --target-* placement and velocity when set.",
+    )
+    parser.add_argument(
+        "--kang-seed", type=int, default=0,
+        help="Seed for kangaroo_rand's random mode switching (TASK-021); the same "
+        "seed reproduces the same target trajectory.",
     )
     parser.add_argument("--kang-heading-deg", type=float, default=0.0,
                         help="Kangaroo mode heading, deg clockwise from North.")
@@ -340,6 +351,7 @@ def main(argv=None):
                 fwd_m=args.kang_fwd_m, disp_m=args.kang_disp_m,
                 radius_m=args.kang_radius_m, length_m=args.kang_length_m,
                 width_m=args.kang_width_m, speed_ms=args.kang_speed_ms,
+                seed=args.kang_seed,
             )
             target_n0, target_e0, target_vn, target_ve = kang(0.0)
         except ValueError as exc:
@@ -396,6 +408,14 @@ def main(argv=None):
             % (label, len(harness.history), last["t_s"], final_range)
         )
 
+        # Minimum on-orbit distance (TASK-018): closest approach to the ring;
+        # 0 = the plane reached the orbit (A-VAL-007). Time-agnostic.
+        min_orbit_distance_m = metrics.min_orbit_distance(
+            harness.history, cfg.orbit_radius_m)
+        if min_orbit_distance_m is not None:
+            print("  min on-orbit distance %.1f m (0 = on the ring)"
+                  % min_orbit_distance_m)
+
         if target_vn or target_ve:
             fs = follow_stats(harness.history)
             outcome = "closing" if fs["final"] < fs["initial"] else "trailing"
@@ -423,6 +443,9 @@ def main(argv=None):
                 "turn_radius_m": cfg.turn_radius_m,
                 "orbit_radius_m": cfg.orbit_radius_m,
                 "airspeed_ms": cfg.airspeed_ms,
+                # For the TASK-019 sweep: the metric catalogued against the horizon.
+                "min_orbit_distance_m": min_orbit_distance_m,
+                "lookahead_steps": cfg.lookahead_steps,
             })
             print("  saved %s" % path)
 
@@ -449,7 +472,8 @@ def main(argv=None):
     # Only draw the ring when an orbit-family algorithm is present, so a pure
     # amplitude run is not overlaid with a ring it does not use.
     orbit_present = any(
-        n in ("orbit", "dubins_orbit", "amplitude_orbit", "heading_a_orbit") for n in selected
+        n in ("orbit", "dubins_orbit", "amplitude_orbit", "heading_a_orbit",
+              "dubins_target_circle", "dubins_target_orbit") for n in selected
     )
     orbit_m = cfg.orbit_radius_m if orbit_present else None
 
@@ -464,6 +488,7 @@ def main(argv=None):
             planned=planned,
             save_path=args.save_plot,
             show=args.save_plot is None,
+            show_carrot=not args.no_carrot,
         )
     return 0
 
