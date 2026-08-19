@@ -21,7 +21,7 @@ The spec is a nested dict with these sections (all optional)::
 
     {
       "algorithms": ["dubins_orbit", ...],        # repeated --algorithm
-      "config":   {airspeed_ms, turn_radius_m, orbit_radius_m,
+      "config":   {airspeed_ms, turn_radius_m, orbit_radius_m, look_ahead_m,
                    weave_lambda_m, weave_a_cap_m, weave_d_start_m,
                    weave_d_full_m, weave_eta, weave_vaw_lead_s},
       "plane":    {heading_deg},
@@ -57,6 +57,7 @@ _CONFIG_FLAGS = {
     "weave_eta": "--eta",
     "weave_vaw_lead_s": "--weave-vaw-lead-s",
     "lookahead_steps": "--lookahead-steps",
+    "look_ahead_m": "--look-ahead-m",
 }
 
 # Config keys whose flag takes an int, not a float (emitted without decimals).
@@ -94,6 +95,7 @@ _RUN_BOOL_FLAGS = {
     "no_3d": "--no-3d",
     "compare_eta": "--compare-eta",
     "allow_infeasible": "--allow-infeasible",
+    "no_orbit_precomp": "--no-orbit-precomp",
 }
 
 _RUN_VALUE_FLAGS = {

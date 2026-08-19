@@ -92,6 +92,14 @@ DT_S = 0.1
 #: on constant velocity, and guidance aims at the prediction. Serves FR-003.
 LOOKAHEAD_STEPS = 0
 
+#: Pre-compensate the orbit guidance ring for chord-cutting (TASK-027, Option A).
+#: True places the orbit guidance point on a virtual ring `R / cos(L/R)` so the
+#: circle actually *flown* is the commanded `orbit_radius_m`; False restores the
+#: as-built law, which settles at about `R*cos(L/R)` (`A-VAL-005`). Default True:
+#: the commanded radius is what the operator asked for. Set False to reproduce
+#: results recorded before TASK-027.
+ORBIT_PRECOMPENSATE = True
+
 # --------------------------------------------------------------------------
 # Amplitude weave parameters (TASK-004) — harness-only, illustrative
 # --------------------------------------------------------------------------
@@ -186,6 +194,7 @@ class HarnessConfig:
         "weave_eta",
         "weave_vaw_lead_s",
         "lookahead_steps",
+        "orbit_precompensate",
         "_frozen",
     )
 
@@ -207,6 +216,7 @@ class HarnessConfig:
         weave_eta=WEAVE_ETA,
         weave_vaw_lead_s=WEAVE_VAW_LEAD_S,
         lookahead_steps=LOOKAHEAD_STEPS,
+        orbit_precompensate=ORBIT_PRECOMPENSATE,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -225,6 +235,7 @@ class HarnessConfig:
         self.weave_eta = float(weave_eta)
         self.weave_vaw_lead_s = float(weave_vaw_lead_s)
         self.lookahead_steps = int(lookahead_steps)
+        self.orbit_precompensate = bool(orbit_precompensate)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 

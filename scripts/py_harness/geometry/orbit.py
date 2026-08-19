@@ -134,9 +134,118 @@ def orbit_point_at_arc_length(tx, ty, R, psi0, direction, arc_length_m):
     This is the orbit's answer to "where is the guidance point?": advancing a
     fixed arc length along a circle is a fixed angle, ``arc/R``. Closed form,
     so no sampling resolution enters the guidance output.
+
+    **Uncompensated.** The guidance point lands on the commanded ring, but the
+    aircraft flies the *chord* to it, so the circle actually flown settles
+    *inside* the ring at ``R*cos(arc/R)`` (``A-VAL-005``). Use
+    :func:`orbit_point_at_arc_length_compensated` to fly the commanded radius.
+    This function is retained unchanged because the static renderers
+    (``dubins_static``, ``dubins_target_static``) draw the exact commanded orbit
+    rather than a flown one, and because the as-built behaviour must stay
+    reproducible (``TASK-027``).
     """
     psi = psi0 + direction * (arc_length_m / R)
     return orbit_point(tx, ty, R, psi) + (psi,)
+
+
+#: Largest angular advance for which the pre-compensation below is defined.
+#: At ``alpha -> pi/2`` the compensation factor ``1/cos(alpha)`` diverges, and
+#: beyond it the chord geometry no longer settles on a circle at all, so the
+#: request is refused rather than answered with a huge or negative radius.
+#: 80 degrees corresponds to a look-ahead of about 1.4 ring radii.
+ALPHA_MAX_RAD = math.radians(80.0)
+
+
+def precompensated_ring_radius(R, arc_length_m):
+    """Carrot-ring radius whose chord geometry settles on the commanded ``R``.
+
+    Chasing a guidance point placed an angle ``alpha = arc/R`` around a ring of
+    radius ``Rc`` settles the aircraft on ``r = Rc*cos(alpha)`` — it flies the
+    chord, not the arc (``A-VAL-005``). Inverting that for ``r = R`` gives
+
+        Rc = R / cos(alpha),        alpha = arc_length_m / R
+
+    so the guidance point is placed on a *virtual* ring outside the commanded
+    one, and the circle actually flown is the commanded one.
+
+    This is the geometric (open-loop) correction of ``TASK-027`` Option A: it
+    cancels the known chord-cutting offset exactly and carries no state or gain.
+    It does **not** close a loop on radial error, so it corrects this offset and
+    nothing else — a disturbance that moves the aircraft off the ring is not
+    driven back by this term. A residual of order 1 m remains from turn-rate lag,
+    since the aircraft never points exactly at the guidance point.
+
+    Args:
+        R: Commanded ring radius, m (> 0).
+        arc_length_m: Guidance-point advance around the ring, m (>= 0).
+
+    Returns:
+        The compensated ring radius ``Rc >= R``, metres.
+
+    Raises:
+        ValueError: If ``R`` is not positive, ``arc_length_m`` is negative, or
+            the implied ``alpha`` reaches :data:`ALPHA_MAX_RAD` (the look-ahead
+            is too large a fraction of the ring for the correction to be
+            defined).
+    """
+    if R <= 0.0:
+        raise ValueError("ring radius must be positive, got %r" % R)
+    if arc_length_m < 0.0:
+        raise ValueError("arc length must be >= 0, got %r" % arc_length_m)
+    alpha = arc_length_m / R
+    if alpha >= ALPHA_MAX_RAD:
+        raise ValueError(
+            "look-ahead %.3f m is %.1f deg around a %.3f m ring, at or beyond the "
+            "%.1f deg limit where the chord correction is defined; reduce the "
+            "look-ahead or enlarge the ring"
+            % (arc_length_m, math.degrees(alpha), R, math.degrees(ALPHA_MAX_RAD))
+        )
+    return R / math.cos(alpha)
+
+
+def orbit_point_at_arc_length_compensated(tx, ty, R, psi0, direction,
+                                          arc_length_m):
+    """Guidance point that makes the *flown* circle the commanded ring ``R``.
+
+    Same angular advance as :func:`orbit_point_at_arc_length` — ``alpha =
+    arc_length_m / R``, so the look-ahead keeps its meaning on the commanded
+    ring — but the point is placed on the pre-compensated ring
+    :func:`precompensated_ring_radius` rather than on ``R`` itself.
+
+    Returns ``(x, y, psi)`` where ``psi`` is the angle about the target, which is
+    the ring angle the aircraft is steering toward and is independent of which
+    ring the point was placed on.
+
+    Raises:
+        ValueError: Propagated from :func:`precompensated_ring_radius`.
+    """
+    rc = precompensated_ring_radius(R, arc_length_m)
+    psi = psi0 + direction * (arc_length_m / R)
+    return orbit_point(tx, ty, rc, psi) + (psi,)
+
+
+def guidance_ring_radius(R, arc_length_m, precompensate):
+    """``Rc`` when ``precompensate`` is true, otherwise ``R``.
+
+    The single place the two carrot laws are selected between, so the choice is
+    a parameter rather than a branch repeated at each call site (``TASK-027``).
+    """
+    if precompensate:
+        return precompensated_ring_radius(R, arc_length_m)
+    return R
+
+
+def orbit_guidance_point(tx, ty, R, psi0, direction, arc_length_m,
+                         precompensate):
+    """One orbit guidance point under either carrot law. ``(x, y, psi)``.
+
+    ``precompensate`` selects the ``TASK-027`` corrected law (the flown circle is
+    the commanded ``R``) or the as-built law (the flown circle settles inside it).
+    """
+    if precompensate:
+        return orbit_point_at_arc_length_compensated(
+            tx, ty, R, psi0, direction, arc_length_m)
+    return orbit_point_at_arc_length(tx, ty, R, psi0, direction, arc_length_m)
 
 
 def cumulative_arc_length(pts):

@@ -80,18 +80,32 @@ def approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     return gx, gy, length, family
 
 
-def orbit_guidance(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m):
+def orbit_guidance(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m,
+                   precompensate=True):
     """Guidance point a look-ahead arc length around the ring.
+
+    This is the shared orbit hub: ``dubins_orbit``, ``heading_a_orbit``,
+    ``amplitude_orbit`` and ``var_amplitude_orbit`` all reach the ring through
+    here, which is why a defect in the carrot law showed identically in all four
+    (``A-VAL-005``).
+
+    ``precompensate`` selects the ``TASK-027`` corrected law, which places the
+    point so the circle actually flown is ``orbit_radius_m``; False restores the
+    as-built law, which settles inside it.
 
     Returns ``(gx, gy, ring_angle_rad)``, or ``None`` when the aircraft is at the
     ring centre and no orbit angle is defined.
+
+    Raises:
+        ValueError: From the compensation when the look-ahead is too large a
+            fraction of the ring (see ``orbit.precompensated_ring_radius``).
     """
     if math.hypot(px - tx, py - ty) < 1e-6:
         return None
     psi0 = orbit.entry_angle(px, py, tx, ty)
     direction = orbit.orbit_direction(psi0, psi_i)
-    gx, gy, psi = orbit.orbit_point_at_arc_length(
-        tx, ty, orbit_radius_m, psi0, direction, look_ahead_m
+    gx, gy, psi = orbit.orbit_guidance_point(
+        tx, ty, orbit_radius_m, psi0, direction, look_ahead_m, precompensate
     )
     return gx, gy, psi
 
@@ -123,7 +137,7 @@ def planned_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
 
 
 def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-             look_ahead_m, delta_psi_rad, delta_d_m):
+             look_ahead_m, delta_psi_rad, delta_d_m, precompensate=True):
     """One guidance point: the Dubins approach ramped into the orbit.
 
     Returns a dict ``{"gx", "gy", "phase", "family", "ring_angle_rad"}``, where
@@ -150,7 +164,8 @@ def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
         )
     orb = None
     if w > 0.0:
-        orb = orbit_guidance(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m)
+        orb = orbit_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
+                             look_ahead_m, precompensate)
 
     if approach is None and orb is None:
         raise ValueError(

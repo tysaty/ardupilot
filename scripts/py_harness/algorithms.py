@@ -152,6 +152,7 @@ class AmplitudeOrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "amplitude_orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         cfg = self.config
@@ -165,6 +166,7 @@ class AmplitudeOrbitAlgorithm(GeometricAlgorithm):
                 cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
                 cfg["weave_d_start_m"], cfg["weave_d_full_m"], cfg["weave_eta"],
                 cfg.get("weave_envelope", "smoothstep"),
+                precompensate=cfg["orbit_precompensate"],
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -234,6 +236,7 @@ class VarAmplitudeOrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "var_amplitude_orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         cfg = self.config
@@ -247,6 +250,7 @@ class VarAmplitudeOrbitAlgorithm(GeometricAlgorithm):
                 cfg["orbit_radius_m"], cfg["look_ahead_m"],
                 cfg["weave_lambda_m"], cfg["turn_radius_m"], cfg["weave_a_cap_m"],
                 cfg["weave_d_full_m"], cfg["weave_vaw_lead_s"], cfg["weave_eta"],
+                precompensate=cfg["orbit_precompensate"],
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -376,6 +380,7 @@ class DubinsTargetOrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "dubins_target_orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         cfg = self.config
@@ -387,6 +392,7 @@ class DubinsTargetOrbitAlgorithm(GeometricAlgorithm):
                 px, py, psi_i, tx, ty,
                 cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
+                cfg["orbit_precompensate"],
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -418,6 +424,7 @@ class OrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         cfg = self.config
@@ -432,9 +439,13 @@ class OrbitAlgorithm(GeometricAlgorithm):
         direction = orbit_geom.orbit_direction(
             psi0, _heading_to_geometry(snapshot["plane_hdg_rad"])
         )
-        gx, gy, psi = orbit_geom.orbit_point_at_arc_length(
-            tx, ty, R, psi0, direction, cfg["look_ahead_m"]
-        )
+        try:
+            gx, gy, psi = orbit_geom.orbit_guidance_point(
+                tx, ty, R, psi0, direction, cfg["look_ahead_m"],
+                cfg["orbit_precompensate"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
         return {
             "guidance_n_m": gy,
             "guidance_e_m": gx,
@@ -462,6 +473,7 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "dubins_orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         cfg = self.config
@@ -474,6 +486,7 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
                 px, py, psi_i, tx, ty,
                 cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
+                cfg["orbit_precompensate"],
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -524,6 +537,7 @@ class HeadingAOrbitAlgorithm(GeometricAlgorithm):
     """
 
     name = "heading_a_orbit"
+    holds_orbit = True
 
     def guidance_point(self, snapshot):
         px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
@@ -533,6 +547,7 @@ class HeadingAOrbitAlgorithm(GeometricAlgorithm):
             gx, gy, phase = heading_geom.guidance_orbit(
                 px, py, psi_i, tx, ty,
                 self.config["orbit_radius_m"], self.config["look_ahead_m"],
+                self.config["orbit_precompensate"],
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -619,4 +634,5 @@ def config_dict(cfg):
         "weave_d_full_m": cfg.weave_d_full_m,
         "weave_eta": cfg.weave_eta,
         "weave_vaw_lead_s": cfg.weave_vaw_lead_s,
+        "orbit_precompensate": cfg.orbit_precompensate,
     }

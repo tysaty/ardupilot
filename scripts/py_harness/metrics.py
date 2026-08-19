@@ -44,6 +44,63 @@ def min_orbit_distance(history, orbit_radius_m):
     return min(distances) if distances else None
 
 
+def steady_state_stats(history, orbit_radius_m, fraction=0.25,
+                       settled_tol_m=1.0):
+    """Steady-state ring statistics over the converged tail (``TASK-027``).
+
+    The complement to :func:`min_orbit_distance`. That metric is the *closest
+    approach*, so a run that grazes the ring once and then settles well inside it
+    scores zero; these statistics describe where the aircraft actually **ends up**
+    (`A-VAL-005`, `A-VAL-007`).
+
+    Args:
+        history: Recorded run history.
+        orbit_radius_m: Commanded ring radius, m.
+        fraction: Tail fraction treated as steady state. Default 0.25, matching
+            ``state.Harness.achieved_orbit_radius_m``.
+        settled_tol_m: Largest drift across the tail, m, for the run to be
+            called settled.
+
+    Returns:
+        ``None`` for an empty history, else a dict:
+
+        ``mean_radius_m``
+            Mean aircraft-to-target range over the tail — the achieved radius.
+        ``rms_ring_error_m``
+            RMS of ``|range - R|`` over the tail.
+        ``max_ring_error_m``
+            Worst ``|range - R|`` over the tail.
+        ``drift_m``
+            Mean range over the tail's second half minus its first half.
+        ``settled``
+            ``|drift_m| <= settled_tol_m``. **False means the other figures do
+            not describe a steady state** and must not be read as an achieved
+            radius — the common case is a run that terminated on arrival, whose
+            tail is still the final approach rather than a hold.
+    """
+    if not history:
+        return None
+    n = max(1, int(len(history) * fraction))
+    tail = history[-n:]
+    ranges = [
+        math.hypot(s["plane_n_m"] - s["target_n_m"],
+                   s["plane_e_m"] - s["target_e_m"])
+        for s in tail
+    ]
+    errors = [abs(r - orbit_radius_m) for r in ranges]
+    half = max(1, len(ranges) // 2)
+    first = sum(ranges[:half]) / half
+    second = sum(ranges[-half:]) / half
+    drift = second - first
+    return {
+        "mean_radius_m": sum(ranges) / len(ranges),
+        "rms_ring_error_m": math.sqrt(sum(e * e for e in errors) / len(errors)),
+        "max_ring_error_m": max(errors),
+        "drift_m": drift,
+        "settled": abs(drift) <= settled_tol_m,
+    }
+
+
 def min_orbit_distance_at(history, orbit_radius_m):
     """The minimum and where it occurred: ``(min_m, index, t_s)`` or ``None``.
 

@@ -29,7 +29,7 @@ from . import orbit as orbit_geom
 
 
 def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-             look_ahead_m, delta_psi, delta_d):
+             look_ahead_m, delta_psi, delta_d, precompensate=True):
     """One guidance point: approach outside the ring, orbit continuation on it.
 
     Returns a dict ``{"gx", "gy", "phase", "direction", "curvature",
@@ -68,8 +68,8 @@ def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     # this continuous. Closed-form advance, so no sampling error enters guidance.
     psi0 = orbit_geom.entry_angle(px, py, tx, ty)
     direction = orbit_geom.orbit_direction(psi0, psi_i)
-    gx, gy, psi = orbit_geom.orbit_point_at_arc_length(
-        tx, ty, R, psi0, direction, look_ahead_m)
+    gx, gy, psi = orbit_geom.orbit_guidance_point(
+        tx, ty, R, psi0, direction, look_ahead_m, precompensate)
     return {
         "gx": gx,
         "gy": gy,

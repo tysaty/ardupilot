@@ -152,6 +152,21 @@ def build_parser():
         "target speed is given). Overrides --target-vn-ms/--target-ve-ms.",
     )
     parser.add_argument(
+        "--look-ahead-m",
+        type=float,
+        default=None,
+        help="Guidance-point (carrot) distance along the path, m. Default 50 "
+        "(from CTRL_C_LOOK). This is the geometric carrot, NOT the estimator "
+        "horizon --lookahead-steps.",
+    )
+    parser.add_argument(
+        "--no-orbit-precomp",
+        action="store_true",
+        help="Disable the TASK-027 orbit guidance-ring pre-compensation and fly "
+        "the as-built law, whose orbit settles inside the commanded ring at "
+        "about R*cos(L/R) (A-VAL-005). For reproducing pre-TASK-027 results.",
+    )
+    parser.add_argument(
         "--eta",
         type=float,
         default=None,
@@ -294,6 +309,10 @@ def build_config(args, weave_eta=None):
         overrides["weave_vaw_lead_s"] = args.weave_vaw_lead_s
     if args.lookahead_steps is not None:
         overrides["lookahead_steps"] = args.lookahead_steps
+    if args.look_ahead_m is not None:
+        overrides["look_ahead_m"] = args.look_ahead_m
+    if args.no_orbit_precomp:
+        overrides["orbit_precompensate"] = False
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)
         overrides["weave_eta"] = weave_eta
     return HarnessConfig(**overrides)
@@ -425,13 +444,32 @@ def main(argv=None):
                 % (fs["initial"], fs["final"], fs["min"], fs["target_moved"], outcome)
             )
 
-        achieved = harness.achieved_orbit_radius_m()
-        if achieved is not None and algo_name in ("orbit", "dubins_orbit", "heading_a_orbit",
-                                                  "amplitude_orbit"):
-            print(
-                "  commanded orbit radius %.1f m, achieved %.1f m (%.0f%%)"
-                % (cfg.orbit_radius_m, achieved, 100.0 * achieved / cfg.orbit_radius_m)
-            )
+        # Commanded-versus-achieved orbit radius. Reported for every algorithm
+        # that holds a ring, selected by the algorithm's own `holds_orbit`
+        # attribute rather than by a name whitelist, which previously suppressed
+        # this line for dubins_target_orbit and var_amplitude_orbit and so hid
+        # the A-VAL-005 shortfall on the newest algorithms (TASK-026/TASK-027).
+        if algorithms.REGISTRY[algo_name].holds_orbit:
+            ss = metrics.steady_state_stats(harness.history, cfg.orbit_radius_m)
+            if ss is not None:
+                print(
+                    "  commanded orbit radius %.1f m, achieved %.1f m (%.0f%%)"
+                    % (cfg.orbit_radius_m, ss["mean_radius_m"],
+                       100.0 * ss["mean_radius_m"] / cfg.orbit_radius_m)
+                )
+                if ss["settled"]:
+                    print("    steady-state ring error: RMS %.2f m, max %.2f m"
+                          % (ss["rms_ring_error_m"], ss["max_ring_error_m"]))
+                else:
+                    # The tail is still moving, so it is not a steady state and
+                    # the achieved figure above is not an orbit radius. The usual
+                    # cause is a run that terminated on arrival.
+                    print("    not settled (drift %.1f m across the tail) — the "
+                          "achieved figure is not a held radius"
+                          % ss["drift_m"])
+                if not cfg.orbit_precompensate:
+                    print("    guidance-ring pre-compensation OFF (as-built law, "
+                          "A-VAL-005 applies)")
 
         if harness.stopped_reason:
             print("  stopped early: %s" % harness.stopped_reason)

@@ -38,7 +38,8 @@ def guidance(px, py, tx, ty, look_ahead_m):
     return px + u * dx / distance_m, py + u * dy / distance_m
 
 
-def guidance_orbit(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m):
+def guidance_orbit(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m,
+                   precompensate=True):
     """Heading fly-to ramped into the orbit about the target (``TASK-010``).
 
     Outside a look-ahead of the ring the guidance points at the target; within it
@@ -60,7 +61,7 @@ def guidance_orbit(px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m):
     orb = None
     if w > 0.0:
         orb = dubins_orbit.orbit_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
-                                          look_ahead_m)
+                                          look_ahead_m, precompensate)
 
     if head is None and orb is None:
         raise ValueError("no heading approach and no orbit point (on the target?)")

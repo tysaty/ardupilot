@@ -19,7 +19,7 @@ from . import var_amplitude_weave as vaw_geom
 
 def guidance(px, py, psi_i, tx, ty, s_m, v_rel_ms, orbit_radius_m, look_ahead_m,
              lambda_m, r_min_m, a_cap_m, d_full_m, lead_s, eta, phase_rad=0.0,
-             v_floor_ms=vaw_geom.V_FLOOR_MS):
+             v_floor_ms=vaw_geom.V_FLOOR_MS, precompensate=True):
     """One guidance point: the variable-amplitude weave ramped into the orbit.
 
     Returns a dict ``{gx, gy, phase, amplitude}`` where ``phase`` is the ramp
@@ -46,7 +46,8 @@ def guidance(px, py, psi_i, tx, ty, s_m, v_rel_ms, orbit_radius_m, look_ahead_m,
     orb = None
     if w > 0.0:
         orb = dubins_orbit.orbit_guidance(
-            px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m
+            px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m,
+            precompensate
         )
 
     if weave is None and orb is None:

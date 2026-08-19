@@ -122,6 +122,13 @@ class GeometricAlgorithm:
     Status: SKELETON — no subclass implements geometry yet.
     """
 
+    #: True when the algorithm holds a standoff ring, so a commanded-versus-
+    #: achieved orbit radius is meaningful for it. Read by the runner instead of
+    #: branching on algorithm name (``VR-014``, ``TASK-027``). Approach-only and
+    #: fly-to algorithms leave this False.
+    holds_orbit = False
+
+
     #: Registry name used to select this algorithm. Subclasses must override.
     name = None
 

@@ -19,7 +19,7 @@ from . import orbit as orbit_geom
 
 def guidance(px, py, psi_i, tx, ty, s_m, orbit_radius_m, look_ahead_m,
              lambda_m, r_min_m, a_cap_m, d_start_m, d_full_m, eta,
-             envelope="smoothstep", phase_rad=0.0):
+             envelope="smoothstep", phase_rad=0.0, precompensate=True):
     """One guidance point: the amplitude weave ramped into the orbit.
 
     Returns a dict ``{gx, gy, phase, amplitude}`` where ``phase`` is the ramp
@@ -45,7 +45,8 @@ def guidance(px, py, psi_i, tx, ty, s_m, orbit_radius_m, look_ahead_m,
     orb = None
     if w > 0.0:
         orb = dubins_orbit.orbit_guidance(
-            px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m
+            px, py, psi_i, tx, ty, orbit_radius_m, look_ahead_m,
+            precompensate
         )
 
     if weave is None and orb is None:
