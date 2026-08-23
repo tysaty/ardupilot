@@ -250,6 +250,11 @@ class Harness:
                 "plane_hdg_rad": self.plane.hdg_rad,
                 "target_n_m": self.target.n_m,
                 "target_e_m": self.target.e_m,
+                # Target velocity (TASK-029). The snapshot has always carried it,
+                # but it was not recorded, so a read-only plotter could not show a
+                # heading or speed change — only its effect on the drawn path.
+                "target_vn_ms": self.target.vn_ms,
+                "target_ve_ms": self.target.ve_ms,
                 "guidance_n_m": gn,
                 "guidance_e_m": ge,
                 "infeasible": self.infeasible,

@@ -160,6 +160,15 @@ def build_parser():
         "horizon --lookahead-steps.",
     )
     parser.add_argument(
+        "--dt-s",
+        type=float,
+        default=None,
+        help="Algorithm refresh interval, s. Default 0.1 (10 Hz), matching the "
+        "shipping controller's 100 ms loop. 1.0 gives a 1 Hz replan rate. The "
+        "guidance point is re-solved once per step, so a longer step means a "
+        "staler carrot — pair a slow rate with a shorter --look-ahead-m.",
+    )
+    parser.add_argument(
         "--no-orbit-precomp",
         action="store_true",
         help="Disable the TASK-027 orbit guidance-ring pre-compensation and fly "
@@ -311,6 +320,8 @@ def build_config(args, weave_eta=None):
         overrides["lookahead_steps"] = args.lookahead_steps
     if args.look_ahead_m is not None:
         overrides["look_ahead_m"] = args.look_ahead_m
+    if args.dt_s is not None:
+        overrides["dt_s"] = args.dt_s
     if args.no_orbit_precomp:
         overrides["orbit_precompensate"] = False
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)

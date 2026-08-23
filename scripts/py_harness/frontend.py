@@ -58,6 +58,7 @@ _CONFIG_FLAGS = {
     "weave_vaw_lead_s": "--weave-vaw-lead-s",
     "lookahead_steps": "--lookahead-steps",
     "look_ahead_m": "--look-ahead-m",
+    "dt_s": "--dt-s",
 }
 
 # Config keys whose flag takes an int, not a float (emitted without decimals).

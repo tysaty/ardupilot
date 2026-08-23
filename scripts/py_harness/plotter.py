@@ -284,6 +284,69 @@ def any_infeasible(runs):
 # Drawing — matplotlib only lives below this line
 # --------------------------------------------------------------------------
 
+def draw_scene(ax, history, orbit_radius_m=None, markers=None, upto=None,
+               track_colour="#1F6FEB", show_ring=True):
+    """Draw one frame of a run onto ``ax``: track, target, ring, manoeuvre marks.
+
+    The **shared drawing primitive** (``TASK-029``): the live interactive view and
+    the offline animation both call this, so what is seen live and what an
+    exported schedule reproduces cannot drift apart. Read-only like the rest of
+    this module — it draws ``history`` and touches nothing.
+
+    Args:
+        ax: Target axes.
+        history: Recorded samples (or the live harness's history so far).
+        orbit_radius_m: Ring radius to draw about the target, or None.
+        markers: Absolute times at which a manoeuvre was applied. Each is drawn on
+            the target's track, labelled from the sample at that instant.
+        upto: Draw only up to this index (the live/animated case). None = all.
+        track_colour: Aircraft track colour.
+        show_ring: Draw the standoff ring about the current target position.
+    """
+    if not history:
+        return
+    end = len(history) if upto is None else max(1, min(int(upto), len(history)))
+    hist = history[:end]
+    cur = hist[-1]
+
+    ax.plot([s["target_e_m"] for s in hist], [s["target_n_m"] for s in hist],
+            color="#6B7A85", linewidth=1.0, linestyle=(0, (4, 3)),
+            label="target path")
+    ax.plot([s["plane_e_m"] for s in hist], [s["plane_n_m"] for s in hist],
+            color=track_colour, linewidth=1.6, label="aircraft")
+
+    if show_ring and orbit_radius_m:
+        rx, ry = ring_points(cur["target_e_m"], cur["target_n_m"], orbit_radius_m)
+        ax.fill(rx, ry, color="#EEF3F7", zorder=0)
+        ax.plot(rx, ry, color="#6B7A85", linewidth=1.2, linestyle=(0, (5, 4)))
+
+    ax.plot([cur["target_e_m"]], [cur["target_n_m"]], marker="*", markersize=13,
+            color="black", linestyle="none", label="target")
+    ax.plot([cur["plane_e_m"]], [cur["plane_n_m"]], marker="o", markersize=7,
+            markerfacecolor="white", markeredgecolor=track_colour,
+            markeredgewidth=2.0, linestyle="none")
+
+    for t_mark in (markers or []):
+        sample = None
+        for s in hist:
+            if s["t_s"] >= t_mark:
+                sample = s
+                break
+        if sample is None:
+            continue
+        ax.plot([sample["target_e_m"]], [sample["target_n_m"]], marker="D",
+                markersize=6, color="#C2571C", linestyle="none", zorder=6)
+        label = "t=%.0fs" % sample["t_s"]
+        if sample.get("target_vn_ms") is not None:
+            spd = math.hypot(sample["target_vn_ms"], sample["target_ve_ms"])
+            hdg = math.degrees(math.atan2(sample["target_ve_ms"],
+                                          sample["target_vn_ms"])) % 360.0
+            label += "  %.0f m/s @ %.0f deg" % (spd, hdg)
+        ax.annotate(label, (sample["target_e_m"], sample["target_n_m"]),
+                    textcoords="offset points", xytext=(7, 6), fontsize=8,
+                    color="#C2571C")
+
+
 def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
               save_path=None, show=False, show_carrot=True):
     """Overlay recorded runs on shared axes.
@@ -405,18 +468,22 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
 
     ax2.legend(loc="lower left", fontsize=8)
 
-    ax_check = plt.axes([0.01, 0.4, 0.18, 0.4])
-    ax_check.set_title("show", fontsize=9)
-    labels = list(toggle_map)
-    check = CheckButtons(ax_check, labels, [True] * len(labels))
+    # Interactive layer toggle — only when the figure is actually displayed.
+    # In a saved PNG the widget cannot be clicked, and it consumed the left
+    # fifth of the figure and clipped the y tick labels (TASK-028).
+    if show:
+        ax_check = plt.axes([0.01, 0.4, 0.18, 0.4])
+        ax_check.set_title("show", fontsize=9)
+        labels = list(toggle_map)
+        check = CheckButtons(ax_check, labels, [True] * len(labels))
 
-    def on_check(label):
-        for artist in toggle_map[label]:
-            artist.set_visible(not artist.get_visible())
-        fig2.canvas.draw_idle()
+        def on_check(label):
+            for artist in toggle_map[label]:
+                artist.set_visible(not artist.get_visible())
+            fig2.canvas.draw_idle()
 
-    check.on_clicked(on_check)
-    fig2._harness_check = check  # keep the widget alive
+        check.on_clicked(on_check)
+        fig2._harness_check = check  # keep the widget alive
     figures["topdown"] = fig2
 
     # ---- 3D, z = time ----------------------------------------------------

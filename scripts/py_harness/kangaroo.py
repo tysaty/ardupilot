@@ -152,21 +152,18 @@ def _rand_segments(seed, start_n, start_e, radius_m, length_m, width_m, speed_ms
     unlike the Lua which seeded from ``millis()``).
     """
     rng = random.Random(seed)
-    segments = []
-    t0 = 0.0
-    pos_n, pos_e = start_n, start_e
+    legs, t0 = [], 0.0
     while t0 < horizon_s:
+        # Draw order is load-bearing: mode, then heading, then duration. Changing
+        # it changes every seeded trajectory (`A-SW-003`).
         mode = rng.choice(MODES)
         heading = rng.uniform(0.0, 360.0)
         dur = rng.uniform(min_seg_s, max_seg_s)
-        sub = _sub_state_fn(mode, heading, radius_m, length_m, width_m, speed_ms)
-        s0n, s0e, _, _ = sub(0.0)
-        off_n, off_e = pos_n - s0n, pos_e - s0e
-        segments.append((t0, t0 + dur, sub, off_n, off_e))
-        en, ee, _, _ = sub(dur)
-        pos_n, pos_e = en + off_n, ee + off_e
+        legs.append((dur, mode, heading, speed_ms))
         t0 += dur
-    return segments
+    # Same chaining engine as the scripted form (`TASK-029`); random legs in,
+    # continuous segments out.
+    return make_segments(legs, start_n, start_e, radius_m, length_m, width_m)
 
 
 def _build_rand(seed, heading_deg, fwd_m, disp_m, radius_m, length_m, width_m,
@@ -181,20 +178,96 @@ def _build_rand(seed, heading_deg, fwd_m, disp_m, radius_m, length_m, width_m,
     segments = _rand_segments(seed, start_n, start_e, radius_m, length_m, width_m,
                               speed_ms, min_seg_s, max_seg_s, horizon_s)
 
+    return segments_callable(segments)
+
+
+#: One scripted leg. ``speed_ms`` is **per segment** — the whole point of the
+#: scripted form, and the thing `kangaroo_rand` cannot express (it carries one
+#: speed for the entire run).
+SEGMENT_FIELDS = ("duration_s", "mode", "heading_deg", "speed_ms")
+
+
+def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
+                  width_m=150.0, t0=0.0):
+    """Chain ``legs`` into continuous segments starting at ``(start_n, start_e)``.
+
+    ``legs`` is a sequence of ``(duration_s, mode, heading_deg, speed_ms)``. Each
+    segment carries a positional offset so it **begins exactly where the previous
+    ended**: position is continuous across a switch and only velocity steps, which
+    is what a manoeuvre is (``TASK-029``).
+
+    This is the engine `kangaroo_rand` has always used (`_rand_segments`), lifted
+    out so the scripted and random forms share one implementation rather than
+    growing two. The difference is only where the legs come from.
+
+    Returns ``[(t_start, t_end, sub_state, off_n, off_e), ...]``.
+
+    Raises:
+        ValueError: For an empty leg list, a non-positive duration, a negative
+            speed, or an unknown mode.
+    """
+    if not legs:
+        raise ValueError("need at least one leg")
+    segments = []
+    t, pos_n, pos_e = float(t0), float(start_n), float(start_e)
+    for i, leg in enumerate(legs):
+        dur, mode, heading_deg, speed_ms = leg
+        if dur <= 0.0:
+            raise ValueError("leg %d: duration must be > 0, got %r" % (i, dur))
+        if speed_ms < 0.0:
+            raise ValueError("leg %d: speed must be >= 0, got %r" % (i, speed_ms))
+        mode = str(mode).lower()
+        if mode not in MODES:
+            raise ValueError("leg %d: unknown mode %r; use one of %s"
+                             % (i, mode, ", ".join(MODES)))
+        sub = _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m,
+                            speed_ms)
+        s0n, s0e, _, _ = sub(0.0)
+        off_n, off_e = pos_n - s0n, pos_e - s0e
+        segments.append((t, t + dur, sub, off_n, off_e))
+        en, ee, _, _ = sub(dur)
+        pos_n, pos_e = en + off_n, ee + off_e
+        t += dur
+    return segments
+
+
+def segments_callable(segments):
+    """Wrap segments into a ``kangaroo(t) -> (n, e, vn, ve)`` callable.
+
+    Outside the scheduled span the nearest segment is clamped, so a run that
+    outlasts its schedule holds the last leg rather than failing or teleporting.
+    """
     def kangaroo(t):
         seg = None
         for s in segments:
             if s[0] <= t < s[1]:
                 seg = s
                 break
-        if seg is None:                      # before 0 or past the horizon: clamp
-            seg = segments[-1]
+        if seg is None:
+            seg = segments[-1] if t >= segments[-1][1] else segments[0]
             t = min(max(t, seg[0]), seg[1])
         t_start, _t_end, sub, off_n, off_e = seg
         n, e, vn, ve = sub(t - t_start)
         return n + off_n, e + off_e, vn, ve
-
     return kangaroo
+
+
+def build_scripted(legs, heading_deg=0.0, fwd_m=300.0, disp_m=0.0,
+                   radius_m=150.0, length_m=300.0, width_m=150.0, t0=0.0,
+                   start_n=None, start_e=None):
+    """A kangaroo following an explicit schedule of legs (``TASK-029``).
+
+    The authored counterpart to ``kangaroo_rand``: same continuity guarantees and
+    the same callable shape the harness already accepts, but the legs are declared
+    rather than drawn from a seeded random source.
+
+    ``start_n``/``start_e`` override the ``heading_deg``/``fwd_m``/``disp_m``
+    placement, which is what an interactive relocation needs (``TASK-008``).
+    """
+    if start_n is None or start_e is None:
+        start_n, start_e = heading_frame_offset(heading_deg, fwd_m, disp_m)
+    return segments_callable(
+        make_segments(legs, start_n, start_e, radius_m, length_m, width_m, t0))
 
 
 def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
