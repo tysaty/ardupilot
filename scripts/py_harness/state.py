@@ -258,6 +258,10 @@ class Harness:
                 "guidance_n_m": gn,
                 "guidance_e_m": ge,
                 "infeasible": self.infeasible,
+                # The algorithm's own reported state (phase, direction, ...).
+                # Recorded so an offline render can show what the algorithm was
+                # doing, not just where the aircraft went (TASK-029 U3).
+                "algorithm_state": result.get("algorithm_state"),
                 # Look-ahead comparison data (TASK-017): the prediction the
                 # algorithm aimed at, and the raw estimate. None when no estimator.
                 "target_est_n_m": self.target_est["n_m"] if self.target_est else None,

@@ -39,6 +39,7 @@ import math
 from . import algorithms
 from . import kangaroo as kang
 from . import metrics
+from . import zone as zone_mod
 from .config import HarnessConfig
 from .interface import NoSolution
 from .state import Harness, PlaneState, TargetState
@@ -69,7 +70,8 @@ class ScenarioSession:
     def __init__(self, legs=None, algorithm=DEFAULT_ALGORITHM, config=None,
                  start_range_m=300.0, plane_heading_deg=0.0,
                  target_n_m=None, target_e_m=None, radius_m=150.0,
-                 length_m=300.0, width_m=150.0):
+                 length_m=300.0, width_m=150.0, zone=None, contain_target=True,
+                 containment_margin_m=None):
         """
         Args:
             legs: Initial schedule, ``[(duration_s, mode, heading_deg, speed_ms)]``.
@@ -81,9 +83,31 @@ class ScenarioSession:
             target_n_m, target_e_m: Explicit target placement, overriding
                 ``start_range_m``.
             radius_m, length_m, width_m: Circle/rectangle mode parameters.
+            zone: Optional :class:`~zone.InclusionZone` bounding the run
+                (``TASK-032``). Defaults to a 2 km square about the origin. Pass
+                ``False`` for an unbounded run.
+            contain_target: Turn the kangaroo back at the boundary. The aircraft
+                is **never** steered by the zone — that would be a guidance change
+                (``VR-014``); its excursions are measured instead.
+            containment_margin_m: How far **inside** the boundary the kangaroo is
+                turned. Defaults to ``orbit_radius_m``, because the aircraft
+                orbits at that radius about the target: containing the target to
+                the bare boundary leaves the aircraft swinging up to one orbit
+                radius outside it (measured: 66.9 m outside a 2 km square with a
+                70 m ring). Insetting by the ring keeps **both** actors inside,
+                which is what the zone is for, without steering the aircraft.
         """
         self.config = config or HarnessConfig()
         self.algorithm_name = algorithm
+        #: The operating-area bound (`TASK-032`). ``None`` = unbounded.
+        self.zone = (None if zone is False
+                     else (zone or zone_mod.InclusionZone()))
+        self.contain_target = bool(contain_target)
+        self.containment_margin_m = (
+            float(self.config.orbit_radius_m) if containment_margin_m is None
+            else float(containment_margin_m))
+        #: Times at which the zone turned the kangaroo back.
+        self.containment_events = []
         self.radius_m = float(radius_m)
         self.length_m = float(length_m)
         self.width_m = float(width_m)
@@ -137,12 +161,41 @@ class ScenarioSession:
         for _ in range(int(n)):
             if self.stopped_reason:
                 return False
+            self._contain_target()
             try:
                 self.harness.step()
             except NoSolution as exc:
                 self.stopped_reason = str(exc)
                 return False
         return True
+
+    def _contain_target(self):
+        """Turn the kangaroo back before it leaves the zone (``TASK-032``).
+
+        Applied through :meth:`apply_change`, so containment is an ordinary
+        manoeuvre: position stays continuous, the turn is logged, it appears in
+        the exported schedule, and it is reproducible on replay. A stationary or
+        already-inbound target is left alone.
+
+        The aircraft is deliberately untouched — see the module docstring.
+        """
+        if self.zone is None or not self.contain_target:
+            return
+        tn, te = self.target_position()
+        leg = self.current_leg()
+        speed = leg[3]
+        if speed <= 0.0:
+            return
+        heading = leg[2]
+        margin = self.containment_margin_m
+        if not self.zone.would_exit(tn, te, heading, speed, self.config.dt_s,
+                                    margin_m=margin):
+            return
+        turned = self.zone.reflect_heading_deg(tn, te, heading, margin_m=margin)
+        if abs((turned - heading + 180.0) % 360.0 - 180.0) < 1e-9:
+            return          # reflection changed nothing; do not log a no-op
+        self.containment_events.append(self.t_s)
+        self.apply_change(heading_deg=turned, source="zone")
 
     def run(self, duration_s):
         """Advance ``duration_s`` seconds, or until the run stops."""
@@ -344,6 +397,20 @@ class ScenarioSession:
                             if settled_at is not None else None,
             })
         return out
+
+    def zone_report(self):
+        """Breach summary for both actors, or ``None`` when unbounded.
+
+        The aircraft's figures are the interesting ones: the kangaroo is contained
+        by construction, so a target breach would indicate a containment bug,
+        while an aircraft breach is a **finding about the guidance law** — it
+        followed a contained target out of the area.
+        """
+        if self.zone is None:
+            return None
+        report = self.zone.breach_summary(self.history)
+        report["containment_turns"] = len(self.containment_events)
+        return report
 
     def steady_state(self):
         """Steady-state ring statistics for the run (``TASK-027``)."""

@@ -85,6 +85,11 @@ _KANG_FLAGS = {
     "width_m": "--kang-width-m",
     "speed_ms": "--kang-speed-ms",
     "seed": "--kang-seed",
+    # Elastic profile (TASK-030). `speed_ms` is the fast phase.
+    "elastic_base": "--elastic-base",
+    "elastic_slow_factor": "--elastic-slow-factor",
+    "elastic_hold_s": "--elastic-hold-s",
+    "elastic_ramp_s": "--elastic-ramp-s",
 }
 
 # Kangaroo keys whose flag takes an int, not a float.
@@ -191,8 +196,10 @@ def spec_to_argv(spec):
     _reject_unknown("kangaroo", kang, _KANG_FLAGS)
     if "mode" in kang:
         argv += ["--kang-mode", str(kang["mode"])]
+    if "elastic_base" in kang:
+        argv += ["--elastic-base", str(kang["elastic_base"])]
     for key, flag in _KANG_FLAGS.items():
-        if key == "mode" or key not in kang:
+        if key in ("mode", "elastic_base") or key not in kang:
             continue
         if key in _KANG_INT_FLAGS:
             argv += [flag, str(int(kang[key]))]

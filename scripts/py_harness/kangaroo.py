@@ -36,7 +36,12 @@ MODES = ("point", "straight", "circle", "rectangle")
 RAND_MODE = "kangaroo_rand"
 
 #: Everything selectable via ``--kang-mode``.
-ALL_MODES = MODES + (RAND_MODE,)
+ALL_MODES = MODES + (RAND_MODE, "elastic")
+
+#: Modes a scripted leg or a GUI control may select. `kangaroo_rand` is excluded
+#: because it is itself a schedule, and nesting one inside a leg would be
+#: ambiguous about which schedule owns the target.
+LEG_MODES = MODES + ("elastic",)
 
 
 def heading_frame_offset(heading_deg, fwd_m, disp_m):
@@ -137,6 +142,13 @@ def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms):
         return lambda t: straight_state(t, heading_deg, 0.0, 0.0, speed_ms)
     if mode == "circle":
         return lambda t: circle_state(t, heading_deg, 0.0, 0.0, radius_m, speed_ms)
+    if mode == ELASTIC_MODE:
+        # A scripted/interactive elastic leg: the leg's speed is the fast phase,
+        # over a straight base, using the module defaults for the profile shape
+        # (TASK-030). A different base or shape is a `build()` call.
+        return lambda t: elastic_state(
+            t, "straight", heading_deg, 0.0, 0.0, radius_m, length_m, width_m,
+            speed_ms * ELASTIC_SLOW_FACTOR, speed_ms)
     return lambda t: rectangle_state(t, heading_deg, 0.0, 0.0, length_m, width_m,
                                      speed_ms)
 
@@ -181,6 +193,162 @@ def _build_rand(seed, heading_deg, fwd_m, disp_m, radius_m, length_m, width_m,
     return segments_callable(segments)
 
 
+# --------------------------------------------------------------------------
+# Elastic speed profile (``TASK-030``)
+# --------------------------------------------------------------------------
+# A kangaroo does not travel at a constant pace: it surges, holds, eases, holds.
+# The four base modes above are all parameterised by **arc length** — position
+# depends on ``speed * t`` and nothing else — so a varying pace can be applied to
+# any of them by replacing that product with an integrated distance. Elastic is
+# therefore a **modifier over the existing modes**, not a fourth straight-line
+# variant: `elastic` + `circle` is a kangaroo bounding round a circle.
+#
+# The profile holds the slow speed, ramps up, holds the fast speed, ramps down,
+# and repeats. Ramps use the same ``smoothstep`` the weave uses (``TASK-004``),
+# so acceleration is finite rather than a step.
+
+#: Default fraction of the commanded speed the slow phase runs at.
+ELASTIC_SLOW_FACTOR = 0.3
+
+#: Default seconds held at each speed before ramping to the other.
+ELASTIC_HOLD_S = 8.0
+
+#: Default seconds spent ramping between them.
+ELASTIC_RAMP_S = 4.0
+
+#: Meta-mode name, alongside ``kangaroo_rand``.
+ELASTIC_MODE = "elastic"
+
+
+def smoothstep(q):
+    """``3q^2 - 2q^3`` on ``[0, 1]``. Same curve the weave uses."""
+    if q <= 0.0:
+        return 0.0
+    if q >= 1.0:
+        return 1.0
+    return q * q * (3.0 - 2.0 * q)
+
+
+def _smoothstep_integral(q):
+    """``integral of smoothstep from 0 to q`` = ``q^3 - q^4/2``, for ``q`` in [0,1].
+
+    Needed because position is the integral of speed: a closed form keeps the
+    mode a pure function of ``t``, with no accumulator and no per-tick state
+    (``VR-015``, ``A-VAL-003``).
+    """
+    if q <= 0.0:
+        return 0.0
+    if q >= 1.0:
+        return 0.5
+    return q ** 3 - 0.5 * q ** 4
+
+
+def elastic_period_s(hold_s, ramp_s):
+    """One full slow-ramp-fast-ramp cycle, seconds."""
+    return 2.0 * (hold_s + ramp_s)
+
+
+def elastic_speed(t, slow_ms, fast_ms, hold_s=ELASTIC_HOLD_S,
+                  ramp_s=ELASTIC_RAMP_S):
+    """Speed at time ``t``: hold slow, ramp up, hold fast, ramp down, repeat.
+
+    Raises:
+        ValueError: For negative speeds, a negative hold, or a non-positive ramp.
+    """
+    if slow_ms < 0.0 or fast_ms < 0.0:
+        raise ValueError("elastic speeds must be >= 0, got %r and %r"
+                         % (slow_ms, fast_ms))
+    if hold_s < 0.0:
+        raise ValueError("elastic hold must be >= 0, got %r" % hold_s)
+    if ramp_s <= 0.0:
+        raise ValueError("elastic ramp must be > 0, got %r" % ramp_s)
+    span = fast_ms - slow_ms
+    u = t % elastic_period_s(hold_s, ramp_s)
+    if u < hold_s:
+        return slow_ms
+    u -= hold_s
+    if u < ramp_s:
+        return slow_ms + span * smoothstep(u / ramp_s)
+    u -= ramp_s
+    if u < hold_s:
+        return fast_ms
+    u -= hold_s
+    return fast_ms - span * smoothstep(u / ramp_s)
+
+
+def elastic_distance(t, slow_ms, fast_ms, hold_s=ELASTIC_HOLD_S,
+                     ramp_s=ELASTIC_RAMP_S):
+    """Distance travelled by time ``t`` under :func:`elastic_speed`, metres.
+
+    The closed-form integral of the profile. Over a whole cycle the mean speed is
+    exactly ``(slow + fast)/2``, because a smoothstep ramp contributes the same
+    as half its span held — which makes the mode's average pace predictable
+    rather than something to be measured.
+    """
+    if t <= 0.0:
+        return 0.0
+    span = fast_ms - slow_ms
+    period = elastic_period_s(hold_s, ramp_s)
+    per_cycle = 0.5 * (slow_ms + fast_ms) * period
+    whole, u = divmod(t, period)
+    dist = whole * per_cycle
+
+    take = min(u, hold_s)                          # slow hold
+    dist += slow_ms * take
+    u -= take
+    if u <= 0.0:
+        return dist
+
+    take = min(u, ramp_s)                          # ramp up
+    dist += slow_ms * take + span * ramp_s * _smoothstep_integral(take / ramp_s)
+    u -= take
+    if u <= 0.0:
+        return dist
+
+    take = min(u, hold_s)                          # fast hold
+    dist += fast_ms * take
+    u -= take
+    if u <= 0.0:
+        return dist
+
+    take = min(u, ramp_s)                          # ramp down
+    dist += fast_ms * take - span * ramp_s * _smoothstep_integral(take / ramp_s)
+    return dist
+
+
+def elastic_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m, length_m,
+                  width_m, slow_ms, fast_ms, hold_s=ELASTIC_HOLD_S,
+                  ramp_s=ELASTIC_RAMP_S):
+    """``base_mode`` travelled at an elastic pace (``TASK-030``).
+
+    The base mode is evaluated at **unit speed**, so its argument is arc length
+    directly and its velocity is the unit tangent; the elastic distance and speed
+    are then substituted in. That is why this works for ``straight``, ``circle``
+    and ``rectangle`` alike without any of them changing.
+
+    Raises:
+        ValueError: For ``point`` (a stationary target has no pace to vary), an
+            unknown base mode, or an invalid profile.
+    """
+    base_mode = str(base_mode).lower()
+    if base_mode == "point":
+        raise ValueError("elastic needs a moving base mode; 'point' is stationary")
+    if base_mode not in MODES:
+        raise ValueError("unknown elastic base mode %r; use one of %s"
+                         % (base_mode, ", ".join(m for m in MODES if m != "point")))
+    dist = elastic_distance(t, slow_ms, fast_ms, hold_s, ramp_s)
+    speed = elastic_speed(t, slow_ms, fast_ms, hold_s, ramp_s)
+    # Unit-speed base: its time argument is arc length, its velocity a unit vector.
+    if base_mode == "straight":
+        n, e, vn, ve = straight_state(dist, heading_deg, fwd_m, disp_m, 1.0)
+    elif base_mode == "circle":
+        n, e, vn, ve = circle_state(dist, heading_deg, fwd_m, disp_m, radius_m, 1.0)
+    else:
+        n, e, vn, ve = rectangle_state(dist, heading_deg, fwd_m, disp_m,
+                                       length_m, width_m, 1.0)
+    return n, e, vn * speed, ve * speed
+
+
 #: One scripted leg. ``speed_ms`` is **per segment** — the whole point of the
 #: scripted form, and the thing `kangaroo_rand` cannot express (it carries one
 #: speed for the entire run).
@@ -217,9 +385,9 @@ def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
         if speed_ms < 0.0:
             raise ValueError("leg %d: speed must be >= 0, got %r" % (i, speed_ms))
         mode = str(mode).lower()
-        if mode not in MODES:
+        if mode not in LEG_MODES:
             raise ValueError("leg %d: unknown mode %r; use one of %s"
-                             % (i, mode, ", ".join(MODES)))
+                             % (i, mode, ", ".join(LEG_MODES)))
         sub = _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m,
                             speed_ms)
         s0n, s0e, _, _ = sub(0.0)
@@ -272,13 +440,19 @@ def build_scripted(legs, heading_deg=0.0, fwd_m=300.0, disp_m=0.0,
 
 def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
           length_m=300.0, width_m=150.0, speed_ms=5.0, seed=None,
-          rand_min_s=5.0, rand_max_s=20.0, rand_horizon_s=3600.0):
+          rand_min_s=5.0, rand_max_s=20.0, rand_horizon_s=3600.0,
+          elastic_base="straight", elastic_slow_factor=ELASTIC_SLOW_FACTOR,
+          elastic_slow_ms=None, elastic_hold_s=ELASTIC_HOLD_S,
+          elastic_ramp_s=ELASTIC_RAMP_S):
     """Bind a mode's parameters into a ``kangaroo(t) -> (n, e, vn, ve)`` callable.
 
     The bound parameters are immutable constants (not module state), so the
     deterministic closures transliterate to Lua without breaking ``VR-015``.
     ``kangaroo_rand`` (`TASK-021`) switches among the deterministic modes at random
     intervals; it is **reproducible from ``seed``** and continuous in position.
+    ``elastic`` (`TASK-030`) applies a surge-and-ease speed profile over a moving
+    base mode: ``speed_ms`` is the fast phase and the slow phase is
+    ``elastic_slow_factor`` of it, so one commanded speed still describes it.
 
     Raises:
         ValueError: For an unknown mode (or an invalid mode parameter, from the
@@ -298,6 +472,14 @@ def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
     if mode == RAND_MODE:
         return _build_rand(seed, heading_deg, fwd_m, disp_m, radius_m, length_m,
                            width_m, speed_ms, rand_min_s, rand_max_s, rand_horizon_s)
+    if mode == ELASTIC_MODE:
+        # `speed_ms` is the FAST speed; the slow phase is a fraction of it, so a
+        # single commanded speed still parameterises the mode (TASK-030).
+        slow = (elastic_slow_ms if elastic_slow_ms is not None
+                else speed_ms * elastic_slow_factor)
+        return lambda t: elastic_state(
+            t, elastic_base, heading_deg, fwd_m, disp_m, radius_m, length_m,
+            width_m, slow, speed_ms, elastic_hold_s, elastic_ramp_s)
     raise ValueError(
         "unknown kangaroo mode %r; use one of %s" % (mode, ", ".join(ALL_MODES))
     )

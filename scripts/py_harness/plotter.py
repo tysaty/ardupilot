@@ -285,7 +285,7 @@ def any_infeasible(runs):
 # --------------------------------------------------------------------------
 
 def draw_scene(ax, history, orbit_radius_m=None, markers=None, upto=None,
-               track_colour="#1F6FEB", show_ring=True):
+               track_colour="#1F6FEB", show_ring=True, zone_corners=None):
     """Draw one frame of a run onto ``ax``: track, target, ring, manoeuvre marks.
 
     The **shared drawing primitive** (``TASK-029``): the live interactive view and
@@ -302,12 +302,20 @@ def draw_scene(ax, history, orbit_radius_m=None, markers=None, upto=None,
         upto: Draw only up to this index (the live/animated case). None = all.
         track_colour: Aircraft track colour.
         show_ring: Draw the standoff ring about the current target position.
+        zone_corners: Optional closed ``[(east, north), ...]`` ring — the
+            inclusion-zone boundary (``TASK-032``). Passed as plain points so
+            this module still knows nothing about the harness.
     """
     if not history:
         return
     end = len(history) if upto is None else max(1, min(int(upto), len(history)))
     hist = history[:end]
     cur = hist[-1]
+
+    if zone_corners:
+        ax.plot([p[0] for p in zone_corners], [p[1] for p in zone_corners],
+                color="#9E2F27", linewidth=1.4, linestyle=(0, (7, 4)),
+                label="inclusion zone", zorder=1)
 
     ax.plot([s["target_e_m"] for s in hist], [s["target_n_m"] for s in hist],
             color="#6B7A85", linewidth=1.0, linestyle=(0, (4, 3)),
@@ -326,7 +334,8 @@ def draw_scene(ax, history, orbit_radius_m=None, markers=None, upto=None,
             markerfacecolor="white", markeredgecolor=track_colour,
             markeredgewidth=2.0, linestyle="none")
 
-    for t_mark in (markers or []):
+    # Alternate the label offset so adjacent manoeuvre marks do not overlap.
+    for mark_index, t_mark in enumerate(markers or []):
         sample = None
         for s in hist:
             if s["t_s"] >= t_mark:
@@ -342,8 +351,9 @@ def draw_scene(ax, history, orbit_radius_m=None, markers=None, upto=None,
             hdg = math.degrees(math.atan2(sample["target_ve_ms"],
                                           sample["target_vn_ms"])) % 360.0
             label += "  %.0f m/s @ %.0f deg" % (spd, hdg)
+        dy = 8 if mark_index % 2 == 0 else -14
         ax.annotate(label, (sample["target_e_m"], sample["target_n_m"]),
-                    textcoords="offset points", xytext=(7, 6), fontsize=8,
+                    textcoords="offset points", xytext=(8, dy), fontsize=8,
                     color="#C2571C")
 
 

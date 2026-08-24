@@ -112,6 +112,26 @@ def build_parser():
     parser.add_argument("--kang-speed-ms", type=float, default=5.0,
                         help="Kangaroo speed, m/s (straight/circle/rectangle).")
     parser.add_argument(
+        "--elastic-base", choices=("straight", "circle", "rectangle"),
+        default="straight",
+        help="Base mode the elastic pace is applied over (TASK-030). Elastic is "
+        "a modifier, not a fourth straight-line mode.",
+    )
+    parser.add_argument(
+        "--elastic-slow-factor", type=float, default=None,
+        help="Slow-phase speed as a fraction of --kang-speed-ms (default 0.3). "
+        "--kang-speed-ms is the FAST phase.",
+    )
+    parser.add_argument(
+        "--elastic-hold-s", type=float, default=None,
+        help="Seconds held at each speed before ramping (default 8).",
+    )
+    parser.add_argument(
+        "--elastic-ramp-s", type=float, default=None,
+        help="Seconds spent ramping between them (default 4). Ramps use "
+        "smoothstep, so acceleration is finite.",
+    )
+    parser.add_argument(
         "--estimate", action="store_true",
         help="Run the state estimator (TASK-012) and feed algorithms the "
         "estimated target via the snapshot. Required for the heading_a family.",
@@ -296,6 +316,18 @@ def follow_stats(history):
     }
 
 
+def _elastic_kwargs(args):
+    """Elastic-profile overrides from the CLI, omitting unset ones (``TASK-030``)."""
+    out = {"elastic_base": getattr(args, "elastic_base", "straight")}
+    for cli, key in (("elastic_slow_factor", "elastic_slow_factor"),
+                     ("elastic_hold_s", "elastic_hold_s"),
+                     ("elastic_ramp_s", "elastic_ramp_s")):
+        value = getattr(args, cli, None)
+        if value is not None:
+            out[key] = value
+    return out
+
+
 def build_config(args, weave_eta=None):
     overrides = {}
     if args.airspeed_ms is not None:
@@ -382,6 +414,7 @@ def main(argv=None):
                 radius_m=args.kang_radius_m, length_m=args.kang_length_m,
                 width_m=args.kang_width_m, speed_ms=args.kang_speed_ms,
                 seed=args.kang_seed,
+                **_elastic_kwargs(args)
             )
             target_n0, target_e0, target_vn, target_ve = kang(0.0)
         except ValueError as exc:
