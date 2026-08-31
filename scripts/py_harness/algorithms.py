@@ -30,6 +30,7 @@ geometry bug.
 
 import math
 
+from .geometry import adaptive_db_circle as adaptive_db_circle_geom
 from .geometry import amplitude as amplitude_geom
 from .geometry import amplitude_orbit as amplitude_orbit_geom
 from .geometry import dubins as dubins_geom
@@ -396,6 +397,13 @@ class DubinsTargetOrbitAlgorithm(GeometricAlgorithm):
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
+        # The pose the returned approach was actually built from. Present in the
+        # approach phase only; the orbit phase commits no curve.
+        committed = g.get("plan")
+        plan_valid = committed is not None
+        if not plan_valid:
+            committed = {"px": px, "py": py, "psi": psi_i}
+
         state = {
             "phase": g["phase"],
             "direction": g["direction"],
@@ -503,6 +511,168 @@ class DubinsOrbitAlgorithm(GeometricAlgorithm):
         }
 
 
+class AdaptiveDbCircleAlgorithm(GeometricAlgorithm):
+    """CS-onto-orbit Dubins about a **predicted** target, replanned on an interval (``TASK-033``).
+
+    The extension of :class:`DubinsTargetOrbitAlgorithm`, which is left untouched
+    and still selectable. Two differences, and nothing else:
+
+    1. **The ring is centred on the prediction.** It reads ``target_est`` — which
+       ``state.py`` has already projected ``lookahead_steps`` (``k_horizon``) control
+       intervals ahead on constant velocity (``TASK-017``) — and centres the whole
+       construction on it: the target-centred final circle, the tangent, the
+       tangency point and the orbit continuation. So the aircraft plans against
+       where the kangaroo will be, not a position it can only ever arrive behind.
+    2. **The plan is committed for ``replan_every`` (``n_replan``) ticks.** At a replan
+       instant a new plan is generated and **taken unconditionally**; between
+       replan instants the held plan is flown.
+
+    **No cost-based selection.** There is no candidate set, no cost function, no
+    scoring of the new plan against the active one, no hysteresis and no cooldown.
+    The tick counter reaching ``n_replan`` is the only thing that changes the path. This
+    is a *commitment interval*, not the replanning *decision* ``ADR-001`` removed.
+
+    **The estimator is required.** Unlike the other adapters this does **not** use
+    :func:`_target_ea`, which silently falls back to the true target. Without an
+    estimator there is no prediction, so the run would quietly become plain
+    ``dubins_target_orbit`` under a different name and be mistaken for evidence.
+    It raises instead, naming ``--estimate``.
+
+    All state travels through ``algorithm_state`` (``VR-015``, ``A-VAL-003``): the
+    held centre, the commit pose, the tick counter and the previous guidance point.
+    The adapter owns the replan clock; the geometry holds none.
+
+    Reported per tick: ``phase``, ``direction``, ``curvature``, ``ring_angle_rad``
+    (orbit phase only), ``replanned``, ``ticks_since_replan``, the held centre, the
+    prediction lead, and ``replan_step_m`` on replan ticks where it is measurable.
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
+    ``delta_psi_rad``, ``delta_d_m``, ``orbit_precompensate``, ``replan_every``,
+    ``hold_policy``.
+    """
+
+    name = "adaptive_db_circle"
+    holds_orbit = True
+    requires_estimate = True
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+
+        est = snapshot.get("target_est")
+        if est is None:
+            raise NoSolution(
+                "adaptive_db_circle requires the state estimator: it centres the "
+                "ring on the predicted target and has no present-position "
+                "fallback. Re-run with --estimate (and --lookahead-steps k for a "
+                "non-zero horizon).")
+
+        n_replan = int(cfg["replan_every"])
+        policy = cfg["hold_policy"]
+        st = snapshot.get("algorithm_state") or {}
+
+        # Replan clock. ticks_since_replan is 0 on the tick the plan was committed.
+        # No plan yet (first tick) is a replan; otherwise the counter reaching m is.
+        prev_ticks = st.get("ticks_since_replan")
+        replanned = prev_ticks is None or (prev_ticks + 1) >= n_replan
+
+        if replanned:
+            cx, cy = est["e_m"], est["n_m"]
+            # None tells the geometry to commit the live pose. Unconditionally:
+            # there is no comparison with the plan being replaced (D4).
+            plan = None
+            ticks = 0
+        else:
+            cx, cy = st["centre_e_m"], st["centre_n_m"]
+            # Carry the committed plan forward only while it is still a valid
+            # approach commit. A replan instant that falls in the ORBIT phase
+            # commits no approach curve (there is none to commit), so its stored
+            # pose can be inside the ring; re-entering the approach phase with it
+            # would ask for a tangent from inside the ring, which has no solution.
+            # Passing None re-commits from the live pose, which the phase test
+            # guarantees is outside the ring. The aircraft crosses the boundary
+            # repeatedly while settling, so this is the ordinary case, not a rare
+            # one.
+            if st.get("plan_valid"):
+                plan = {"px": st["plan_e_m"], "py": st["plan_n_m"],
+                        "psi": st["plan_psi_rad"]}
+            else:
+                plan = None
+            ticks = prev_ticks + 1
+
+        try:
+            g = adaptive_db_circle_geom.guidance(
+                px, py, psi_i, cx, cy, plan,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+                policy, cfg["orbit_precompensate"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+
+        # The pose the returned approach was actually built from. Present in the
+        # approach phase only; the orbit phase commits no curve.
+        committed = g.get("plan")
+        plan_valid = committed is not None
+        if not plan_valid:
+            committed = {"px": px, "py": py, "psi": psi_i}
+
+        state = {
+            "phase": g["phase"],
+            "direction": g["direction"],
+            "curvature": g["curvature"],
+            "replanned": replanned,
+            "ticks_since_replan": ticks,
+            "centre_n_m": cy,
+            "centre_e_m": cx,
+            # How far ahead of the true kangaroo the orbited centre sits. A known
+            # designed offset, not an error - reported so it is never read as one.
+            "prediction_lead_m": math.hypot(cx - snapshot["target_e_m"],
+                                            cy - snapshot["target_n_m"]),
+            # The committed pose, carried forward so the held plan is rebuilt
+            # identically next tick. Parameters, never a sampled point list.
+            "plan_n_m": committed["py"],
+            "plan_e_m": committed["px"],
+            "plan_psi_rad": committed["psi"],
+            "plan_valid": plan_valid,
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+        }
+        if "ring_angle_rad" in g:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
+
+        # The FR-011 / PR-008 quantity: the guidance-point jump caused by the plan
+        # changing, isolated from the aircraft's own motion by evaluating the OLD
+        # plan at the SAME pose. Omitted (rather than faked as 0.0) when there is
+        # no old plan or it no longer solves from here.
+        if replanned and prev_ticks is not None:
+            old_plan = None
+            if st.get("plan_valid"):
+                old_plan = {"px": st["plan_e_m"], "py": st["plan_n_m"],
+                            "psi": st["plan_psi_rad"]}
+            try:
+                old = adaptive_db_circle_geom.guidance(
+                    px, py, psi_i, st["centre_e_m"], st["centre_n_m"], old_plan,
+                    cfg["orbit_radius_m"], cfg["turn_radius_m"],
+                    cfg["look_ahead_m"], cfg["delta_psi_rad"], cfg["delta_d_m"],
+                    policy, cfg["orbit_precompensate"],
+                )
+            except ValueError:
+                pass
+            else:
+                state["replan_step_m"] = math.hypot(g["gx"] - old["gx"],
+                                                    g["gy"] - old["gy"])
+        elif not replanned:
+            state["replan_step_m"] = 0.0
+
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
+
+
 class HeadingAAlgorithm(GeometricAlgorithm):
     """Heading-alignment fly-to (``TASK-010``): aim at the estimated kangaroo.
 
@@ -567,6 +737,7 @@ REGISTRY = {
     DubinsTargetOrbitAlgorithm.name: DubinsTargetOrbitAlgorithm,
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
+    AdaptiveDbCircleAlgorithm.name: AdaptiveDbCircleAlgorithm,
     HeadingAAlgorithm.name: HeadingAAlgorithm,
     HeadingAOrbitAlgorithm.name: HeadingAOrbitAlgorithm,
     # Alias: continuous_weave is the amplitude weave (ACT-2026-06-25-04).
@@ -581,7 +752,7 @@ REGISTRY = {
 IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
                "var_amplitude_orbit", "dubins", "dubins_target_circle",
                "dubins_target_orbit", "orbit", "dubins_orbit", "heading_a",
-               "heading_a_orbit")
+               "heading_a_orbit", "adaptive_db_circle")
 
 
 def build(name, config):
@@ -635,4 +806,9 @@ def config_dict(cfg):
         "weave_eta": cfg.weave_eta,
         "weave_vaw_lead_s": cfg.weave_vaw_lead_s,
         "orbit_precompensate": cfg.orbit_precompensate,
+        # TASK-033. replan_every is a whole tick count and hold_policy an
+        # enumerated string; both map onto Lua scalars, so the plain-dict
+        # contract (DEC-2026-06-25-04) still holds.
+        "replan_every": cfg.replan_every,
+        "hold_policy": cfg.hold_policy,
     }

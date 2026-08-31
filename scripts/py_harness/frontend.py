@@ -59,10 +59,15 @@ _CONFIG_FLAGS = {
     "lookahead_steps": "--lookahead-steps",
     "look_ahead_m": "--look-ahead-m",
     "dt_s": "--dt-s",
+    "replan_every": "--replan-every",
+    "hold_policy": "--hold-policy",
 }
 
 # Config keys whose flag takes an int, not a float (emitted without decimals).
-_CONFIG_INT_FLAGS = ("lookahead_steps",)
+_CONFIG_INT_FLAGS = ("lookahead_steps", "replan_every")
+
+# Config keys whose flag takes a string, emitted verbatim.
+_CONFIG_STR_FLAGS = ("hold_policy",)
 
 _PLANE_FLAGS = {"heading_deg": "--plane-heading-deg"}
 
@@ -175,6 +180,8 @@ def spec_to_argv(spec):
         if key in config:
             if key in _CONFIG_INT_FLAGS:
                 argv += [flag, str(int(config[key]))]
+            elif key in _CONFIG_STR_FLAGS:
+                argv += [flag, str(config[key])]
             else:
                 argv += [flag, repr(float(config[key]))]
 

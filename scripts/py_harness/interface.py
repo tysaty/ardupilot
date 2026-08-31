@@ -128,6 +128,19 @@ class GeometricAlgorithm:
     #: fly-to algorithms leave this False.
     holds_orbit = False
 
+    #: True when the algorithm cannot run without a state estimator, because it
+    #: plans against the *predicted* target and has no present-position fallback
+    #: (``TASK-033``). Most algorithms leave this False: they read ``target_est``
+    #: when it is there and the true target otherwise, so an estimator is optional.
+    #: An algorithm that sets this must raise ``NoSolution`` when ``target_est`` is
+    #: ``None`` rather than reading the truth, or a run without ``--estimate``
+    #: silently becomes a different algorithm and is mistaken for evidence.
+    #:
+    #: Declared as a tested property rather than encoded in the name, following
+    #: :attr:`holds_orbit` — the runner and the tests read the flag, so nothing
+    #: branches on algorithm identity (``VR-014``).
+    requires_estimate = False
+
 
     #: Registry name used to select this algorithm. Subclasses must override.
     name = None

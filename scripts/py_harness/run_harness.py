@@ -21,7 +21,7 @@ import math
 import sys
 
 from . import algorithms, kangaroo, metrics, plotter
-from .config import HarnessConfig, InfeasibleConfiguration
+from .config import HOLD_POLICIES, HarnessConfig, InfeasibleConfiguration
 from .estimator import KalmanFilter
 from .geometry import dubins_orbit as dubins_orbit_geom
 from .state import Harness, PlaneState, TargetState
@@ -189,6 +189,22 @@ def build_parser():
         "staler carrot — pair a slow rate with a shorter --look-ahead-m.",
     )
     parser.add_argument(
+        "--replan-every", type=int, default=None,
+        help="Replan interval in whole control ticks (TASK-033). The committed "
+        "plan is regenerated every N steps and held in between; the replan "
+        "period is N * DT_S seconds. 1 = replan every tick (default). Read by "
+        "the adaptive_db_circle algorithm. This is NOT --dt-s: --dt-s coarsens "
+        "the aircraft's motion as well as the planning rate, --replan-every "
+        "changes only the planning rate.",
+    )
+    parser.add_argument(
+        "--hold-policy", choices=HOLD_POLICIES, default=None,
+        help="What adaptive_db_circle holds between replan instants (TASK-033). "
+        "'plan' (default) holds the predicted ring centre AND the committed CS "
+        "curve; 'centre_only' holds just the centre and re-solves the curve from "
+        "the live pose each tick.",
+    )
+    parser.add_argument(
         "--no-orbit-precomp",
         action="store_true",
         help="Disable the TASK-027 orbit guidance-ring pre-compensation and fly "
@@ -354,6 +370,10 @@ def build_config(args, weave_eta=None):
         overrides["look_ahead_m"] = args.look_ahead_m
     if args.dt_s is not None:
         overrides["dt_s"] = args.dt_s
+    if args.replan_every is not None:
+        overrides["replan_every"] = args.replan_every
+    if args.hold_policy is not None:
+        overrides["hold_policy"] = args.hold_policy
     if args.no_orbit_precomp:
         overrides["orbit_precompensate"] = False
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)
@@ -435,6 +455,19 @@ def main(argv=None):
     runs = []
     planned = []
     for algo_name, label, algo_cfg in pass_specs:
+        algorithm = algorithms.build(algo_name, algorithms.config_dict(algo_cfg))
+        # TASK-033: an algorithm that plans against the prediction has no
+        # present-position fallback. Refuse here, naming the flag, rather than
+        # letting the run stop on its first tick with a geometry error.
+        if getattr(algorithm, "requires_estimate", False) and not args.estimate:
+            print(
+                "REFUSED: --algorithm %s centres its ring on the predicted "
+                "target and has no present-position fallback, so it requires the "
+                "state estimator. Re-run with --estimate (and --lookahead-steps k "
+                "to set the horizon; k = 0 uses the current estimate)."
+                % algo_name, file=sys.stderr)
+            return 2
+
         harness = Harness(
             plane=PlaneState(
                 n_m=0.0,
@@ -448,7 +481,7 @@ def main(argv=None):
                 vn_ms=target_vn,
                 ve_ms=target_ve,
             ),
-            algorithm=algorithms.build(algo_name, algorithms.config_dict(algo_cfg)),
+            algorithm=algorithm,
             dt_s=cfg.dt_s,
             turn_radius_m=cfg.turn_radius_m,
             infeasible=bool(problems),
@@ -511,9 +544,34 @@ def main(argv=None):
                     print("    not settled (drift %.1f m across the tail) — the "
                           "achieved figure is not a held radius"
                           % ss["drift_m"])
+                # TASK-033: an algorithm that leads the target orbits a centre
+                # that is NOT the kangaroo, so the figures above (measured about
+                # the true target) include a designed offset. Report the ring it
+                # actually held alongside, labelled, so neither is read alone.
+                dual = metrics.dual_centre_stats(harness.history,
+                                                 cfg.orbit_radius_m)
+                if dual is not None and dual["mean_prediction_lead_m"] > 0.5:
+                    print("    ring actually held (predicted centre): RMS %.2f m,"
+                          " max %.2f m"
+                          % (dual["ring"]["rms_ring_error_m"],
+                             dual["ring"]["max_ring_error_m"]))
+                    print("    prediction lead %.1f m — the figures above are "
+                          "measured about the TRUE kangaroo and include it"
+                          % dual["mean_prediction_lead_m"])
                 if not cfg.orbit_precompensate:
                     print("    guidance-ring pre-compensation OFF (as-built law, "
                           "A-VAL-005 applies)")
+
+        # TASK-033: the FR-011/PR-008 quantity. Reported, not bounded — no
+        # anti-jitter mechanism exists; a future one would act on this.
+        steps = [s["algorithm_state"]["replan_step_m"] for s in harness.history
+                 if (s.get("algorithm_state") or {}).get("replanned")
+                 and "replan_step_m" in s["algorithm_state"]]
+        if steps:
+            print("  replanned %d times at %.2f Hz (every %d ticks); guidance-"
+                  "point step at replan: max %.2f m, mean %.2f m"
+                  % (len(steps), cfg.replan_rate_hz, cfg.replan_every,
+                     max(steps), sum(steps) / len(steps)))
 
         if harness.stopped_reason:
             print("  stopped early: %s" % harness.stopped_reason)
@@ -528,6 +586,11 @@ def main(argv=None):
                 # For the TASK-019 sweep: the metric catalogued against the horizon.
                 "min_orbit_distance_m": min_orbit_distance_m,
                 "lookahead_steps": cfg.lookahead_steps,
+                # TASK-033: the two variables under study, so any grid cell is
+                # reproducible from the saved run alone.
+                "replan_every": cfg.replan_every,
+                "hold_policy": cfg.hold_policy,
+                "dt_s": cfg.dt_s,
             })
             print("  saved %s" % path)
 

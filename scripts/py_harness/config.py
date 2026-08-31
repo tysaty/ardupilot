@@ -92,6 +92,23 @@ DT_S = 0.1
 #: on constant velocity, and guidance aims at the prediction. Serves FR-003.
 LOOKAHEAD_STEPS = 0
 
+#: Replan interval in whole control ticks (TASK-033). The committed plan is
+#: regenerated every this many steps and held in between; the replan period is
+#: REPLAN_EVERY * DT_S seconds and the rate its reciprocal. 1 = replan every tick
+#: (the default; unchanged behaviour). Distinct from DT_S, which is the
+#: integration step: varying DT_S coarsens the aircraft's motion as well as the
+#: planning rate, which is why the two are separate parameters.
+REPLAN_EVERY = 1
+
+#: What the adaptive CS-orbit holds between replan instants (TASK-033). "plan"
+#: holds the predicted ring centre and the committed CS curve; "centre_only"
+#: holds just the centre and re-solves the curve from the live pose each tick.
+#: Only the adaptive_db_circle algorithm reads it.
+HOLD_POLICY = "plan"
+
+#: Accepted values for HOLD_POLICY.
+HOLD_POLICIES = ("plan", "centre_only")
+
 #: Pre-compensate the orbit guidance ring for chord-cutting (TASK-027, Option A).
 #: True places the orbit guidance point on a virtual ring `R / cos(L/R)` so the
 #: circle actually *flown* is the commanded `orbit_radius_m`; False restores the
@@ -195,6 +212,8 @@ class HarnessConfig:
         "weave_vaw_lead_s",
         "lookahead_steps",
         "orbit_precompensate",
+        "replan_every",
+        "hold_policy",
         "_frozen",
     )
 
@@ -217,6 +236,8 @@ class HarnessConfig:
         weave_vaw_lead_s=WEAVE_VAW_LEAD_S,
         lookahead_steps=LOOKAHEAD_STEPS,
         orbit_precompensate=ORBIT_PRECOMPENSATE,
+        replan_every=REPLAN_EVERY,
+        hold_policy=HOLD_POLICY,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -236,6 +257,8 @@ class HarnessConfig:
         self.weave_vaw_lead_s = float(weave_vaw_lead_s)
         self.lookahead_steps = int(lookahead_steps)
         self.orbit_precompensate = bool(orbit_precompensate)
+        self.replan_every = int(replan_every)
+        self.hold_policy = str(hold_policy)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -290,6 +313,18 @@ class HarnessConfig:
                 "lookahead_steps must be >= 0 (0 disables the look-ahead), got %r"
                 % self.lookahead_steps
             )
+        if self.replan_every < 1:
+            raise ValueError(
+                "replan_every must be >= 1 whole control ticks (1 replans every "
+                "tick, which is the unchanged behaviour); the replan period is "
+                "replan_every * dt_s seconds. Got %r"
+                % self.replan_every
+            )
+        if self.hold_policy not in HOLD_POLICIES:
+            raise ValueError(
+                "hold_policy must be one of %s, got %r"
+                % (", ".join(repr(h) for h in HOLD_POLICIES), self.hold_policy)
+            )
 
     def __setattr__(self, name, value):
         if getattr(self, "_frozen", False):
@@ -321,6 +356,21 @@ class HarnessConfig:
         return required_bank_deg(
             self.orbit_radius_m, self.airspeed_ms, self.gravity_ms2
         )
+
+    @property
+    def replan_period_s(self):
+        """Seconds between replan instants, ``replan_every * dt_s``."""
+        return self.replan_every * self.dt_s
+
+    @property
+    def replan_rate_hz(self):
+        """Replan rate, Hz. Reported so a log states the frequency directly."""
+        return 1.0 / self.replan_period_s if self.replan_period_s > 0.0 else 0.0
+
+    @property
+    def lookahead_horizon_s(self):
+        """Prediction horizon in seconds, ``lookahead_steps * dt_s`` (``k * dt``)."""
+        return self.lookahead_steps * self.dt_s
 
     @property
     def turn_radius_feasible(self):
