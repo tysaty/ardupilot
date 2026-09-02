@@ -40,9 +40,9 @@ side-by-side comparison ``MTG-2026-06-25-01`` asked for and that a single
 matplotlib
 ----------
 Imported lazily inside :func:`plot_runs` only. Everything else here is pure and
-importable without it. **matplotlib is not installed in this environment, so
-:func:`plot_runs` has never executed**; the pure helpers below are tested, the
-drawing is not.
+importable without it. matplotlib **is** available in this environment
+(3.11.1, confirmed 2026-09-02) and :func:`plot_runs` executes; the pure helpers
+below are covered by unit tests, the drawing itself is not.
 """
 
 import json
@@ -383,7 +383,8 @@ def plot_runs(runs, orbit_radius_m=None, show_3d=True, planned=None,
     Raises:
         ValueError: If ``runs`` is empty.
 
-    Status: **never executed** — matplotlib is not installed here.
+    Status: executes (matplotlib 3.11.1, confirmed 2026-09-02). Not covered by
+    a unit test — the drawing is verified by inspecting saved output.
     """
     if not runs:
         raise ValueError("plot_runs needs at least one run")

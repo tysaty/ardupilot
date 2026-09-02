@@ -41,8 +41,22 @@ from . import kangaroo as kang
 from . import metrics
 from . import zone as zone_mod
 from .config import HarnessConfig
+from .estimator import KalmanFilter
 from .interface import NoSolution
 from .state import Harness, PlaneState, TargetState
+
+
+def _new_estimator(estimate, target_n0, target_e0):
+    """A fresh state estimator when ``estimate``, else ``None`` (``TASK-037``).
+
+    Mirrors ``run_harness._new_estimator``: the filter is stateful, so each
+    session gets its own, initialised at the target's start position.
+    """
+    if not estimate:
+        return None
+    kf = KalmanFilter()
+    kf.init(target_n0, target_e0)
+    return kf
 
 
 #: Default schedule for the reference scenario — one leg per change type, with a
@@ -71,7 +85,7 @@ class ScenarioSession:
                  start_range_m=300.0, plane_heading_deg=0.0,
                  target_n_m=None, target_e_m=None, radius_m=150.0,
                  length_m=300.0, width_m=150.0, zone=None, contain_target=True,
-                 containment_margin_m=None):
+                 containment_margin_m=None, estimate=False, lookahead_steps=0):
         """
         Args:
             legs: Initial schedule, ``[(duration_s, mode, heading_deg, speed_ms)]``.
@@ -96,9 +110,27 @@ class ScenarioSession:
                 radius outside it (measured: 66.9 m outside a 2 km square with a
                 70 m ring). Insetting by the ring keeps **both** actors inside,
                 which is what the zone is for, without steering the aircraft.
+            estimate: Run the state estimator (``TASK-012``) and expose its
+                estimate to the algorithm, exactly as ``run_harness --estimate``
+                does. Forced on when the algorithm declares
+                ``requires_estimate``, because such an algorithm has no
+                present-position fallback and would otherwise stop on its first
+                step (``TASK-037``).
+            lookahead_steps: Prediction horizon ``k_horizon`` in whole steps
+                (``TASK-017``). Projects the estimate ``lookahead_steps * dt_s``
+                seconds ahead; ``0`` is the identity. Ignored when no estimator
+                runs.
         """
         self.config = config or HarnessConfig()
         self.algorithm_name = algorithm
+        #: TASK-037: an algorithm declaring `requires_estimate` centres its ring
+        #: on the predicted target and has no present-position fallback, so it
+        #: stops on its first step without an estimator. The flag is a declared
+        #: capability, so honour it rather than making the caller know which
+        #: algorithms need one.
+        self.estimate = bool(estimate) or bool(
+            getattr(algorithms.REGISTRY[algorithm], "requires_estimate", False))
+        self.lookahead_steps = int(lookahead_steps)
         #: The operating-area bound (`TASK-032`). ``None`` = unbounded.
         self.zone = (None if zone is False
                      else (zone or zone_mod.InclusionZone()))
@@ -135,6 +167,8 @@ class ScenarioSession:
             kangaroo=kang.build_scripted(
                 self.legs, start_n=tn, start_e=te, radius_m=self.radius_m,
                 length_m=self.length_m, width_m=self.width_m),
+            estimator=_new_estimator(self.estimate, tn, te),
+            lookahead_steps=self.lookahead_steps,
         )
         self.stopped_reason = None
 

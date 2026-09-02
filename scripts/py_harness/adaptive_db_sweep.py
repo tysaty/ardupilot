@@ -12,7 +12,7 @@ here are the two variables `TASK-033` introduces:
 * ``k_horizon`` — prediction horizon in whole control ticks (``--lookahead-steps``,
   ``TASK-017``); the horizon in seconds is ``k_horizon * dt_s``.
 * ``n_replan`` — commitment interval in whole control ticks (``--replan-every``); the
-  replan period is ``m * dt_s`` seconds.
+  replan period is ``n_replan * dt_s`` seconds.
 
 Unlike ``TASK-028`` this sweep holds ``dt_s`` at the harness default 0.1 s and
 varies **only** the planning rate, because varying ``dt_s`` coarsens the

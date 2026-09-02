@@ -43,7 +43,7 @@ import math
 from . import algorithms
 from . import plotter
 from . import scenario
-from .config import HarnessConfig
+from .config import HarnessConfig, HOLD_POLICIES
 from . import zone as zone_mod
 from .geodetic import DEFAULT_ORIGIN
 from .kangaroo import MODES
@@ -228,23 +228,45 @@ class ScenarioView:
         self.footer.set_text(self._footer_text())
 
     def _status_text(self):
+        """Live readout.
+
+        ``TASK-037``: when the algorithm centres its ring on a *predicted*
+        target, the error about the true kangaroo includes the designed
+        prediction lead and is therefore not a tracking failure. Both are shown,
+        labelled, for the same reason ``run_harness`` reports dual-centre
+        figures (``TASK-033``) — quoting either alone misleads, in opposite
+        directions.
+        """
         hist = self.session.history
+        r = self.session.config.orbit_radius_m
         err = float("nan")
+        pred_line = ""
         if hist:
             cur = hist[-1]
             err = abs(math.hypot(cur["plane_n_m"] - cur["target_n_m"],
-                                 cur["plane_e_m"] - cur["target_e_m"])
-                      - self.session.config.orbit_radius_m)
+                                 cur["plane_e_m"] - cur["target_e_m"]) - r)
+            cn, ce = cur.get("target_est_n_m"), cur.get("target_est_e_m")
+            if cn is not None and ce is not None:
+                lead = math.hypot(cn - cur["target_n_m"], ce - cur["target_e_m"])
+                if lead > 0.5:
+                    pred_line = (
+                        "  vs true   %8.2f m  (incl. %.0f m lead)\n"
+                        "  vs ring   %8.2f m  (held centre)\n"
+                        % (err,
+                           lead,
+                           abs(math.hypot(cur["plane_n_m"] - cn,
+                                          cur["plane_e_m"] - ce) - r)))
         return (
             "t          %8.1f s\n"
             "mode       %8s\n"
             "heading    %8.0f deg\n"
             "speed      %8.1f m/s\n"
-            "ring error %8.2f m\n"
+            "%s"
             "changes    %8d\n"
             "%s"
             % (self.session.t_s, self._mode, self._heading % 360.0, self._speed,
-               err, len(self.session.change_log),
+               pred_line or "ring error %8.2f m\n" % err,
+               len(self.session.change_log),
                self.session.stopped_reason or "")
         )
 
@@ -263,16 +285,28 @@ class ScenarioView:
             phase = str(st.get("phase", st.get("direction", "-")))
         zone = self.session.zone
         zone_txt = ("zone %.0f m square" % zone.side_m) if zone else "unbounded"
+        # TASK-037: with the prediction controls reachable here, the horizon and
+        # commitment interval must be visible — an orbit about a predicted
+        # centre is unreadable without knowing how far ahead it is aimed.
+        pred_txt = ""
+        if self.session.estimate:
+            pred_txt = ("\nk_horizon %d ticks (%.2g s)   n_replan %d ticks "
+                        "(%.3g Hz)   hold %s"
+                        % (self.session.lookahead_steps,
+                           self.session.lookahead_steps * cfg.dt_s,
+                           cfg.replan_every, cfg.replan_rate_hz,
+                           cfg.hold_policy))
         return (
             "algorithm  %s   |   phase %s   |   refresh %.3g Hz  (dt %.2f s)\n"
             "R %.0f m   Rmin %.0f m   look-ahead %.0f m   precomp %s   |   %s"
             "   |   view %.0f m square   |   animation %.0f fps (%gx sim, not "
-            "the refresh rate)"
+            "the refresh rate)%s"
             % (self.session.algorithm_name, phase, 1.0 / cfg.dt_s, cfg.dt_s,
                cfg.orbit_radius_m, cfg.turn_radius_m, cfg.look_ahead_m,
                "on" if cfg.orbit_precompensate else "OFF", zone_txt,
                2 * self.extent_m, 1000.0 / self.interval_ms,
-               self.ticks_per_frame * cfg.dt_s / (self.interval_ms / 1000.0))
+               self.ticks_per_frame * cfg.dt_s / (self.interval_ms / 1000.0),
+               pred_txt)
         )
 
     def _tick(self, _frame):
@@ -366,7 +400,7 @@ def build_session(args):
     """
     overrides = {}
     for name in ("airspeed_ms", "turn_radius_m", "orbit_radius_m",
-                 "look_ahead_m", "dt_s"):
+                 "look_ahead_m", "dt_s", "replan_every", "hold_policy"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
@@ -383,7 +417,9 @@ def build_session(args):
         start_range_m=args.start_range_m,
         plane_heading_deg=args.plane_heading_deg,
         zone=zone,
-        containment_margin_m=getattr(args, "containment_margin_m", None))
+        containment_margin_m=getattr(args, "containment_margin_m", None),
+        estimate=getattr(args, "estimate", False),
+        lookahead_steps=getattr(args, "lookahead_steps", None) or 0)
 
 
 def build_parser():
@@ -410,6 +446,25 @@ def build_parser():
     parser.add_argument("--look-ahead-m", type=float, default=None)
     parser.add_argument("--dt-s", type=float, default=None,
                         help="Algorithm refresh interval, s (default 0.1).")
+    # TASK-037: the prediction-planning controls, so the TASK-033 algorithm is
+    # reachable here and not only headless. Same names and units as run_harness.
+    parser.add_argument("--estimate", action="store_true",
+                        help="Run the state estimator (TASK-012) and feed the "
+                             "algorithm its estimate. Forced on for an "
+                             "algorithm that declares requires_estimate.")
+    parser.add_argument("--lookahead-steps", type=int, default=None,
+                        help="Prediction horizon k_horizon, whole control "
+                             "ticks (TASK-017). Horizon in seconds is "
+                             "k_horizon * dt_s. 0 (default) is the identity.")
+    parser.add_argument("--replan-every", type=int, default=None,
+                        help="Commitment interval n_replan, whole control "
+                             "ticks (TASK-033). The committed plan is held "
+                             "between replans. 1 (default) replans every tick.")
+    parser.add_argument("--hold-policy", choices=HOLD_POLICIES, default=None,
+                        help="What is held between replans (TASK-033): 'plan' "
+                             "freezes the predicted centre and the committed "
+                             "curve; 'centre_only' freezes the centre and "
+                             "re-solves the curve each tick.")
     parser.add_argument("--ticks-per-frame", type=int,
                         default=DEFAULT_TICKS_PER_FRAME,
                         help="Sim ticks advanced per rendered frame.")
