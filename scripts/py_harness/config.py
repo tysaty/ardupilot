@@ -118,6 +118,152 @@ HOLD_POLICIES = ("plan", "centre_only")
 ORBIT_PRECOMPENSATE = True
 
 # --------------------------------------------------------------------------
+# Arm B — adaptive prediction horizon (TASK-039 / TASK-022)
+# --------------------------------------------------------------------------
+# `adaptive_horizon_cs` evaluates a set of candidate prediction horizons at each
+# replan instant and selects one, instead of consuming a fixed `LOOKAHEAD_STEPS`.
+# These are the candidate set and the objective weights. **Illustrative, not
+# tuned** (`SR-004`); the weights were chosen so no single term dominates at the
+# reference configuration (R = 70 m, rho = 45 m, V = 25 m/s) and are the first
+# thing a sweep should vary.
+
+#: Smallest candidate prediction horizon, whole control ticks. 0 means "do not
+#: predict", which must stay in the candidate set: if the selector never returns
+#: it, that is a result, and if it always returns it, the signal is degenerate
+#: (TASK-035 measured exactly that for the Euclidean prediction error).
+AH_K_MIN_STEPS = 0
+
+#: Largest candidate prediction horizon, whole control ticks. 40 ticks = 4.0 s at
+#: DT_S. Two bounds meet here. The constant-velocity target model (`A-TGT-002`)
+#: is not credible much further out — the prototype measured 27.5 m cross-track
+#: error at 3.8 s on a 60 m turn — and the selection sweep of 2026-09-03 measured
+#: steady-state ring RMS rising from 12.5 m at this bound to 15.2 m at 60 ticks
+#: against a 12.5 m/s straight target, because the extra candidates are chosen
+#: during the long initial approach and lead the ring past where the aircraft can
+#: arrive. See `docs/TASK-039-ISSUES.md`, ISSUE-B2.
+AH_K_MAX_STEPS = 40
+
+#: Spacing between candidate horizons, whole control ticks. The candidate set is
+#: {AH_K_MIN_STEPS, +AH_K_STEP, ...} up to AH_K_MAX_STEPS inclusive. 5 ticks =
+#: 0.5 s, giving 13 candidates over the default range; the cost of a replan is
+#: linear in this count and is reported per run (`PR-002`).
+AH_K_STEP = 5
+
+#: Weight on the **tangent registration** term J_T — the TASK-038 signal
+#: evaluated predictively: how far the planned handover point misses the target's
+#: standoff ring at the moment the aircraft is predicted to arrive there. Squared
+#: metres, so w = 1.0 makes a 1 m registration miss cost 1.0.
+AH_W_TANGENT = 1.0
+
+#: Weight on the **standoff-tube** term J_R — mean squared deviation from the
+#: standoff radius sampled along the whole approach curve, not just its endpoint.
+#: Distinct from J_T: J_T scores where the plan *ends*, J_R scores where it *goes*.
+#: Lower than AH_W_TANGENT because it is a mean over many samples.
+AH_W_RADIAL = 0.05
+
+#: Weight on the **curvature-excess** term J_kappa — `max(0, kappa_req -
+#: 1/rho)^2` in 1/m^2, where kappa_req is the curvature needed to hold the ring
+#: about a centre translating at the estimated target speed, evaluated at the
+#: bearing the candidate plan arrives on (the moving-centre turn-rate relation,
+#: `TASK-039`). Large because 1/m^2 units make the term numerically tiny
+#: otherwise; chosen so a 10% curvature overshoot (0.0022 1/m at rho = 45 m)
+#: costs about 10, comparable with a 3 m registration miss. This term does not
+#: bite below about 15 m/s of target speed, which is the point: it is the
+#: candidate-level expression of the feasibility boundary `TASK-039` records.
+AH_W_CURVATURE = 2.0e6
+
+#: Weight on the **switching** term J_S — `(k - k_previous)^2` in ticks^2,
+#: damping oscillation of the selected horizon between adjacent candidates. At
+#: 2.0 a one-candidate (5-tick) move costs 50, which the tangent term matches
+#: only at about a 7 m registration change: the selector moves for a real
+#: mistiming and not for measurement noise. **Raised from an initial 0.02 on
+#: 2026-09-03** after that value produced a horizon spanning the whole candidate
+#: set inside a single steady-state tail (`docs/TASK-039-ISSUES.md`, ISSUE-B1);
+#: the sweep behind the value is recorded there.
+AH_W_SWITCH = 2.0
+
+#: How many points are sampled along a candidate approach curve for J_R. The
+#: curve is a few hundred points at DELTA_D_M; scoring all of them costs more
+#: than it informs. 12 is enough to see a bowed approach.
+AH_PATH_SAMPLES = 12
+
+# --------------------------------------------------------------------------
+# Arm C — receding-horizon geometric planner (TASK-039)
+# --------------------------------------------------------------------------
+# `rh_geometric` is the draft's own recommended first step toward MPC: predict
+# the target over a horizon, roll a small grid of curvature-feasible aircraft
+# trajectories forward, reject none (the grid is feasible by construction), score
+# them against the predicted standoff tube, apply only the first command and
+# re-optimise. **Illustrative weights, not tuned** (`SR-004`).
+
+#: Planning horizon N, whole control ticks. **Not `lookahead_steps` and not
+#: `replan_every`** — a third horizon (`TASK-039` naming reconciliation). 45
+#: ticks = 4.5 s at DT_S, about 112 m of flight at 25 m/s, which is a little over
+#: one and a half standoff radii — far enough that a rollout reaches around the
+#: ring rather than only onto it. Chosen from the sweep of 2026-09-03: 17.2 m
+#: steady-state ring RMS at N = 30, 9.4 m at N = 45, 14.7 m at N = 60 against a
+#: 12.5 m/s straight target. Planning cost is linear in it (`rh_rollout_steps`).
+RH_HORIZON_STEPS = 45
+
+#: Number of candidate values for the **first** curvature segment, spanning
+#: [-1/rho, +1/rho] inclusive. Odd, so straight flight (kappa = 0) is always a
+#: candidate. Planning cost is RH_CANDIDATES * RH_CANDIDATES_2 * RH_HORIZON_STEPS
+#: aircraft steps per replan and is measured, not assumed (`PR-002`, `A-SW-002`).
+#:
+#: **Grid resolution is the dominant tuning parameter for this arm at low target
+#: speed**, because a 70 m standoff ring needs kappa = 0.014286 1/m and a coarse
+#: grid does not contain it. Measured 2026-09-03 against a stationary target,
+#: steady-state ring RMS: 8.70 m at 9 x 5, 0.13 m at 15 x 9, and at 5 m/s
+#: 6.17 m against 3.19 m. See `docs/TASK-039-ISSUES.md`, ISSUE-C2.
+RH_CANDIDATES = 15
+
+#: Number of candidate values for the **second** curvature segment, over the same
+#: span. Two segments are the minimum that can both turn onto a ring and then
+#: hold it; one segment can only fly circles.
+RH_CANDIDATES_2 = 9
+
+#: How many ticks the first curvature is held before the second takes over.
+#: 20 ticks = 2.0 s, a little under half the default horizon. From the same
+#: sweep: at N = 45 the ring RMS is 17.1 m at 5 ticks, 12.7 m at 10 and 9.4 m at
+#: 20 — too short a first segment leaves the rollout dominated by its second
+#: curvature, which is never commanded.
+RH_SEGMENT_STEPS = 20
+
+#: Weight on the running standoff cost `(range - R)^2`, summed over the horizon
+#: and divided by the number of steps. Squared metres.
+RH_W_STANDOFF = 1.0
+
+#: Weight on the **terminal** standoff cost at step N, squared metres. Larger
+#: than the running weight so the rollout is judged mainly on where it ends up,
+#: which is what makes this receding-horizon rather than greedy.
+RH_W_TERMINAL = 3.0
+
+#: How many rollout steps ahead the emitted guidance point is taken, whole
+#: control ticks. **1 = command the next planned pose**, which is the receding-
+#: horizon "apply the first command" rule and the only setting that makes the
+#: aircraft fly the trajectory that was optimised.
+#:
+#: This arm deliberately does **not** use `LOOK_AHEAD_M`. A carrot placed 50 m
+#: along a curving rollout is a chord across it: the harness steers on the
+#: bearing to the carrot under a turn-rate limit, and on a 60 m-radius plan a
+#: 50 m carrot asks for a 0.42 rad heading change against a 0.056 rad/tick limit,
+#: so the limiter saturates every tick and the aircraft flies its MINIMUM radius
+#: regardless of the plan. Measured 2026-09-03: a stationary target with a 70 m
+#: commanded ring was held at 45.0 m — exactly `turn_radius_m` — under a 50 m
+#: carrot, and at 65.0 m under a 2.5 m one. The geometric arms are not exposed to
+#: this because their plans curve at `1/R`, not at the aircraft's limit.
+#: `docs/TASK-039-ISSUES.md`, ISSUE-C1.
+RH_COMMAND_STEPS = 1
+
+#: Weight on control effort, `kappa^2` averaged over the horizon, in m^2. Scaled
+#: so a full-deflection rollout (kappa = 1/45) costs about 1.0.
+RH_W_EFFORT = 2.0e3
+
+#: Weight on command smoothness, `(kappa_1 - kappa_previous)^2` in m^2. Damps
+#: chattering between adjacent candidates on successive replans.
+RH_W_SMOOTH = 5.0e3
+
+# --------------------------------------------------------------------------
 # Amplitude weave parameters (TASK-004) — harness-only, illustrative
 # --------------------------------------------------------------------------
 # The names mirror `modules/continuous_weave.lua`. These are **not** tuned from
@@ -214,6 +360,23 @@ class HarnessConfig:
         "orbit_precompensate",
         "replan_every",
         "hold_policy",
+        "ah_k_min_steps",
+        "ah_k_max_steps",
+        "ah_k_step",
+        "ah_w_tangent",
+        "ah_w_radial",
+        "ah_w_curvature",
+        "ah_w_switch",
+        "ah_path_samples",
+        "rh_horizon_steps",
+        "rh_candidates",
+        "rh_candidates_2",
+        "rh_segment_steps",
+        "rh_command_steps",
+        "rh_w_standoff",
+        "rh_w_terminal",
+        "rh_w_effort",
+        "rh_w_smooth",
         "_frozen",
     )
 
@@ -238,6 +401,23 @@ class HarnessConfig:
         orbit_precompensate=ORBIT_PRECOMPENSATE,
         replan_every=REPLAN_EVERY,
         hold_policy=HOLD_POLICY,
+        ah_k_min_steps=AH_K_MIN_STEPS,
+        ah_k_max_steps=AH_K_MAX_STEPS,
+        ah_k_step=AH_K_STEP,
+        ah_w_tangent=AH_W_TANGENT,
+        ah_w_radial=AH_W_RADIAL,
+        ah_w_curvature=AH_W_CURVATURE,
+        ah_w_switch=AH_W_SWITCH,
+        ah_path_samples=AH_PATH_SAMPLES,
+        rh_horizon_steps=RH_HORIZON_STEPS,
+        rh_candidates=RH_CANDIDATES,
+        rh_candidates_2=RH_CANDIDATES_2,
+        rh_segment_steps=RH_SEGMENT_STEPS,
+        rh_command_steps=RH_COMMAND_STEPS,
+        rh_w_standoff=RH_W_STANDOFF,
+        rh_w_terminal=RH_W_TERMINAL,
+        rh_w_effort=RH_W_EFFORT,
+        rh_w_smooth=RH_W_SMOOTH,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -259,6 +439,23 @@ class HarnessConfig:
         self.orbit_precompensate = bool(orbit_precompensate)
         self.replan_every = int(replan_every)
         self.hold_policy = str(hold_policy)
+        self.ah_k_min_steps = int(ah_k_min_steps)
+        self.ah_k_max_steps = int(ah_k_max_steps)
+        self.ah_k_step = int(ah_k_step)
+        self.ah_w_tangent = float(ah_w_tangent)
+        self.ah_w_radial = float(ah_w_radial)
+        self.ah_w_curvature = float(ah_w_curvature)
+        self.ah_w_switch = float(ah_w_switch)
+        self.ah_path_samples = int(ah_path_samples)
+        self.rh_horizon_steps = int(rh_horizon_steps)
+        self.rh_candidates = int(rh_candidates)
+        self.rh_candidates_2 = int(rh_candidates_2)
+        self.rh_segment_steps = int(rh_segment_steps)
+        self.rh_command_steps = int(rh_command_steps)
+        self.rh_w_standoff = float(rh_w_standoff)
+        self.rh_w_terminal = float(rh_w_terminal)
+        self.rh_w_effort = float(rh_w_effort)
+        self.rh_w_smooth = float(rh_w_smooth)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -325,6 +522,66 @@ class HarnessConfig:
                 "hold_policy must be one of %s, got %r"
                 % (", ".join(repr(h) for h in HOLD_POLICIES), self.hold_policy)
             )
+        # -- arm B, adaptive prediction horizon (TASK-039) -------------------
+        if self.ah_k_min_steps < 0:
+            raise ValueError(
+                "ah_k_min_steps must be >= 0 whole control ticks (0 keeps 'do "
+                "not predict' in the candidate set), got %r"
+                % self.ah_k_min_steps
+            )
+        if self.ah_k_max_steps < self.ah_k_min_steps:
+            raise ValueError(
+                "ah_k_max_steps must be >= ah_k_min_steps; the candidate "
+                "horizons run from the first to the second in ah_k_step ticks. "
+                "Got min=%r, max=%r"
+                % (self.ah_k_min_steps, self.ah_k_max_steps)
+            )
+        if self.ah_k_step < 1:
+            raise ValueError(
+                "ah_k_step must be >= 1 whole control tick, got %r"
+                % self.ah_k_step
+            )
+        if self.ah_path_samples < 2:
+            raise ValueError(
+                "ah_path_samples must be >= 2 (a curve needs both ends), got %r"
+                % self.ah_path_samples
+            )
+        for weight in ("ah_w_tangent", "ah_w_radial", "ah_w_curvature",
+                       "ah_w_switch", "rh_w_standoff", "rh_w_terminal",
+                       "rh_w_effort", "rh_w_smooth"):
+            if getattr(self, weight) < 0.0:
+                raise ValueError(
+                    "%s must be >= 0 (a negative weight rewards the thing it "
+                    "names), got %r" % (weight, getattr(self, weight))
+                )
+        # -- arm C, receding-horizon geometric planner (TASK-039) ------------
+        if self.rh_horizon_steps < 1:
+            raise ValueError(
+                "rh_horizon_steps must be >= 1 whole control tick; it is the "
+                "planning horizon N, which is neither lookahead_steps nor "
+                "replan_every. Got %r" % self.rh_horizon_steps
+            )
+        if self.rh_candidates < 2 or self.rh_candidates_2 < 2:
+            raise ValueError(
+                "rh_candidates and rh_candidates_2 must each be >= 2; a single "
+                "candidate is not a search. Got %r and %r"
+                % (self.rh_candidates, self.rh_candidates_2)
+            )
+        if not (1 <= self.rh_command_steps <= self.rh_horizon_steps):
+            raise ValueError(
+                "rh_command_steps must be in [1, rh_horizon_steps] ticks; it "
+                "selects which rolled-out pose is emitted as the guidance "
+                "point, and 1 is the receding-horizon 'apply the first "
+                "command' rule. Got %r against a horizon of %r"
+                % (self.rh_command_steps, self.rh_horizon_steps)
+            )
+        if not (1 <= self.rh_segment_steps <= self.rh_horizon_steps):
+            raise ValueError(
+                "rh_segment_steps must be in [1, rh_horizon_steps] ticks — the "
+                "first curvature is held that long and the second covers the "
+                "rest. Got %r against a horizon of %r"
+                % (self.rh_segment_steps, self.rh_horizon_steps)
+            )
 
     def __setattr__(self, name, value):
         if getattr(self, "_frozen", False):
@@ -371,6 +628,38 @@ class HarnessConfig:
     def lookahead_horizon_s(self):
         """Prediction horizon in seconds, ``lookahead_steps * dt_s`` (``k * dt``)."""
         return self.lookahead_steps * self.dt_s
+
+    @property
+    def ah_candidate_horizons(self):
+        """Arm B's candidate prediction horizons, whole ticks (``TASK-039``).
+
+        ``[ah_k_min_steps, ..., ah_k_max_steps]`` in ``ah_k_step`` increments, the
+        upper bound included when it lands on the grid. Derived rather than stored
+        so the three bounds cannot disagree with the list they generate.
+        """
+        out = []
+        k = self.ah_k_min_steps
+        while k <= self.ah_k_max_steps:
+            out.append(k)
+            k += self.ah_k_step
+        return out
+
+    @property
+    def rh_horizon_s(self):
+        """Arm C's planning horizon in seconds, ``rh_horizon_steps * dt_s``."""
+        return self.rh_horizon_steps * self.dt_s
+
+    @property
+    def rh_rollout_steps(self):
+        """Aircraft steps integrated per arm C replan — the planning-cost figure.
+
+        ``rh_candidates * rh_candidates_2 * rh_horizon_steps``. Reported because
+        ``PR-002`` (the planning cycle finishes within its deadline) and
+        ``A-SW-002`` (the Lua instruction budget at 10 Hz) are the binding
+        constraints on this arm, and an unmeasured optimiser is exactly the risk
+        ``TASK-039`` records against it.
+        """
+        return self.rh_candidates * self.rh_candidates_2 * self.rh_horizon_steps
 
     @property
     def turn_radius_feasible(self):

@@ -43,10 +43,11 @@ import math
 from . import algorithms
 from . import plotter
 from . import scenario
+from . import series as series_mod
 from .config import HarnessConfig, HOLD_POLICIES
 from . import zone as zone_mod
 from .geodetic import DEFAULT_ORIGIN
-from .kangaroo import MODES
+from .kangaroo import LEG_MODES
 
 
 #: Sim ticks advanced per rendered frame. Decouples sim time from wall-clock.
@@ -93,22 +94,38 @@ class ScenarioView:
         leg = session.current_leg()
         self._mode, self._heading, self._speed = leg[1], leg[2], leg[3]
 
-        self.fig = plt.figure(figsize=(13.0, 8.0))
+        self.fig = plt.figure(figsize=(13.0, 8.6))
         self.fig.canvas.manager.set_window_title(
             "py_harness scenario driver — %s" % session.algorithm_name)
-        self.ax = self.fig.add_axes([0.30, 0.12, 0.66, 0.80])
+        # TASK-040 D3: the scene shrinks to make room for a live error graph,
+        # which is drawn from the SAME `series` functions the post-run graphs
+        # use, so the live curve and the archived one cannot disagree.
+        self.ax = self.fig.add_axes([0.30, 0.33, 0.66, 0.60])
         self.ax.set_aspect("equal")
         self.ax.grid(color="#E3E9ED", linewidth=0.8)
         self.ax.set_axisbelow(True)
         self.ax.set_xlabel("East (m)")
         self.ax.set_ylabel("North (m)")
 
+        #: Live error graph. Ring error only: it is a hypot per sample and stays
+        #: cheap to recompute every frame. The tangent-registration error is
+        #: deliberately NOT live — it costs a Dubins solve per sample, so a live
+        #: version would slow the animation in proportion to the run's length.
+        #: `TASK-036` owns the fuller live graph (a horizon selector, withheld
+        #: invalid samples); this is the shared-series half of it.
+        self.ax_error = self.fig.add_axes([0.36, 0.07, 0.60, 0.19])
+        self.ax_error.grid(color="#E3E9ED", linewidth=0.7)
+        self.ax_error.set_axisbelow(True)
+
         # ---- controls, all live -------------------------------------------
         self.ax_mode = plt.axes([0.03, 0.66, 0.20, 0.24])
         self.ax_mode.set_title("kangaroo mode", fontsize=10)
-        self.radio_mode = RadioButtons(self.ax_mode, list(MODES),
-                                       active=list(MODES).index(self._mode)
-                                       if self._mode in MODES else 0)
+        # LEG_MODES, not MODES: `elastic` (TASK-030) is a scriptable leg mode and
+        # TASK-039 compares every arm against a varying target speed, so it has to
+        # be reachable from the live controls and not only from a script.
+        self.radio_mode = RadioButtons(self.ax_mode, list(LEG_MODES),
+                                       active=list(LEG_MODES).index(self._mode)
+                                       if self._mode in LEG_MODES else 0)
         self.radio_mode.on_clicked(self._on_mode)
 
         self.ax_hdg = plt.axes([0.06, 0.58, 0.17, 0.03])
@@ -140,8 +157,8 @@ class ScenarioView:
         self.btn_tracks.on_clicked(self._on_export_all)
 
         self.footer = self.fig.text(
-            0.30, 0.005, "", fontsize=8, family="monospace", color="#16222C",
-            va="bottom", linespacing=1.5)
+            0.30, 0.995, "", fontsize=8, family="monospace", color="#16222C",
+            va="top", linespacing=1.5)
         self.status = self.fig.text(
             0.03, 0.25, "", fontsize=9, va="top", family="monospace",
             color="#16222C")
@@ -226,6 +243,44 @@ class ScenarioView:
         self.ax.legend(loc="upper right", fontsize=8, frameon=False)
         self.status.set_text(self._status_text())
         self.footer.set_text(self._footer_text())
+        self._draw_error()
+
+    def _draw_error(self):
+        """The live error graph, from the shared `series` extraction (TASK-040).
+
+        Two lines when a prediction lead exists — error about the true kangaroo
+        and about the centre the algorithm actually held — because quoting either
+        alone misleads, in opposite directions (`TASK-033` D2).
+        """
+        self.ax_error.clear()
+        self.ax_error.grid(color="#E3E9ED", linewidth=0.7)
+        self.ax_error.set_axisbelow(True)
+        history = self.session.history
+        if not history:
+            self.ax_error.set_ylabel("ring error (m)", fontsize=8)
+            return
+        radius = self.session.config.orbit_radius_m
+        panels = [(series_mod.ring_error(history, radius, "target"), "#1F6FEB")]
+        if self.session.estimate:
+            panels.append(
+                (series_mod.ring_error(history, radius, "ring"), "#C2571C"))
+        for entry, colour in panels:
+            data = series_mod.to_plot_data({entry.name: entry},
+                                           self.session.markers)
+            plotter.draw_series_panel(self.ax_error, data["panels"][0], colour,
+                                      data["markers"])
+        self.ax_error.set_ylabel("ring error (m)", fontsize=8)
+        self.ax_error.set_xlabel("simulated time (s)", fontsize=8)
+        if len(panels) == 2:
+            # Explicit proxy handles: the panel also draws a zero rule and the
+            # manoeuvre markers, and an automatic legend picks those up instead
+            # of the two data lines.
+            from matplotlib.lines import Line2D
+            self.ax_error.legend(
+                handles=[Line2D([], [], color=colour, linewidth=1.4)
+                         for _entry, colour in panels],
+                labels=["vs true target", "vs held centre"],
+                fontsize=7, frameon=False, loc="upper right")
 
     def _status_text(self):
         """Live readout.
@@ -296,6 +351,36 @@ class ScenarioView:
                            self.session.lookahead_steps * cfg.dt_s,
                            cfg.replan_every, cfg.replan_rate_hz,
                            cfg.hold_policy))
+        # TASK-039. An arm that DECIDES something has to show the decision, or
+        # the window shows a trajectory with no account of why it was chosen.
+        # Read from the algorithm's own reported state, so nothing here branches
+        # on the algorithm's name (VR-014) — an arm that reports none of these
+        # keys simply adds no line.
+        st = (hist[-1].get("algorithm_state") or {}) if hist else {}
+        if "k_horizon_steps" in st:
+            candidates = cfg.ah_candidate_horizons
+            pred_txt += (
+                "\nselected k_horizon %d ticks (%.2g s)   %s   candidates "
+                "%d..%d step %d (%d)   e_tan(pred) %s"
+                % (st["k_horizon_steps"], st["k_horizon_steps"] * cfg.dt_s,
+                   "CHOSEN" if st.get("horizon_selected") else "held (on ring)",
+                   cfg.ah_k_min_steps, cfg.ah_k_max_steps, cfg.ah_k_step,
+                   len(candidates),
+                   "-" if st.get("e_tan_pred_m") is None
+                   else "%+.1f m" % st["e_tan_pred_m"]))
+        if "kappa1_1pm" in st:
+            pred_txt += (
+                "\nN %d ticks (%.2g s)   segment %d   grid %dx%d = %d "
+                "candidates, %d rollout steps   command +%d tick(s), "
+                "look-ahead UNUSED   kappa1 %+.5f 1/m (bound %.5f)   "
+                "rollout RMS %.1f m"
+                % (cfg.rh_horizon_steps, cfg.rh_horizon_s,
+                   cfg.rh_segment_steps, cfg.rh_candidates,
+                   cfg.rh_candidates_2,
+                   cfg.rh_candidates * cfg.rh_candidates_2,
+                   cfg.rh_rollout_steps, cfg.rh_command_steps,
+                   st["kappa1_1pm"],
+                   1.0 / cfg.turn_radius_m, st.get("rollout_rms_error_m", 0.0)))
         return (
             "algorithm  %s   |   phase %s   |   refresh %.3g Hz  (dt %.2f s)\n"
             "R %.0f m   Rmin %.0f m   look-ahead %.0f m   precomp %s   |   %s"
@@ -400,11 +485,30 @@ def build_session(args):
     """
     overrides = {}
     for name in ("airspeed_ms", "turn_radius_m", "orbit_radius_m",
-                 "look_ahead_m", "dt_s", "replan_every", "hold_policy"):
+                 "look_ahead_m", "dt_s", "replan_every", "hold_policy",
+                 # TASK-039 arm B and arm C, so each approach is configurable
+                 # from the same front door as the ones that came before it.
+                 "ah_k_min_steps", "ah_k_max_steps", "ah_k_step",
+                 "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
+                 "rh_candidates_2", "rh_command_steps"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
     cfg = HarnessConfig(**overrides)
+    # TASK-039: an algorithm that owns its own horizon projects the target from
+    # the un-projected estimate, so a state-side --lookahead-steps would lead the
+    # ring twice and the second lead would not appear anywhere on screen. Refuse
+    # rather than silently pick one.
+    lookahead_steps = getattr(args, "lookahead_steps", None) or 0
+    owns_horizon = getattr(algorithms.REGISTRY[args.algorithm],
+                           "owns_horizon", False)
+    if owns_horizon and lookahead_steps:
+        raise SystemExit(
+            "%s selects its own prediction horizon, so --lookahead-steps must "
+            "be 0 (it is the state-side horizon this algorithm replaces; "
+            "setting both would lead the ring twice). Set the candidate range "
+            "with --ah-k-min-steps / --ah-k-max-steps / --ah-k-step instead."
+            % args.algorithm)
     legs = [(3600.0, args.mode, args.heading_deg, args.speed_ms)]
     if getattr(args, "no_zone", False):
         zone = False
@@ -419,7 +523,7 @@ def build_session(args):
         zone=zone,
         containment_margin_m=getattr(args, "containment_margin_m", None),
         estimate=getattr(args, "estimate", False),
-        lookahead_steps=getattr(args, "lookahead_steps", None) or 0)
+        lookahead_steps=lookahead_steps)
 
 
 def build_parser():
@@ -430,8 +534,11 @@ def build_parser():
     parser.add_argument("--algorithm", default=scenario.DEFAULT_ALGORITHM,
                         choices=sorted(algorithms.REGISTRY),
                         help="Guidance algorithm (default: %(default)s).")
-    parser.add_argument("--mode", default="straight", choices=list(MODES),
-                        help="Initial kangaroo mode (default: %(default)s).")
+    parser.add_argument("--mode", default="straight", choices=list(LEG_MODES),
+                        help="Initial kangaroo mode (default: %(default)s). "
+                             "'elastic' surges and eases about the commanded "
+                             "speed (TASK-030), which is the varying-speed "
+                             "profile TASK-039 compares the arms against.")
     parser.add_argument("--heading-deg", type=float, default=0.0,
                         help="Initial kangaroo heading, deg from North.")
     parser.add_argument("--speed-ms", type=float, default=5.0,
@@ -465,6 +572,37 @@ def build_parser():
                              "freezes the predicted centre and the committed "
                              "curve; 'centre_only' freezes the centre and "
                              "re-solves the curve each tick.")
+    # TASK-039 arm B: the candidate horizon set the selector chooses from.
+    parser.add_argument("--ah-k-min-steps", type=int, default=None,
+                        help="adaptive_horizon_cs: smallest candidate horizon, "
+                             "whole control ticks (default 0 — 'do not "
+                             "predict' stays in the set).")
+    parser.add_argument("--ah-k-max-steps", type=int, default=None,
+                        help="adaptive_horizon_cs: largest candidate horizon, "
+                             "whole control ticks (default 40 = 4.0 s).")
+    parser.add_argument("--ah-k-step", type=int, default=None,
+                        help="adaptive_horizon_cs: spacing between candidate "
+                             "horizons, whole control ticks (default 5).")
+    # TASK-039 arm C: the receding-horizon planner's own horizon and grid.
+    parser.add_argument("--rh-horizon-steps", type=int, default=None,
+                        help="rh_geometric: planning horizon N, whole control "
+                             "ticks (default 45 = 4.5 s). Not the prediction "
+                             "horizon and not the replan interval.")
+    parser.add_argument("--rh-segment-steps", type=int, default=None,
+                        help="rh_geometric: ticks the first curvature is held "
+                             "before the second (default 20 = 2.0 s).")
+    parser.add_argument("--rh-candidates", type=int, default=None,
+                        help="rh_geometric: first-segment curvature samples "
+                             "over [-1/Rmin, +1/Rmin] (default 15; odd keeps "
+                             "straight flight on the grid).")
+    parser.add_argument("--rh-candidates-2", type=int, default=None,
+                        help="rh_geometric: second-segment curvature samples "
+                             "(default 9).")
+    parser.add_argument("--rh-command-steps", type=int, default=None,
+                        help="rh_geometric: rollout steps ahead the emitted "
+                             "guidance point is taken (default 1 — apply the "
+                             "first command). Larger values are a chord across "
+                             "the plan and saturate the turn-rate limit.")
     parser.add_argument("--ticks-per-frame", type=int,
                         default=DEFAULT_TICKS_PER_FRAME,
                         help="Sim ticks advanced per rendered frame.")

@@ -956,3 +956,138 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --------------------------------------------------------------------------
+# Error-versus-time panels (TASK-040)
+# --------------------------------------------------------------------------
+# The shared drawing primitive for error timelines, used by the offline bundle
+# writer and by the scenario driver's live graph, so the saved plot and the live
+# plot of the same run cannot disagree.
+#
+# Like everything else here it takes **plain data** and imports no harness
+# module (`DEC-2026-07-22-01`): the caller flattens its series with
+# `series.to_plot_data` and hands over lists.
+
+#: Panel colours, cycled. Chosen to stay distinguishable in greyscale print,
+#: which a report will be.
+_SERIES_COLOURS = ("#1F6FEB", "#C2571C", "#2E7D5B", "#7A3E9D", "#9E2F27",
+                   "#6B7A85")
+
+
+def draw_series_panel(ax, panel, colour="#1F6FEB", marker_times=None,
+                      bound=None, upto_t_s=None):
+    """Draw one error-versus-time panel onto ``ax``.
+
+    Args:
+        ax: Target axes.
+        panel: One entry of ``series.to_plot_data()['panels']`` — a dict with
+            ``t_s``, ``values``, ``spans``, ``label``, ``unit``, ``signed`` and
+            ``coverage``.
+        colour: Line colour.
+        marker_times: Simulated times at which the kangaroo was re-commanded.
+            Drawn as vertical rules, so a step in the error can be attributed to
+            the manoeuvre that caused it rather than guessed at.
+        bound: Optional horizontal limit line — the curvature bound, typically.
+            Drawn dashed and red, because a line crossing it is a requirement
+            breach (`FR-005`, `SR-002`) rather than a large number.
+        upto_t_s: Draw only up to this simulated time. Used by the live view.
+
+    **Gaps are drawn as gaps.** ``spans`` gives the contiguous runs of defined
+    samples and each is drawn as its own line, so an undefined stretch is empty
+    rather than being bridged. Bridging it would draw a straight line through
+    the middle of a region where the quantity does not exist, which reads as
+    data.
+    """
+    t_s = panel["t_s"]
+    values = panel["values"]
+
+    if panel.get("signed"):
+        ax.axhline(0.0, color="#B8C4CC", linewidth=0.9, zorder=1)
+    if bound is not None:
+        ax.axhline(bound, color="#9E2F27", linewidth=1.1,
+                   linestyle=(0, (5, 3)), zorder=2)
+
+    for t_mark in (marker_times or []):
+        if upto_t_s is not None and t_mark > upto_t_s:
+            continue
+        ax.axvline(t_mark, color="#C2571C", linewidth=0.9,
+                   linestyle=(0, (2, 3)), zorder=2)
+
+    for start, end in panel.get("spans", []):
+        xs = t_s[start:end]
+        ys = values[start:end]
+        if upto_t_s is not None:
+            kept = [(x, y) for x, y in zip(xs, ys) if x <= upto_t_s]
+            if not kept:
+                continue
+            xs = [p[0] for p in kept]
+            ys = [p[1] for p in kept]
+        ax.plot(xs, ys, color=colour, linewidth=1.4, zorder=3)
+
+    unit = ("\n(%s)" % panel["unit"]) if panel.get("unit") else ""
+    # Labels are pre-wrapped by the caller and the unit goes on its own line:
+    # a stacked figure of seven panels has ~1.5 in per panel, and a single-line
+    # label long enough to be descriptive overlaps its neighbours.
+    ax.set_ylabel(panel["label"] + unit, fontsize=8, labelpad=8)
+    ax.grid(color="#E3E9ED", linewidth=0.7)
+    ax.set_axisbelow(True)
+    ax.tick_params(labelsize=8)
+
+    coverage = panel.get("coverage")
+    if coverage is not None and coverage < 0.999:
+        # Coverage belongs ON the panel, not in a caption elsewhere: a curve with
+        # long gaps and one without look equally authoritative otherwise.
+        ax.text(0.995, 0.04, "defined %.0f%% of the run" % (100.0 * coverage),
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=7,
+                color="#6B7A85")
+
+
+def plot_error_timeline(plot_data, save_path=None, show=False, title=None,
+                        figsize=None):
+    """Stacked error-versus-time panels for one run, sharing a time axis.
+
+    Args:
+        plot_data: The output of ``series.to_plot_data()``.
+        save_path: Write a PNG here instead of showing.
+        show: Show interactively.
+        title: Figure title.
+        figsize: Overridden by default from the panel count, so a run with two
+            series is not drawn in a figure sized for seven.
+
+    Returns the figure, or ``None`` when there is nothing to draw — which is the
+    case for a run that produced no history and is not an error.
+    """
+    panels = plot_data.get("panels") or []
+    if not panels:
+        return None
+
+    import matplotlib
+    if save_path and not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if figsize is None:
+        figsize = (10.0, max(2.6, 1.65 * len(panels) + 0.9))
+    fig, axes = plt.subplots(len(panels), 1, sharex=True, figsize=figsize)
+    if len(panels) == 1:
+        axes = [axes]
+
+    for index, (ax, panel) in enumerate(zip(axes, panels)):
+        bound = None
+        if panel["name"] == "commanded_curvature_1pm":
+            bound = plot_data.get("curvature_bound_1pm")
+        draw_series_panel(ax, panel, _SERIES_COLOURS[index % len(_SERIES_COLOURS)],
+                          plot_data.get("markers"), bound)
+    axes[-1].set_xlabel("simulated time (s)", fontsize=9)
+    if title:
+        fig.suptitle(title, fontsize=10)
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150)
+        if not show:
+            plt.close(fig)
+    if show:
+        plt.show()
+    return fig

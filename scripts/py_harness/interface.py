@@ -73,6 +73,17 @@ SNAPSHOT_FIELDS = {
         "current estimate unchanged. The projection is state-side, so the "
         "algorithm is unaware of it (it just reads the field)."
     ),
+    "target_est_raw": (
+        "The same estimate **before** the look-ahead projection — {n_m, e_m} in "
+        "metres and {vn_ms, ve_ms} in metres per second — or None when no "
+        "estimator is running. Identical to "
+        "target_est whenever lookahead_steps is 0. Added by TASK-039 for an "
+        "algorithm that selects its own prediction horizon (arm B) or rolls the "
+        "target forward over its own planning horizon (arm C): such an algorithm "
+        "must project from an UNPROJECTED estimate, or the state-side horizon is "
+        "counted twice. An algorithm that consumes a horizon rather than choosing "
+        "one reads target_est and ignores this field."
+    ),
 }
 
 #: Fields an algorithm returns.
@@ -141,6 +152,15 @@ class GeometricAlgorithm:
     #: branches on algorithm identity (``VR-014``).
     requires_estimate = False
 
+    #: True when the algorithm **chooses its own prediction horizon** rather than
+    #: consuming the configured one (``TASK-039`` arms B and C). Such an algorithm
+    #: reads ``target_est_raw`` and projects from it, so a non-zero
+    #: ``lookahead_steps`` would be applied twice; the runner and the driver read
+    #: this flag and refuse that combination rather than silently double-leading.
+    #:
+    #: A tested property, not a name test, for the same reason as
+    #: :attr:`holds_orbit` and :attr:`requires_estimate` (``VR-014``).
+    owns_horizon = False
 
     #: Registry name used to select this algorithm. Subclasses must override.
     name = None

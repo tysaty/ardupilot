@@ -170,7 +170,16 @@ class Harness:
             Plain dict with the keys in ``interface.SNAPSHOT_FIELDS``.
         """
         snap = {"t_s": self.t_s, "algorithm_state": dict(self.algorithm_state),
-                "target_est": dict(self.target_est) if self.target_est else None}
+                "target_est": dict(self.target_est) if self.target_est else None,
+                # TASK-039 arm B: an algorithm that chooses its OWN horizon needs
+                # the un-projected estimate, because target_est has already had
+                # lookahead_steps applied to it state-side. Exposing the raw
+                # estimate is a pure addition: every existing algorithm reads
+                # target_est and is unaffected. The alternative — de-projecting
+                # target_est back by lookahead_steps inside the algorithm — would
+                # silently double-count whenever the two horizons disagreed.
+                "target_est_raw": (dict(self.target_est_raw)
+                                   if self.target_est_raw else None)}
         snap.update(self.plane.as_dict())
         snap.update(self.target.as_dict())
         return snap

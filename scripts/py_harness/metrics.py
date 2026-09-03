@@ -201,3 +201,201 @@ def dual_centre_stats(history, orbit_radius_m, fraction=0.25,
             history, orbit_radius_m, centre)
         out[centre] = stats
     return out
+
+
+# --------------------------------------------------------------------------
+# Orbit deformation (TASK-039) — the ring is not round about a moving target
+# --------------------------------------------------------------------------
+
+#: Speed at or below which a target has no usable direction of travel, m/s.
+#: Below it the bearing-relative binning has no reference axis, so the sample is
+#: excluded and counted rather than binned against an arbitrary direction.
+STATIONARY_SPEED_MS = 0.05
+
+#: Default speed bands for :func:`deformation_by_speed`, m/s, as
+#: ``(label, lower_inclusive, upper_exclusive)``. Chosen to straddle the elastic
+#: kangaroo's surge-and-ease profile, whose whole-run mean is a fiction: measured
+#: 5.3 m of ring spread while slow and 41.0 m while fast, reading as 14.7 m when
+#: the two are averaged together.
+DEFAULT_SPEED_BANDS = (
+    ("slow", 0.0, 4.0),
+    ("mid", 4.0, 9.0),
+    ("fast", 9.0, float("inf")),
+)
+
+
+def bearing_from_target_velocity(sample, centre="target"):
+    """Aircraft bearing about the ring centre, from the target's heading, radians.
+
+    Measured in ``[-pi, pi)`` from the target's direction of travel: ``0`` is
+    directly **ahead** of the target, ``+/-pi`` directly **behind** it, and
+    ``+pi/2`` abeam. This is the frame the deformation lives in — the ring is
+    short in front and long behind — and a bearing measured from North instead
+    would average the deformation away as the target turns.
+
+    Returns:
+        Radians, or ``None`` when the target is slower than
+        :data:`STATIONARY_SPEED_MS` and so has no direction of travel.
+    """
+    vn = sample.get("target_vn_ms")
+    ve = sample.get("target_ve_ms")
+    if vn is None or ve is None:
+        return None
+    if math.hypot(vn, ve) <= STATIONARY_SPEED_MS:
+        return None
+    cn, ce = centre_of(sample, centre)
+    a = (math.atan2(sample["plane_e_m"] - ce, sample["plane_n_m"] - cn)
+         - math.atan2(ve, vn))
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def orbit_deformation(history, orbit_radius_m, n_bins=4, fraction=0.25,
+                      centre="target", speed_min_ms=None, speed_max_ms=None):
+    """Achieved standoff radius by bearing relative to the target's heading.
+
+    The metric ``TASK-039`` needs and no existing one supplies. `min_orbit_distance`
+    is the closest approach and `steady_state_stats` is a whole-tail mean; both are
+    **direction-blind**, so a ring flown at 49 m in front of the target and 113 m
+    behind it reads as a 70 m ring with a large RMS. This says *where* the error is.
+
+    Measured on 2026-09-02 against a 12.5 m/s straight kangaroo at ``R = 70 m``:
+    front 55.8 m, abeam 75.2 m, behind 112.6 m — a 63.7 m spread — and reproduced
+    to within 0.5 m by a standalone kinematic model with no estimator, no
+    prediction and no algorithm, which is why the cause is recorded as
+    guidance-point placement against a *translating* ring rather than as a
+    prediction defect (``TASK-027``, reopened; ``A-VAL-005``).
+
+    Args:
+        history: Recorded run history.
+        orbit_radius_m: Commanded ring radius ``R``, metres. Reported alongside
+            the bins so the deviation can be read directly.
+        n_bins: Bearing bins over the full circle. 4 gives front/right/back/left
+            about the target's heading; 8 resolves the asymmetry more finely at
+            the cost of samples per bin.
+        fraction: Tail fraction treated as steady state, matching
+            :func:`steady_state_stats`. Pass ``1.0`` for the whole run.
+        centre: Ring centre selector; see :data:`CENTRES`.
+        speed_min_ms: Include only samples at or above this target speed, m/s.
+        speed_max_ms: Include only samples **below** this target speed, m/s.
+
+    Returns:
+        ``None`` for an empty history, else a dict:
+
+        ``bins``
+            One entry per bearing bin, ``{centre_deg, lower_deg, upper_deg,
+            mean_radius_m, mean_error_m, samples}``, ordered from directly ahead
+            and going clockwise. ``mean_radius_m`` is ``None`` for an empty bin.
+        ``spread_m``
+            Largest bin mean minus smallest, over the **populated** bins. The
+            headline number: ``0`` is a round ring, and it is ``0`` by
+            construction for a stationary target.
+        ``mean_radius_m``
+            Mean achieved radius over the included samples.
+        ``samples``
+            Samples binned.
+        ``excluded_stationary``
+            Samples dropped for having no direction of travel. **Reported, not
+            silently absorbed**: a run that is mostly stationary produces a small
+            spread from very few samples, and the count is how a reader tells
+            that apart from a genuinely round ring.
+        ``excluded_speed``
+            Samples dropped by the speed window.
+    """
+    if not history:
+        return None
+    n = max(1, int(len(history) * fraction))
+    tail = history[-n:]
+    width = 2.0 * math.pi / int(n_bins)
+    sums = [0.0] * int(n_bins)
+    counts = [0] * int(n_bins)
+    excluded_stationary = 0
+    excluded_speed = 0
+    total = 0.0
+    binned = 0
+    for sample in tail:
+        speed = math.hypot(sample.get("target_vn_ms") or 0.0,
+                           sample.get("target_ve_ms") or 0.0)
+        if speed_min_ms is not None and speed < speed_min_ms:
+            excluded_speed += 1
+            continue
+        if speed_max_ms is not None and speed >= speed_max_ms:
+            excluded_speed += 1
+            continue
+        theta = bearing_from_target_velocity(sample, centre)
+        if theta is None:
+            excluded_stationary += 1
+            continue
+        cn, ce = centre_of(sample, centre)
+        radius = math.hypot(sample["plane_n_m"] - cn, sample["plane_e_m"] - ce)
+        # Bin 0 is centred on "directly ahead", so the boundaries sit at
+        # +/- half a bin about it and the front/back asymmetry lands in the
+        # middle of a bin rather than on its edge.
+        index = int(((theta + width / 2.0) % (2.0 * math.pi)) / width)
+        if index >= int(n_bins):
+            index = int(n_bins) - 1
+        sums[index] += radius
+        counts[index] += 1
+        total += radius
+        binned += 1
+
+    bins = []
+    means = []
+    for i in range(int(n_bins)):
+        centre_deg = math.degrees(i * width)
+        if centre_deg > 180.0:
+            centre_deg -= 360.0
+        mean = sums[i] / counts[i] if counts[i] else None
+        if mean is not None:
+            means.append(mean)
+        bins.append({
+            "centre_deg": centre_deg,
+            "lower_deg": centre_deg - math.degrees(width) / 2.0,
+            "upper_deg": centre_deg + math.degrees(width) / 2.0,
+            "mean_radius_m": mean,
+            "mean_error_m": None if mean is None else mean - orbit_radius_m,
+            "samples": counts[i],
+        })
+    return {
+        "bins": bins,
+        "spread_m": (max(means) - min(means)) if len(means) >= 2 else 0.0,
+        "mean_radius_m": (total / binned) if binned else None,
+        "orbit_radius_m": float(orbit_radius_m),
+        "samples": binned,
+        "excluded_stationary": excluded_stationary,
+        "excluded_speed": excluded_speed,
+    }
+
+
+def deformation_by_speed(history, orbit_radius_m, bands=None, n_bins=4,
+                         fraction=1.0, centre="target"):
+    """:func:`orbit_deformation` split by **instantaneous** target speed.
+
+    Required by ``TASK-039``'s acceptance criteria and not optional: against a
+    target whose speed varies — the ``elastic`` kangaroo, or any interactively
+    driven run — the ring *breathes*, and a whole-run mean averages a deforming
+    ring into a fiction. Measured on the elastic mode: 5.3 m of spread while
+    slow, 18.4 m mid, 41.0 m fast; aggregated over the run it reads 14.7 m, which
+    describes no instant of the run.
+
+    Args:
+        bands: ``((label, lower_ms, upper_ms), ...)``; lower inclusive, upper
+            exclusive. Defaults to :data:`DEFAULT_SPEED_BANDS`.
+        (others): as :func:`orbit_deformation`. ``fraction`` defaults to the
+            **whole run** here, because a speed band may not be present in the
+            tail at all.
+
+    Returns:
+        ``None`` for an empty history, else ``{label: orbit_deformation(...)}``
+        in the order the bands were given. A band with no samples is present with
+        ``samples = 0`` rather than absent — an empty band is a fact about the
+        run, and dropping it would make two runs look comparable when they are not.
+    """
+    if not history:
+        return None
+    out = {}
+    for label, low, high in (bands or DEFAULT_SPEED_BANDS):
+        out[label] = orbit_deformation(
+            history, orbit_radius_m, n_bins=n_bins, fraction=fraction,
+            centre=centre, speed_min_ms=low,
+            speed_max_ms=None if high == float("inf") else high)
+    return out

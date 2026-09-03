@@ -204,6 +204,58 @@ def build_parser():
         "curve; 'centre_only' holds just the centre and re-solves the curve from "
         "the live pose each tick.",
     )
+    # TASK-039 arm B — the candidate horizon set adaptive_horizon_cs selects from.
+    parser.add_argument(
+        "--ah-k-min-steps", type=int, default=None,
+        help="adaptive_horizon_cs (TASK-039 arm B): smallest candidate "
+        "prediction horizon, whole control ticks. Default 0, which keeps 'do "
+        "not predict' in the candidate set — if the selector never returns it "
+        "that is a result, and if it always does the signal is degenerate.",
+    )
+    parser.add_argument(
+        "--ah-k-max-steps", type=int, default=None,
+        help="adaptive_horizon_cs: largest candidate prediction horizon, whole "
+        "control ticks. Default 40 (4.0 s), bounded by the constant-velocity "
+        "target model (A-TGT-002) rather than by preference.",
+    )
+    parser.add_argument(
+        "--ah-k-step", type=int, default=None,
+        help="adaptive_horizon_cs: spacing between candidate horizons, whole "
+        "control ticks. Default 5. The per-replan cost is linear in the "
+        "resulting candidate count.",
+    )
+    # TASK-039 arm C — the receding-horizon planner's horizon and candidate grid.
+    parser.add_argument(
+        "--rh-horizon-steps", type=int, default=None,
+        help="rh_geometric (TASK-039 arm C): planning horizon N, whole control "
+        "ticks. Default 45 (4.5 s). This is a THIRD horizon: it is neither "
+        "--lookahead-steps nor --replan-every.",
+    )
+    parser.add_argument(
+        "--rh-segment-steps", type=int, default=None,
+        help="rh_geometric: ticks the first curvature is held before the second "
+        "takes over. Default 20 (2.0 s).",
+    )
+    parser.add_argument(
+        "--rh-candidates", type=int, default=None,
+        help="rh_geometric: first-segment curvature samples spanning "
+        "[-1/Rmin, +1/Rmin]. Default 15; an odd count keeps straight flight on "
+        "the grid. Resolution is this arm's dominant parameter at low target "
+        "speed, because a 70 m ring needs a curvature a coarse grid does not "
+        "contain.",
+    )
+    parser.add_argument(
+        "--rh-candidates-2", type=int, default=None,
+        help="rh_geometric: second-segment curvature samples. Default 9.",
+    )
+    parser.add_argument(
+        "--rh-command-steps", type=int, default=None,
+        help="rh_geometric: rollout steps ahead the emitted guidance point is "
+        "taken. Default 1 — apply the first command. Larger values place the "
+        "point as a chord across a curving plan, which saturates the turn-rate "
+        "limit and makes the aircraft fly its minimum radius instead of the "
+        "plan (measured: a 70 m ring held at 45.0 m).",
+    )
     parser.add_argument(
         "--no-orbit-precomp",
         action="store_true",
@@ -374,6 +426,13 @@ def build_config(args, weave_eta=None):
         overrides["replan_every"] = args.replan_every
     if args.hold_policy is not None:
         overrides["hold_policy"] = args.hold_policy
+    # TASK-039 arms B and C.
+    for name in ("ah_k_min_steps", "ah_k_max_steps", "ah_k_step",
+                 "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
+                 "rh_candidates_2", "rh_command_steps"):
+        value = getattr(args, name, None)
+        if value is not None:
+            overrides[name] = value
     if args.no_orbit_precomp:
         overrides["orbit_precompensate"] = False
     if weave_eta is not None:  # explicit override wins (the compare-eta pass)
@@ -387,6 +446,22 @@ def main(argv=None):
         cfg = build_config(args)
     except ValueError as exc:
         print("INVALID CONFIGURATION: %s" % exc, file=sys.stderr)
+        return 2
+
+    # TASK-039: refuse a state-side horizon for an algorithm that owns its own.
+    # Such an algorithm reads the un-projected estimate and projects it itself,
+    # so both together lead the ring twice and the second lead appears in no
+    # reported figure. Checked before anything runs, because the run would
+    # otherwise complete and produce plausible, wrong evidence.
+    owning = sorted(name for name in args.algorithms
+                    if getattr(algorithms.REGISTRY.get(name, object),
+                               "owns_horizon", False))
+    if owning and cfg.lookahead_steps:
+        print("REFUSED: %s select their own prediction horizon, so "
+              "--lookahead-steps must be 0 (it is the state-side horizon they "
+              "replace). Set the candidate range with --ah-k-min-steps / "
+              "--ah-k-max-steps / --ah-k-step, or the planning horizon with "
+              "--rh-horizon-steps." % ", ".join(owning), file=sys.stderr)
         return 2
 
     print(cfg.summary())
