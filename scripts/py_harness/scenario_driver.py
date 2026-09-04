@@ -41,6 +41,7 @@ import argparse
 import math
 
 from . import algorithms
+from . import metrics
 from . import plotter
 from . import scenario
 from . import series as series_mod
@@ -56,6 +57,19 @@ DEFAULT_TICKS_PER_FRAME = 2
 #: Milliseconds between frames.
 DEFAULT_INTERVAL_MS = 50
 
+#: How many manoeuvre markers the LIVE view draws, most recent first.
+#:
+#: Each marker is a diamond plus a labelled annotation on the target's track, so
+#: a session driven by hand — where every heading nudge and speed change adds
+#: one — buries the scene under overlapping orange labels within a minute. The
+#: live view is for watching; one marker answers "what did I just change?" and
+#: the rest is clutter.
+#:
+#: The OFFLINE renderer and the experiment bundle are deliberately unaffected and
+#: keep every marker: an archived plot is read once, carefully, and the full
+#: change history is what makes a step in the error attributable.
+LIVE_MARKERS_SHOWN = 1
+
 
 class ScenarioView:
     """Matplotlib view and controls over a :class:`~scenario.ScenarioSession`.
@@ -67,11 +81,23 @@ class ScenarioView:
 
     def __init__(self, session, ticks_per_frame=DEFAULT_TICKS_PER_FRAME,
                  interval_ms=DEFAULT_INTERVAL_MS, export_path=None,
-                 extent_m=None, origin=None):
+                 extent_m=None, origin=None, session_factory=None):
+        """
+        Args:
+            session_factory: Optional ``callable(algorithm_name) ->
+                ScenarioSession`` that rebuilds the run under a different
+                guidance law. When given, the algorithm selector appears and
+                choosing a name **restarts** the scenario with it. When omitted
+                the selector is hidden — a caller that constructed a session by
+                hand has not told the view how to construct another, and
+                guessing would silently drop its configuration.
+            (others): as before.
+        """
         import matplotlib.pyplot as plt
         from matplotlib.widgets import Button, RadioButtons, Slider
 
         self.session = session
+        self.session_factory = session_factory
         self.ticks_per_frame = int(ticks_per_frame)
         self.interval_ms = int(interval_ms)
         self.export_path = export_path
@@ -116,6 +142,46 @@ class ScenarioView:
         self.ax_error = self.fig.add_axes([0.36, 0.07, 0.60, 0.19])
         self.ax_error.grid(color="#E3E9ED", linewidth=0.7)
         self.ax_error.set_axisbelow(True)
+
+        # ---- algorithm selector -------------------------------------------
+        # matplotlib has no combo box, so this is one: a button showing the
+        # current algorithm, which toggles an overlaid list. The list sits on top
+        # of the other controls while open and hides again on selection, so it
+        # costs no permanent panel space -- fourteen algorithms laid out
+        # permanently would fill the column.
+        self._algo_open = False
+        self.ax_algo_btn = plt.axes([0.03, 0.928, 0.20, 0.040])
+        self.ax_algo_btn.set_title("guidance algorithm", fontsize=8.5,
+                                   color="#6B7A85", pad=5)
+        self.btn_algo = Button(self.ax_algo_btn, self._algo_button_label())
+        self.btn_algo.label.set_fontsize(8.5)
+        self.btn_algo.on_clicked(self._on_algo_toggle)
+
+        self._algo_names = sorted(algorithms.IMPLEMENTED)
+        # The menu floats over the SCENE, not over the left control column.
+        # Opening it in the column put fourteen radio circles exactly where the
+        # kangaroo-mode radio's five had been, which reads as the mode control
+        # breaking rather than as a menu opening. Over the plot it is
+        # unmistakably a menu, and the mode radio stays visible beside it.
+        self.ax_algo_list = plt.axes([0.325, 0.33, 0.215, 0.53], zorder=20,
+                                     facecolor="#FFFFFF")
+        for spine in self.ax_algo_list.spines.values():
+            spine.set(edgecolor="#16222C", linewidth=1.2)
+        # Kept clear of the footer, which occupies the top ~6% of the figure.
+        self.ax_algo_list.set_title("click a name — restarts the run",
+                                    fontsize=8.5, color="#16222C", pad=5)
+        active = (self._algo_names.index(session.algorithm_name)
+                  if session.algorithm_name in self._algo_names else 0)
+        self.radio_algo = RadioButtons(self.ax_algo_list, self._algo_names,
+                                       active=active)
+        for label in self.radio_algo.labels:
+            label.set_fontsize(8)
+        self.radio_algo.on_clicked(self._on_algo_selected)
+        self._set_algo_list_visible(False)
+        if session_factory is None:
+            # No way to rebuild, so no selector. Hidden rather than shown-and-
+            # broken: a control that does nothing is worse than none.
+            self.ax_algo_btn.set_visible(False)
 
         # ---- controls, all live -------------------------------------------
         self.ax_mode = plt.axes([0.03, 0.66, 0.20, 0.24])
@@ -173,6 +239,62 @@ class ScenarioView:
     # ------------------------------------------------------------------
     # Control callbacks — each delegates to the session, never mutates state
     # ------------------------------------------------------------------
+
+    # -- the algorithm selector ----------------------------------------
+
+    def _algo_button_label(self):
+        return "%s  \u25be" % self.session.algorithm_name
+
+    def _set_algo_list_visible(self, visible):
+        self._algo_open = bool(visible)
+        self.ax_algo_list.set_visible(self._algo_open)
+        # `RadioButtons.circles` was replaced by a scatter collection in
+        # matplotlib 3.7; hiding the axes covers both, and the labels are hidden
+        # explicitly so nothing survives a redraw of the scene beneath.
+        for label in self.radio_algo.labels:
+            label.set_visible(self._algo_open)
+
+    def _on_algo_toggle(self, _event):
+        if self.session_factory is None:
+            return
+        self._set_algo_list_visible(not self._algo_open)
+        self.fig.canvas.draw_idle()
+
+    def _on_algo_selected(self, name):
+        """Rebuild the run under `name` and restart it.
+
+        A **restart**, not a hot-swap: the aircraft's pose, the estimator's
+        covariance and the algorithm's accumulated state are all mid-run
+        quantities, and carrying them across would compare the new law from a
+        starting condition the old one produced. Restarting is what makes the
+        two windows comparable, which is the whole reason to switch.
+        """
+        if self.session_factory is None or not self._algo_open:
+            # RadioButtons still receive clicks while their axes are hidden, so
+            # the open check is load-bearing, not defensive.
+            return
+        self._set_algo_list_visible(False)
+        if name == self.session.algorithm_name:
+            self.fig.canvas.draw_idle()
+            return
+        try:
+            self.session = self.session_factory(name)
+        except Exception as exc:                     # noqa: BLE001
+            # A refused combination (a horizon an algorithm owns, an infeasible
+            # radius) must not take the window down mid-demonstration.
+            self.status.set_text("could not start %s:\n%s" % (name, exc))
+            self.fig.canvas.draw_idle()
+            return
+
+        leg = self.session.current_leg()
+        self._mode, self._heading, self._speed = leg[1], leg[2], leg[3]
+        self.btn_algo.label.set_text(self._algo_button_label())
+        self.fig.canvas.manager.set_window_title(
+            "py_harness scenario driver — %s" % self.session.algorithm_name)
+        self._draw()
+        self.fig.canvas.draw_idle()
+
+    # -- kangaroo controls ---------------------------------------------
 
     def _on_mode(self, label):
         self._mode = label
@@ -233,17 +355,29 @@ class ScenarioView:
         zone = self.session.zone
         plotter.draw_scene(self.ax, self.session.history,
                            orbit_radius_m=self.session.config.orbit_radius_m,
-                           markers=self.session.markers,
+                           markers=self._live_markers(),
                            zone_corners=zone.corners() if zone else None)
         self.ax.set_aspect("equal")
         # Fixed square window — set every frame so nothing can rescale it.
         cx, cy = self.centre
         self.ax.set_xlim(cx - self.extent_m, cx + self.extent_m)
         self.ax.set_ylim(cy - self.extent_m, cy + self.extent_m)
-        self.ax.legend(loc="upper right", fontsize=8, frameon=False)
+        if self.session.history:
+            # `draw_scene` returns early on an empty history, so there are no
+            # labelled artists and matplotlib warns. A restart from the
+            # algorithm selector hits exactly that frame.
+            self.ax.legend(loc="upper right", fontsize=8, frameon=False)
         self.status.set_text(self._status_text())
         self.footer.set_text(self._footer_text())
         self._draw_error()
+
+    def _live_markers(self):
+        """The manoeuvre markers the live view draws — the most recent only.
+
+        See :data:`LIVE_MARKERS_SHOWN`. The offline renderer and the experiment
+        bundle keep all of them.
+        """
+        return self.session.markers[-LIVE_MARKERS_SHOWN:]
 
     def _draw_error(self):
         """The live error graph, from the shared `series` extraction (TASK-040).
@@ -266,7 +400,7 @@ class ScenarioView:
                 (series_mod.ring_error(history, radius, "ring"), "#C2571C"))
         for entry, colour in panels:
             data = series_mod.to_plot_data({entry.name: entry},
-                                           self.session.markers)
+                                           self._live_markers())
             plotter.draw_series_panel(self.ax_error, data["panels"][0], colour,
                                       data["markers"])
         self.ax_error.set_ylabel("ring error (m)", fontsize=8)
@@ -300,8 +434,16 @@ class ScenarioView:
             cur = hist[-1]
             err = abs(math.hypot(cur["plane_n_m"] - cur["target_n_m"],
                                  cur["plane_e_m"] - cur["target_e_m"]) - r)
-            cn, ce = cur.get("target_est_n_m"), cur.get("target_est_e_m")
-            if cn is not None and ce is not None:
+            # The centre the algorithm ACTUALLY HELD, via the same selector the
+            # archived metrics and the error graph use (`metrics.centre_of`).
+            # Reading `target_est_*` directly instead — the LIVE projected
+            # estimate — is only equal to it when `n_replan == 1`; with a
+            # commitment interval the held centre is frozen between replans
+            # while the estimate keeps moving, and the two diverged by up to
+            # 50 m on arm B at `--replan-every 5`. The label below says "held
+            # centre", so it has to be the held centre.
+            cn, ce = metrics.centre_of(cur, "ring")
+            if cur.get("target_est_n_m") is not None:
                 lead = math.hypot(cn - cur["target_n_m"], ce - cur["target_e_m"])
                 if lead > 0.5:
                     pred_line = (
@@ -477,11 +619,18 @@ def render_session(session, save_path=None, animate_path=None, frames=120,
     return out
 
 
-def build_session(args):
+def build_session(args, algorithm=None):
     """A :class:`~scenario.ScenarioSession` from parsed CLI arguments.
 
     This is ``TASK-013``'s front-door role: run parameters chosen here rather than
     in a separate configuration GUI.
+
+    Args:
+        args: Parsed CLI arguments.
+        algorithm: Override ``args.algorithm``. Used by the view's algorithm
+            selector to rebuild the same run under a different guidance law,
+            so every other setting is carried across unchanged and only the
+            algorithm differs — which is what makes the two runs comparable.
     """
     overrides = {}
     for name in ("airspeed_ms", "turn_radius_m", "orbit_radius_m",
@@ -495,20 +644,27 @@ def build_session(args):
         if value is not None:
             overrides[name] = value
     cfg = HarnessConfig(**overrides)
+    name = algorithm or args.algorithm
     # TASK-039: an algorithm that owns its own horizon projects the target from
     # the un-projected estimate, so a state-side --lookahead-steps would lead the
     # ring twice and the second lead would not appear anywhere on screen. Refuse
     # rather than silently pick one.
     lookahead_steps = getattr(args, "lookahead_steps", None) or 0
-    owns_horizon = getattr(algorithms.REGISTRY[args.algorithm],
-                           "owns_horizon", False)
+    owns_horizon = getattr(algorithms.REGISTRY[name], "owns_horizon", False)
     if owns_horizon and lookahead_steps:
-        raise SystemExit(
-            "%s selects its own prediction horizon, so --lookahead-steps must "
-            "be 0 (it is the state-side horizon this algorithm replaces; "
-            "setting both would lead the ring twice). Set the candidate range "
-            "with --ah-k-min-steps / --ah-k-max-steps / --ah-k-step instead."
-            % args.algorithm)
+        if algorithm is None:
+            # Asked for on the command line: refuse, because the operator stated
+            # two horizons and only one can be honoured.
+            raise SystemExit(
+                "%s selects its own prediction horizon, so --lookahead-steps "
+                "must be 0 (it is the state-side horizon this algorithm "
+                "replaces; setting both would lead the ring twice). Set the "
+                "candidate range with --ah-k-min-steps / --ah-k-max-steps / "
+                "--ah-k-step instead." % name)
+        # Switched to from the selector: the horizon came from the PREVIOUS
+        # algorithm's flags, not from a choice about this one, so drop it rather
+        # than refusing a selection the operator plainly meant.
+        lookahead_steps = 0
     legs = [(3600.0, args.mode, args.heading_deg, args.speed_ms)]
     if getattr(args, "no_zone", False):
         zone = False
@@ -517,7 +673,7 @@ def build_session(args):
     else:
         zone = None                      # the 2 km square default
     return scenario.ScenarioSession(
-        legs=legs, algorithm=args.algorithm, config=cfg,
+        legs=legs, algorithm=name, config=cfg,
         start_range_m=args.start_range_m,
         plane_heading_deg=args.plane_heading_deg,
         zone=zone,
@@ -643,7 +799,8 @@ def main(argv=None):
     view = ScenarioView(session, ticks_per_frame=args.ticks_per_frame,
                         interval_ms=args.interval_ms,
                         export_path=args.export_path,
-                        extent_m=args.extent_m, origin=origin)
+                        extent_m=args.extent_m, origin=origin,
+                        session_factory=lambda name: build_session(args, name))
     view.show()
     if args.export_path:
         session.export(args.export_path)
