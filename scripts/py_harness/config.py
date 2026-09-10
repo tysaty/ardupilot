@@ -264,6 +264,24 @@ RH_W_EFFORT = 2.0e3
 RH_W_SMOOTH = 5.0e3
 
 # --------------------------------------------------------------------------
+# Arm D — velocity-aligned stepwise centre (TASK-043)
+# --------------------------------------------------------------------------
+# `velocity_db_circle` centres the ring one control tick ahead of the raw
+# estimate, on constant velocity, and rebuilds the CS+orbit every tick. It
+# declares `owns_horizon`, so it reads `target_est_raw` and applies this step
+# itself rather than consuming `lookahead_steps`.
+
+#: How many control ticks ahead arm D steps the ring centre. **1 is the arm as
+#: specified** — "project only forward to the next value" (`TASK-043` D2) — and
+#: is the default. It is configurable because at `DT_S` and a 15 m/s target one
+#: tick moves the centre 1.5 m, which may be below what the benchmark can
+#: separate from arm 0; the knob exists so that claim can be measured rather
+#: than assumed (`TASK-043` R2). Raising it does NOT make arm D into arm A:
+#: arm A holds one configured horizon state-side, arm D projects from the raw
+#: estimate itself and still replans every tick.
+VD_STEP_TICKS = 1
+
+# --------------------------------------------------------------------------
 # Amplitude weave parameters (TASK-004) — harness-only, illustrative
 # --------------------------------------------------------------------------
 # The names mirror `modules/continuous_weave.lua`. These are **not** tuned from
@@ -377,6 +395,7 @@ class HarnessConfig:
         "rh_w_terminal",
         "rh_w_effort",
         "rh_w_smooth",
+        "vd_step_ticks",
         "_frozen",
     )
 
@@ -418,6 +437,7 @@ class HarnessConfig:
         rh_w_terminal=RH_W_TERMINAL,
         rh_w_effort=RH_W_EFFORT,
         rh_w_smooth=RH_W_SMOOTH,
+        vd_step_ticks=VD_STEP_TICKS,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -456,6 +476,7 @@ class HarnessConfig:
         self.rh_w_terminal = float(rh_w_terminal)
         self.rh_w_effort = float(rh_w_effort)
         self.rh_w_smooth = float(rh_w_smooth)
+        self.vd_step_ticks = int(vd_step_ticks)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -581,6 +602,13 @@ class HarnessConfig:
                 "first curvature is held that long and the second covers the "
                 "rest. Got %r against a horizon of %r"
                 % (self.rh_segment_steps, self.rh_horizon_steps)
+            )
+        # -- arm D, velocity-aligned stepwise centre (TASK-043) --------------
+        if self.vd_step_ticks < 1:
+            raise ValueError(
+                "vd_step_ticks must be >= 1 whole control tick; 0 would remove "
+                "the one-step projection that defines arm D and leave it a "
+                "slower dubins_target_orbit. Got %r" % self.vd_step_ticks
             )
 
     def __setattr__(self, name, value):

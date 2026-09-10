@@ -42,6 +42,7 @@ from .geometry import heading as heading_geom
 from .geometry import orbit as orbit_geom
 from .geometry import rh_geometric as rh_geometric_geom
 from .geometry import var_amplitude_weave as var_amplitude_weave_geom
+from .geometry import velocity_db_circle as velocity_db_circle_geom
 from .geometry import vaw_orbit as vaw_orbit_geom
 from .interface import GeometricAlgorithm, NoSolution
 
@@ -704,6 +705,119 @@ class AdaptiveDbCircleAlgorithm(GeometricAlgorithm):
         }
 
 
+class VelocityDbCircleAlgorithm(GeometricAlgorithm):
+    """CS-orbit about a centre stepped ONE control tick on estimated velocity (``TASK-043`` arm D).
+
+    Arm D of the standoff comparison. Proposed against arms A--C on the argument
+    that projecting the target far forward is unreliable, because the
+    extrapolation is only as good as the constant-velocity model behind it
+    (``A-TGT-002``). Arm D **keeps the state estimator and discards the horizon
+    optimisation**: it steps the ring centre one control tick on the estimated
+    velocity and rebuilds the CS+orbit every tick.
+
+    Where it sits
+    -------------
+    Not a rung above arm C — between arm 0 and arm A::
+
+        arm 0  ring on the target's present position          decides nothing
+        arm D  ring one tick ahead, rebuilt every tick        where to centre it
+        arm A  ring k_horizon ticks ahead, held n_replan      where to centre it
+        arm B  arm A plus horizon selection                   which horizon too
+        arm C  rolled-out curvature, no ring at all           the trajectory
+
+    Its claim is that the rungs above it buy nothing. That is falsifiable, and
+    the benchmark is what settles it.
+
+    **The estimator is required**, and the horizon is its own (``owns_horizon``).
+    It reads ``target_est_raw`` — the un-projected estimate — and applies its own
+    one-tick step, so a state-side ``lookahead_steps`` would lead the ring twice.
+    The runner, the driver and ``benchmark.build_config`` all refuse that
+    combination rather than double-count it silently.
+
+    Like :class:`AdaptiveDbCircleAlgorithm` it does **not** use
+    :func:`_target_ea`, which falls back to the true target position. Without an
+    estimator arm D would quietly become ``dubins_target_orbit`` under another
+    name and be mistaken for evidence, so it raises instead.
+
+    **Chord-cutting applies.** This is a ring construction followed by a carrot,
+    so the settled radius is ``r = R*cos(L/R)`` (``A-VAL-005``) exactly as for
+    arms 0, A and B. Only arm C escapes it, by building no ring.
+
+    Reported per tick: ``phase``, ``direction``, ``curvature``,
+    ``ring_angle_rad`` (orbit phase only), the stepped centre, the prediction
+    lead, ``step_lead_s`` and ``replanned`` (always True — arm D commits
+    nothing, and the flag is reported so the series code needs no special case).
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
+    ``delta_psi_rad``, ``delta_d_m``, ``orbit_precompensate``, ``dt_s``,
+    ``vd_step_ticks``.
+    """
+
+    name = "velocity_db_circle"
+    holds_orbit = True
+    requires_estimate = True
+    owns_horizon = True
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+
+        # The RAW estimate (TASK-043 D3): state.py has already applied
+        # lookahead_steps to target_est, and this arm does its own projection.
+        est_raw = snapshot.get("target_est_raw")
+        if est_raw is None:
+            raise NoSolution(
+                "velocity_db_circle requires the state estimator: it centres "
+                "the ring one control tick ahead on the estimated velocity and "
+                "has no present-position fallback. Re-run with --estimate "
+                "(leave --lookahead-steps at 0; this arm owns its horizon).")
+
+        step_ticks = int(cfg["vd_step_ticks"])
+        dt_s = float(cfg["dt_s"])
+        try:
+            cx, cy = velocity_db_circle_geom.stepped_centre(
+                est_raw, dt_s, step_ticks)
+            g = velocity_db_circle_geom.guidance(
+                px, py, psi_i, cx, cy,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+                cfg["orbit_precompensate"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+
+        state = {
+            "phase": g["phase"],
+            "direction": g["direction"],
+            "curvature": g["curvature"],
+            # Arm D commits nothing: every tick is a replan. Reported as True
+            # rather than omitted so series.py and the plotter need no branch.
+            "replanned": True,
+            "ticks_since_replan": 0,
+            "centre_n_m": cy,
+            "centre_e_m": cx,
+            # How far ahead of the TRUE kangaroo the orbited centre sits. A
+            # designed offset, not an error — reported so it is never read as
+            # one. For arm D this is about one tick of target travel.
+            "prediction_lead_m": math.hypot(cx - snapshot["target_e_m"],
+                                            cy - snapshot["target_n_m"]),
+            # The projection actually applied, seconds. Recorded because
+            # vd_step_ticks is the variable TASK-043 R2 exists to probe.
+            "step_lead_s": dt_s * step_ticks,
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+        }
+        if "ring_angle_rad" in g:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
+
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
+
+
 class AdaptiveHorizonCsAlgorithm(GeometricAlgorithm):
     """CS-orbit whose prediction horizon is **selected** each replan (``TASK-039`` arm B).
 
@@ -1081,6 +1195,7 @@ REGISTRY = {
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
     AdaptiveDbCircleAlgorithm.name: AdaptiveDbCircleAlgorithm,
+    VelocityDbCircleAlgorithm.name: VelocityDbCircleAlgorithm,
     AdaptiveHorizonCsAlgorithm.name: AdaptiveHorizonCsAlgorithm,
     RhGeometricAlgorithm.name: RhGeometricAlgorithm,
     HeadingAAlgorithm.name: HeadingAAlgorithm,
@@ -1098,7 +1213,7 @@ IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
                "var_amplitude_orbit", "dubins", "dubins_target_circle",
                "dubins_target_orbit", "orbit", "dubins_orbit", "heading_a",
                "heading_a_orbit", "adaptive_db_circle", "adaptive_horizon_cs",
-               "rh_geometric")
+               "rh_geometric", "velocity_db_circle")
 
 
 def build(name, config):
@@ -1181,4 +1296,6 @@ def config_dict(cfg):
         "rh_w_terminal": cfg.rh_w_terminal,
         "rh_w_effort": cfg.rh_w_effort,
         "rh_w_smooth": cfg.rh_w_smooth,
+        # Arm D.
+        "vd_step_ticks": cfg.vd_step_ticks,
     }

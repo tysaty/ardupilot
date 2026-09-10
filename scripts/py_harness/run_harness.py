@@ -257,6 +257,14 @@ def build_parser():
         "plan (measured: a 70 m ring held at 45.0 m).",
     )
     parser.add_argument(
+        "--vd-step-ticks", type=int, default=None,
+        help="velocity_db_circle (arm D): control ticks the ring centre is "
+        "stepped ahead of the RAW estimate on constant velocity. Default 1 — "
+        "the arm as specified. Configurable because one tick at dt_s moves the "
+        "centre 1.25 m at 12.5 m/s, which recovers only 3%% of the baseline "
+        "ring error; sweeping it is how TASK-043 R2 is settled.",
+    )
+    parser.add_argument(
         "--no-orbit-precomp",
         action="store_true",
         help="Disable the TASK-027 orbit guidance-ring pre-compensation and fly "
@@ -429,7 +437,9 @@ def build_config(args, weave_eta=None):
     # TASK-039 arms B and C.
     for name in ("ah_k_min_steps", "ah_k_max_steps", "ah_k_step",
                  "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
-                 "rh_candidates_2", "rh_command_steps"):
+                 "rh_candidates_2", "rh_command_steps",
+                 # TASK-043 arm D.
+                 "vd_step_ticks"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
@@ -460,8 +470,9 @@ def main(argv=None):
         print("REFUSED: %s select their own prediction horizon, so "
               "--lookahead-steps must be 0 (it is the state-side horizon they "
               "replace). Set the candidate range with --ah-k-min-steps / "
-              "--ah-k-max-steps / --ah-k-step, or the planning horizon with "
-              "--rh-horizon-steps." % ", ".join(owning), file=sys.stderr)
+              "--ah-k-max-steps / --ah-k-step, the planning horizon with "
+              "--rh-horizon-steps, or arm D's step with --vd-step-ticks."
+              % ", ".join(owning), file=sys.stderr)
         return 2
 
     print(cfg.summary())

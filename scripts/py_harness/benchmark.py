@@ -118,6 +118,20 @@ ARMS = {
         "note": "CS onto the ring about the target's PRESENT position. Every "
                 "other arm has to beat this to have earned its complexity.",
     },
+    "D": {
+        "label": "velocity-stepped centre, one tick",
+        "algorithm": "velocity_db_circle",
+        # Replans every tick and commits nothing, so hold_policy does not apply.
+        # lookahead_steps must be 0: this arm owns its horizon and steps the
+        # centre itself from the raw estimate (TASK-043 D3).
+        "overrides": {"replan_every": 1},
+        "lookahead_steps": 0,
+        "task": "TASK-043",
+        "note": "Keeps the estimator, drops the horizon optimisation. Steps the "
+                "ring centre one control tick on estimated velocity and rebuilds "
+                "every tick. Sits between arm 0 and arm A, and claims the rungs "
+                "above it buy nothing.",
+    },
     "A": {
         "label": "predicted centre, fixed horizon",
         "algorithm": "adaptive_db_circle",
@@ -152,7 +166,7 @@ ARMS = {
 
 #: Order arms are reported in. Explicit, because dict order is an implementation
 #: detail and a comparison table whose row order drifts is hard to read across runs.
-ARM_ORDER = ("0", "A", "B", "C")
+ARM_ORDER = ("0", "D", "A", "B", "C")
 
 
 def feasibility(orbit_radius_m, turn_radius_m, airspeed_ms, target_speed_ms):

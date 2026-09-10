@@ -639,7 +639,9 @@ def build_session(args, algorithm=None):
                  # from the same front door as the ones that came before it.
                  "ah_k_min_steps", "ah_k_max_steps", "ah_k_step",
                  "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
-                 "rh_candidates_2", "rh_command_steps"):
+                 "rh_candidates_2", "rh_command_steps",
+                 # TASK-043 arm D.
+                 "vd_step_ticks"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
