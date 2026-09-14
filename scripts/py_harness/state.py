@@ -279,6 +279,14 @@ class Harness:
                     self.target_est_raw["n_m"] if self.target_est_raw else None,
                 "target_est_raw_e_m":
                     self.target_est_raw["e_m"] if self.target_est_raw else None,
+                # The raw estimate's VELOCITY (TASK-045). Recorded so the
+                # target-velocity estimation error can be computed after the
+                # fact; without it the history carried the estimate's position
+                # only. A pure addition, following the ISSUE-G3 precedent.
+                "target_est_raw_vn_ms":
+                    self.target_est_raw["vn_ms"] if self.target_est_raw else None,
+                "target_est_raw_ve_ms":
+                    self.target_est_raw["ve_ms"] if self.target_est_raw else None,
             }
         )
 

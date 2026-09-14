@@ -29,14 +29,20 @@ from . import orbit as orbit_geom
 
 
 def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-             look_ahead_m, delta_psi, delta_d, precompensate=True):
+             look_ahead_m, delta_psi, delta_d, precompensate=True,
+             preferred_direction=None, sense_margin_m=0.0):
     """One guidance point: approach outside the ring, orbit continuation on it.
 
     Returns a dict ``{"gx", "gy", "phase", "direction", "curvature",
-    "ring_angle_rad"?}``. ``phase`` is ``"approach"`` (outside) or ``"orbit"``
-    (on/inside) — a discrete geometric switch, never a blended ramp weight.
-    ``direction`` is ``"cw"``/``"ccw"``; ``ring_angle_rad`` is present in the orbit
-    phase only.
+    "ring_angle_rad"?, "cost_cw_m"?, "cost_ccw_m"?}``. ``phase`` is
+    ``"approach"`` (outside) or ``"orbit"`` (on/inside) — a discrete geometric
+    switch, never a blended ramp weight. ``direction`` is ``"cw"``/``"ccw"``;
+    ``ring_angle_rad`` is present in the orbit phase only, the two senses'
+    costs in the approach phase only.
+
+    ``preferred_direction`` / ``sense_margin_m`` (`TASK-047`) apply to the
+    approach phase and are passed to :func:`dubins_target_circle.guidance`; the
+    defaults reproduce the baseline exactly.
 
     Raises:
         ValueError: If ``orbit_radius_m < turn_radius_m`` (curvature bound) or the
@@ -55,13 +61,16 @@ def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     if d > R:
         # Outside the ring: approach on the TASK-024 target-centred final circle.
         g = dtc.guidance(px, py, psi_i, tx, ty, R, turn_radius_m,
-                         look_ahead_m, delta_psi, delta_d)
+                         look_ahead_m, delta_psi, delta_d,
+                         preferred_direction, sense_margin_m)
         return {
             "gx": g["gx"],
             "gy": g["gy"],
             "phase": "approach",
             "direction": g["direction"],
             "curvature": g["curvature"],
+            "cost_cw_m": g["cost_cw_m"],
+            "cost_ccw_m": g["cost_ccw_m"],
         }
 
     # On / inside the ring: continue around it. No ramp — the tangent arrival makes

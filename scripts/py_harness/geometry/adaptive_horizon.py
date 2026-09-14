@@ -180,7 +180,8 @@ def _bearing_from_velocity(px, py, cx, cy, vx, vy):
 
 def score_candidate(px, py, psi_i, est_x, est_y, vx, vy, k_steps, k_prev_steps,
                     dt_s, airspeed_ms, orbit_radius_m, turn_radius_m,
-                    delta_psi, delta_d, weights, path_samples, tube_len_m):
+                    delta_psi, delta_d, weights, path_samples, tube_len_m,
+                    preferred_direction=None, sense_margin_m=0.0):
     """Score one candidate horizon. Returns a dict, or ``None`` if it has no plan.
 
     ``None`` means the CS construction does not solve for this candidate — most
@@ -217,7 +218,7 @@ def score_candidate(px, py, psi_i, est_x, est_y, vx, vy, k_steps, k_prev_steps,
     try:
         pts, reach, _direction, arrival = dtc.shortest_path(
             px, py, psi_i, cx, cy, orbit_radius_m, turn_radius_m,
-            delta_psi, delta_d)
+            delta_psi, delta_d, preferred_direction, sense_margin_m)
     except ValueError:
         return None
 
@@ -306,7 +307,8 @@ def score_candidate(px, py, psi_i, est_x, est_y, vx, vy, k_steps, k_prev_steps,
 
 def select_horizon(px, py, psi_i, est_x, est_y, vx, vy, k_prev_steps, dt_s,
                    airspeed_ms, orbit_radius_m, turn_radius_m, delta_psi,
-                   delta_d, horizons, weights, path_samples, tube_len_m):
+                   delta_d, horizons, weights, path_samples, tube_len_m,
+                   preferred_direction=None, sense_margin_m=0.0):
     """Score every candidate in ``horizons`` and return the least-cost one.
 
     Args:
@@ -326,7 +328,8 @@ def select_horizon(px, py, psi_i, est_x, est_y, vx, vy, k_prev_steps, dt_s,
         cand = score_candidate(px, py, psi_i, est_x, est_y, vx, vy, k,
                                k_prev_steps, dt_s, airspeed_ms, orbit_radius_m,
                                turn_radius_m, delta_psi, delta_d, weights,
-                               path_samples, tube_len_m)
+                               path_samples, tube_len_m, preferred_direction,
+                               sense_margin_m)
         if cand is None:
             continue
         solved += 1

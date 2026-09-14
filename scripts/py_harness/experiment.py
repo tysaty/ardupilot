@@ -45,6 +45,7 @@ never sees.
 """
 
 import argparse
+import csv
 import datetime
 import json
 import math
@@ -61,7 +62,7 @@ from . import scenario
 from . import series as series_mod
 from . import tangent_error
 from .config import HarnessConfig, InfeasibleConfiguration
-from .kangaroo import LEG_MODES
+from .kangaroo import ELASTIC_BASE_FIELD, ELASTIC_BASES, ELASTIC_MODE, LEG_MODES
 
 
 #: Bundle schema version. Bumped whenever a field's **meaning** changes or a
@@ -73,6 +74,12 @@ SCHEMA_VERSION = 1
 #: Where bundles live (`TASK-040` D2). Separate from ``plots/``, which is scratch
 #: render output and already carries over 100 MB.
 DEFAULT_ROOT = "experiments"
+
+#: Where a :class:`~scenario.ScenarioSession` starts the aircraft: the origin of
+#: the local frame, always (``scenario.py`` builds ``PlaneState(0, 0, ...)``).
+#: Needed for tick 0 of the plane velocity error (`TASK-045`), whose backward
+#: difference has no earlier recorded sample.
+PLANE_START_NE = (0.0, 0.0)
 
 #: Agreement bound for the replay check, metres. The same run executed twice from
 #: the same spec is deterministic (`PR-004`), so this is a floating-point
@@ -140,6 +147,27 @@ def default_spec():
                  "containment_margin_m": None},
         "run": {"duration_s": 60.0, "visualise": False},
     }
+
+
+def leg_tuple(leg):
+    """A spec leg object as the tuple :func:`kangaroo.make_segments` takes.
+
+    Four elements, or five when the leg names an ``elastic_base``
+    (`TASK-045` D2) — the base is carried only when present, so a spec without
+    the field builds exactly the legs it did before.
+    """
+    out = (leg["duration_s"], leg["mode"], leg["heading_deg"], leg["speed_ms"])
+    base = leg.get(ELASTIC_BASE_FIELD)
+    return out if base is None else out + (base,)
+
+
+def leg_dict(leg):
+    """The inverse of :func:`leg_tuple`: a leg tuple as a spec leg object."""
+    out = {"duration_s": leg[0], "mode": leg[1], "heading_deg": leg[2],
+           "speed_ms": leg[3]}
+    if len(leg) > 4 and leg[4] is not None:
+        out[ELASTIC_BASE_FIELD] = leg[4]
+    return out
 
 
 def _require(container, key, where):
@@ -222,6 +250,19 @@ def validate_spec(spec):
             raise SpecError("%s.speed_ms must be >= 0 m/s, got %r"
                             % (where, speed))
         _require(leg, "heading_deg", where)
+        # Optional (TASK-045 D2): the base mode an elastic leg is travelled
+        # over. Meaningful on an elastic leg only; refused elsewhere rather
+        # than ignored, because an ignored field is a field that lies.
+        base = leg.get(ELASTIC_BASE_FIELD)
+        if base is not None:
+            if mode != ELASTIC_MODE:
+                raise SpecError("%s.%s is set on a %r leg; it applies to "
+                                "'elastic' legs only"
+                                % (where, ELASTIC_BASE_FIELD, mode))
+            if base not in ELASTIC_BASES:
+                raise SpecError("%s.%s %r is unknown; use one of %s"
+                                % (where, ELASTIC_BASE_FIELD, base,
+                                   ", ".join(ELASTIC_BASES)))
 
     run = _require(spec, "run", "the specification")
     duration = _require(run, "duration_s", "run")
@@ -322,8 +363,7 @@ def session_from_spec(spec):
     kangaroo = spec["kangaroo"]
     zone_spec = spec.get("zone") or {}
 
-    legs = [(leg["duration_s"], leg["mode"], leg["heading_deg"], leg["speed_ms"])
-            for leg in kangaroo["legs"]]
+    legs = [leg_tuple(leg) for leg in kangaroo["legs"]]
 
     zone = None
     if zone_spec.get("side_m") is None:
@@ -367,11 +407,7 @@ def spec_from_session(session, base_spec, source="interactive"):
     mechanism and so replay identically.
     """
     spec = json.loads(json.dumps(base_spec))       # deep copy, JSON-safe
-    spec["kangaroo"]["legs"] = [
-        {"duration_s": leg[0], "mode": leg[1], "heading_deg": leg[2],
-         "speed_ms": leg[3]}
-        for leg in session.export_legs()
-    ]
+    spec["kangaroo"]["legs"] = [leg_dict(leg) for leg in session.export_legs()]
     spec["run"]["duration_s"] = session.t_s
     spec["source"] = source
     return validate_spec(spec)
@@ -440,7 +476,8 @@ def metrics_record(session, n_a_max_steps=None):
         record.update({"ring": None, "deformation": None,
                        "deformation_by_speed": None, "tangent": None,
                        "reconvergence": None, "zone": None,
-                       "max_curvature_1pm": None, "curvature_ok": None})
+                       "max_curvature_1pm": None, "curvature_ok": None,
+                       "post_contact": None, "velocity": None})
         return record
 
     radius = config.orbit_radius_m
@@ -453,6 +490,16 @@ def metrics_record(session, n_a_max_steps=None):
                                                   n_a_max_steps)
     record["reconvergence"] = session.reconvergence()
     record["zone"] = session.zone_report()
+    # TASK-045: how well the ring is held once reached, about both centres
+    # (TASK-033 D2), and the two velocity-error forms. `None` — never 0.0 —
+    # wherever contact never occurred or no estimator ran.
+    record["post_contact"] = dict(
+        (centre, metrics.post_contact_radial(history, radius, config.dt_s,
+                                             centre))
+        for centre in metrics.CENTRES)
+    record["velocity"] = metrics.velocity_errors(
+        history, config, plane_start_ne=PLANE_START_NE,
+        contact_tick=record["post_contact"]["target"]["contact_tick"])
 
     curvatures = [(s.get("algorithm_state") or {}).get("curvature")
                   for s in history]
@@ -557,7 +604,8 @@ def marker_times(spec, session):
 
 
 def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
-                 source="spec", n_a_max_steps=None, render=True):
+                 source="spec", n_a_max_steps=None, render=True,
+                 directory=None, cell=None, extra_record=None):
     """Write the whole bundle and return ``{name: path}``.
 
     Args:
@@ -570,20 +618,35 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
             the two modes' bundles.
         n_a_max_steps: Transit limit for the registration error.
         render: Draw the PNGs. False for a headless test that only wants the JSON.
+        directory: Write here instead of :func:`bundle_dir` under ``root``. A
+            campaign (`TASK-045`) lays its cells out as ``<campaign>/<cell-id>/``
+            rather than by date.
+        cell: Optional identity for the ``ticks.csv`` identity columns
+            (``arm``, ``mode_base``, ``mode_pace``, ``speed_ratio``, ``seed``).
+            Absent columns are written empty.
+        extra_record: Optional plain dict merged into ``record.json`` at the top
+            level — a campaign's cell block, an S1 block. Never overrides a
+            standard key.
     """
     spec = json.loads(json.dumps(spec))
     spec["source"] = source
     experiment_id = spec.get("experiment_id") or make_experiment_id(spec)
     spec["experiment_id"] = experiment_id
 
-    directory = bundle_dir(experiment_id, root)
+    directory = directory or bundle_dir(experiment_id, root)
     os.makedirs(directory, exist_ok=True)
     written = {}
 
     written["spec"] = save_spec(spec, os.path.join(directory, "spec.json"))
 
     config = session.config
-    all_series = series_mod.all_series(session.history, config, n_a_max_steps)
+    # Every series, empty ones included, for ticks.csv — whose column set must
+    # not depend on the arm. The record and series.json keep the drop-empty
+    # convention: a series nothing produced is noise there.
+    every_series = series_mod.all_series(session.history, config, n_a_max_steps,
+                                         drop_empty=False,
+                                         plane_start_ne=PLANE_START_NE)
+    all_series = dict((n, s) for n, s in every_series.items() if s.defined)
     record = {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": experiment_id,
@@ -600,9 +663,7 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
                        for name in HarnessConfig.__slots__
                        if not name.startswith("_")),
         "kangaroo": {
-            "legs_flown": [
-                {"duration_s": leg[0], "mode": leg[1], "heading_deg": leg[2],
-                 "speed_ms": leg[3]} for leg in session.export_legs()],
+            "legs_flown": [leg_dict(leg) for leg in session.export_legs()],
             "changes": session.change_log,
             "containment_turns": len(session.containment_events),
             "seed": spec["kangaroo"].get("seed"),
@@ -622,11 +683,20 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
             "why": "disabled with --no-verify; the spec's claim to reproduce "
                    "this run is therefore untested",
         }
+    for key, value in (extra_record or {}).items():
+        if key in record:
+            raise ValueError("extra_record may not override the standard "
+                             "record field %r" % key)
+        record[key] = value
 
     with open(os.path.join(directory, "record.json"), "w") as handle:
         json.dump(record, handle, indent=2, default=str)
         handle.write("\n")
     written["record"] = os.path.join(directory, "record.json")
+
+    written["ticks"] = write_ticks_csv(
+        os.path.join(directory, "ticks.csv"), session.history, config,
+        every_series, record["metrics"], experiment_id, cell)
 
     written["history"] = plotter.save_run(
         os.path.join(directory, "history.json"), experiment_id,
@@ -659,6 +729,124 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
             written["view"] = out["png"]
 
     return written
+
+
+#: ``ticks.csv`` columns (`TASK-045`), one row per control tick, flat, every
+#: column named and unit-suffixed. The training-data form `TASK-042` consumes:
+#: the label ("where the kangaroo actually was") is the target-truth group at
+#: tick ``i + k``; the features are everything at tick ``i``. Undefined is an
+#: **empty cell, never 0** (the `series.py` rule carried through).
+TICKS_COLUMNS = (
+    # identity
+    "cell_id", "arm", "algorithm", "mode_base", "mode_pace", "speed_ratio",
+    "seed", "tick", "t_s",
+    # plane state
+    "plane_n_m", "plane_e_m", "plane_hdg_rad", "plane_vn_ms", "plane_ve_ms",
+    # target truth
+    "target_n_m", "target_e_m", "target_vn_ms", "target_ve_ms",
+    "target_speed_ms",
+    # estimate
+    "target_est_raw_n_m", "target_est_raw_e_m", "target_est_raw_vn_ms",
+    "target_est_raw_ve_ms", "target_est_n_m", "target_est_e_m",
+    # horizon / lookahead
+    "lookahead_steps", "selected_horizon_s", "step_lead_s", "replan_every",
+    "replanned", "ticks_since_replan",
+    # guidance
+    "guidance_n_m", "guidance_e_m", "centre_n_m", "centre_e_m",
+    "commanded_curvature_1pm", "phase",
+    # errors
+    "ring_error_target_m", "ring_error_ring_m", "e_tan_m", "prediction_lead_m",
+    "post_contact_radial_target_m", "post_contact_radial_ring_m",
+    "plane_velocity_error_ms", "target_velocity_estimate_error_ms",
+    # flags
+    "post_contact", "infeasible",
+)
+
+#: Series whose per-tick value is copied straight into a same-named column.
+_TICKS_FROM_SERIES = (
+    "target_speed_ms", "selected_horizon_s", "commanded_curvature_1pm",
+    "ring_error_target_m", "ring_error_ring_m", "e_tan_m", "prediction_lead_m",
+    "post_contact_radial_target_m", "post_contact_radial_ring_m",
+    "plane_velocity_error_ms", "target_velocity_estimate_error_ms",
+)
+
+#: ``algorithm_state`` fields copied into a same-named column when reported.
+_TICKS_FROM_STATE = ("step_lead_s", "replanned", "ticks_since_replan",
+                     "centre_n_m", "centre_e_m", "phase")
+
+
+def _csv_cell(value):
+    """Empty for ``None``; ``repr`` precision for floats so a row round-trips."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, float):
+        return repr(value)
+    return str(value)
+
+
+def write_ticks_csv(path, history, config, every_series, metrics_block,
+                    experiment_id, cell=None):
+    """Write the flat per-tick table (:data:`TICKS_COLUMNS`) and return ``path``.
+
+    A run with no history writes the header only: the file exists with the
+    right columns, so a stopped cell is a table of nothing rather than an
+    absent table (`VR-012`).
+
+    Args:
+        history: Recorded run history.
+        config: The run's `HarnessConfig`.
+        every_series: ``series.all_series(..., drop_empty=False)`` output.
+        metrics_block: The record's ``metrics`` (for the contact tick).
+        experiment_id: The ``cell_id`` column.
+        cell: Optional identity dict (see :func:`write_bundle`).
+    """
+    cell = cell or {}
+    contact = ((metrics_block or {}).get("post_contact") or {}).get("target")
+    contact_tick = contact.get("contact_tick") if contact else None
+    identity = {
+        "cell_id": cell.get("cell_id", experiment_id),
+        "arm": cell.get("arm"),
+        "algorithm": cell.get("algorithm"),
+        "mode_base": cell.get("mode_base"),
+        "mode_pace": cell.get("mode_pace"),
+        "speed_ratio": cell.get("speed_ratio"),
+        "seed": cell.get("seed"),
+    }
+    with open(path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(TICKS_COLUMNS)
+        prev = PLANE_START_NE
+        for tick, sample in enumerate(history):
+            state = sample.get("algorithm_state") or {}
+            row = dict(identity)
+            row["tick"] = tick
+            row["t_s"] = sample["t_s"]
+            for name in ("plane_n_m", "plane_e_m", "plane_hdg_rad",
+                         "target_n_m", "target_e_m", "target_vn_ms",
+                         "target_ve_ms", "target_est_raw_n_m",
+                         "target_est_raw_e_m", "target_est_raw_vn_ms",
+                         "target_est_raw_ve_ms", "target_est_n_m",
+                         "target_est_e_m", "guidance_n_m", "guidance_e_m",
+                         "infeasible"):
+                row[name] = sample.get(name)
+            # Ground velocity: the backward difference of the recorded
+            # position, the same quantity the plane velocity error is built on.
+            row["plane_vn_ms"] = (sample["plane_n_m"] - prev[0]) / config.dt_s
+            row["plane_ve_ms"] = (sample["plane_e_m"] - prev[1]) / config.dt_s
+            prev = (sample["plane_n_m"], sample["plane_e_m"])
+            row["lookahead_steps"] = config.lookahead_steps
+            row["replan_every"] = config.replan_every
+            for name in _TICKS_FROM_STATE:
+                row[name] = state.get(name)
+            for name in _TICKS_FROM_SERIES:
+                series = every_series.get(name)
+                row[name] = series.values[tick] if series is not None else None
+            row["post_contact"] = (contact_tick is not None
+                                   and tick >= contact_tick)
+            writer.writerow([_csv_cell(row.get(name)) for name in TICKS_COLUMNS])
+    return path
 
 
 def load_bundle(directory):

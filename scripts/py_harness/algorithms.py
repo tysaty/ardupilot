@@ -47,6 +47,30 @@ from .geometry import vaw_orbit as vaw_orbit_geom
 from .interface import GeometricAlgorithm, NoSolution
 
 
+def _held_sense(algorithm, snapshot):
+    """``(preferred_direction, sense_margin_m)`` for a CS solve (`TASK-048`).
+
+    ``(None, 0.0)`` — the plain argmin — unless the adapter class declares
+    ``sense_hysteresis``; then the previous tick's ``direction`` read back from
+    the snapshot and the configured ``cs_sense_margin_m``. Kept in one place so
+    arms A, B and D hold the sense by exactly the rule `TASK-047` gave arm 0.
+    """
+    if not getattr(algorithm, "sense_hysteresis", False):
+        return None, 0.0
+    previous = (snapshot.get("algorithm_state") or {}).get("direction")
+    if previous not in ("cw", "ccw"):
+        previous = None
+    return previous, float(algorithm.config["cs_sense_margin_m"])
+
+
+def _sense_state(state, previous):
+    """Add the hysteresis bookkeeping fields to a reported state."""
+    state["sense_held"] = previous is not None and state.get("direction") == previous
+    state["sense_switched"] = (previous is not None
+                               and state.get("direction") != previous)
+    return state
+
+
 def _target_ea(snapshot):
     """Target ``(east, north)`` for guidance: the estimate if present, else true.
 
@@ -450,6 +474,82 @@ class DubinsTargetOrbitAlgorithm(GeometricAlgorithm):
         }
 
 
+class DubinsTargetOrbitHystAlgorithm(GeometricAlgorithm):
+    """The baseline CS-onto-orbit with **orbit-sense hysteresis** (``TASK-047``).
+
+    Identical geometry to :class:`DubinsTargetOrbitAlgorithm` — the same
+    turn-plus-straight onto the target-centred ring's tangent, the same
+    ramp-free orbit continuation — with one difference in the approach phase:
+    the orbit sense (``cw``/``ccw``) chosen at one tick is carried in
+    ``algorithm_state["direction"]`` and **kept** at the next unless the other
+    sense's best candidate is cheaper by more than ``cs_sense_margin_m``.
+
+    Why (``ISSUE-G11``): once the initial turn has put the aircraft on the line
+    of sight to the target, the two senses' tangent candidates are mirror
+    images of equal cost, and the baseline's stateless argmin alternates
+    between them with rounding. The carrot then averages to the line of sight
+    and the flown approach is pure pursuit until the last look-ahead, where the
+    carrot clamps to the arrival point. Holding the sense keeps the carrot on
+    one tangent, so the aircraft flies the CS path the construction describes.
+
+    The baseline is left untouched so its recorded results keep their meaning
+    and the two can be compared (a **new** registry entry, not a change). The
+    held sense is the algorithm's own previous output read back from the
+    snapshot, so nothing new crosses the interface (``VR-014``); on the first
+    tick, and whenever the held sense has no tangent, the plain argmin applies.
+    The orbit phase is unchanged, and the sense it derives from the heading is
+    what a re-entry into the approach phase (the chatter at ``d ~ R``) holds.
+
+    Reported per tick, in addition to the baseline's fields: ``sense_held``
+    (the previous sense was kept), ``sense_switched`` (a held sense was
+    abandoned for the other), ``cost_cw_m`` / ``cost_ccw_m`` (approach only).
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``, ``look_ahead_m``,
+    ``delta_psi_rad``, ``delta_d_m``, ``orbit_precompensate``,
+    ``cs_sense_margin_m``.
+    """
+
+    name = "dubins_target_orbit_hyst"
+    holds_orbit = True
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        tx, ty = _target_ea(snapshot)
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        previous = (snapshot.get("algorithm_state") or {}).get("direction")
+        if previous not in ("cw", "ccw"):
+            previous = None
+        try:
+            g = dubins_target_orbit_geom.guidance(
+                px, py, psi_i, tx, ty,
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+                cfg["orbit_precompensate"],
+                preferred_direction=previous,
+                sense_margin_m=cfg["cs_sense_margin_m"],
+            )
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+        state = {
+            "phase": g["phase"],
+            "direction": g["direction"],
+            "curvature": g["curvature"],
+            "sense_held": previous is not None and g["direction"] == previous,
+            "sense_switched": previous is not None and g["direction"] != previous,
+        }
+        if "ring_angle_rad" in g:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
+        if "cost_cw_m" in g:
+            state["cost_cw_m"] = g["cost_cw_m"]
+            state["cost_ccw_m"] = g["cost_ccw_m"]
+        return {
+            "guidance_n_m": g["gy"],
+            "guidance_e_m": g["gx"],
+            "algorithm_state": state,
+        }
+
+
 class OrbitAlgorithm(GeometricAlgorithm):
     """Circle the target on a ring of radius ``orbit_radius_m``.
 
@@ -633,12 +733,13 @@ class AdaptiveDbCircleAlgorithm(GeometricAlgorithm):
                 plan = None
             ticks = prev_ticks + 1
 
+        preferred, margin = _held_sense(self, snapshot)
         try:
             g = adaptive_db_circle_geom.guidance(
                 px, py, psi_i, cx, cy, plan,
                 cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
-                policy, cfg["orbit_precompensate"],
+                policy, cfg["orbit_precompensate"], preferred, margin,
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -778,11 +879,12 @@ class VelocityDbCircleAlgorithm(GeometricAlgorithm):
         try:
             cx, cy = velocity_db_circle_geom.stepped_centre(
                 est_raw, dt_s, step_ticks)
+            preferred, margin = _held_sense(self, snapshot)
             g = velocity_db_circle_geom.guidance(
                 px, py, psi_i, cx, cy,
                 cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
-                cfg["orbit_precompensate"],
+                cfg["orbit_precompensate"], preferred, margin,
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -913,13 +1015,14 @@ class AdaptiveHorizonCsAlgorithm(GeometricAlgorithm):
 
         chosen = None
         if replanned and not in_orbit_phase:
+            preferred, margin = _held_sense(self, snapshot)
             chosen = adaptive_horizon_geom.select_horizon(
                 px, py, psi_i, est["e_m"], est["n_m"], est["ve_ms"],
                 est["vn_ms"], k_prev, cfg["dt_s"], cfg["airspeed_ms"],
                 cfg["orbit_radius_m"], cfg["turn_radius_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
                 cfg["ah_candidate_horizons"], weights,
-                int(cfg["ah_path_samples"]), tube_len_m)
+                int(cfg["ah_path_samples"]), tube_len_m, preferred, margin)
 
         if chosen is not None:
             k_sel = chosen["k_steps"]
@@ -947,12 +1050,13 @@ class AdaptiveHorizonCsAlgorithm(GeometricAlgorithm):
                 plan = None
             ticks = prev_ticks + 1
 
+        preferred, margin = _held_sense(self, snapshot)
         try:
             g = adaptive_db_circle_geom.guidance(
                 px, py, psi_i, cx, cy, plan,
                 cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
                 cfg["delta_psi_rad"], cfg["delta_d_m"],
-                policy, cfg["orbit_precompensate"],
+                policy, cfg["orbit_precompensate"], preferred, margin,
             )
         except ValueError as exc:
             raise NoSolution(str(exc))
@@ -1184,6 +1288,58 @@ class HeadingAOrbitAlgorithm(GeometricAlgorithm):
 
 #: Name-to-class registry. Selecting an algorithm is a lookup here and nothing
 #: else; no other part of the harness may branch on algorithm identity.
+# --------------------------------------------------------------------------
+# Orbit-sense hysteresis across the ring-building arms (TASK-048)
+# --------------------------------------------------------------------------
+# ISSUE-G11: every CS-onto-orbit arm re-solves the four (s1, s2) candidates
+# each tick and takes the argmin, so on the line of sight the cw / ccw
+# tangents alternate and the flown approach is pursuit. TASK-047 fixed that for
+# arm 0 as a new registry entry; these three do the same for arms A, D and B
+# through one shared rule (`_held_sense`): the previous tick's `direction` is
+# kept unless the other sense is cheaper by more than `cs_sense_margin_m`.
+# Each is a subclass that flips one flag and adds the bookkeeping fields; the
+# parent adapters are unchanged in behaviour when the flag is off. Arm C
+# (`rh_geometric`) chooses no orbit sense and has no counterpart.
+
+
+class _SenseHysteresisMixin:
+    sense_hysteresis = True
+
+    def guidance_point(self, snapshot):
+        previous, _margin = _held_sense(self, snapshot)
+        out = super().guidance_point(snapshot)
+        _sense_state(out["algorithm_state"], previous)
+        return out
+
+
+class AdaptiveDbCircleHystAlgorithm(_SenseHysteresisMixin,
+                                    AdaptiveDbCircleAlgorithm):
+    """Arm A with orbit-sense hysteresis (`TASK-048`); see
+    :class:`AdaptiveDbCircleAlgorithm` and :class:`DubinsTargetOrbitHystAlgorithm`.
+    The held sense applies to the committed plan's CS solve at every replan."""
+
+    name = "adaptive_db_circle_hyst"
+
+
+class VelocityDbCircleHystAlgorithm(_SenseHysteresisMixin,
+                                    VelocityDbCircleAlgorithm):
+    """Arm D with orbit-sense hysteresis (`TASK-048`); see
+    :class:`VelocityDbCircleAlgorithm`. The held sense applies to the per-tick
+    CS re-solve about the stepped centre."""
+
+    name = "velocity_db_circle_hyst"
+
+
+class AdaptiveHorizonCsHystAlgorithm(_SenseHysteresisMixin,
+                                     AdaptiveHorizonCsAlgorithm):
+    """Arm B with orbit-sense hysteresis (`TASK-048`); see
+    :class:`AdaptiveHorizonCsAlgorithm`. The held sense applies to every
+    candidate horizon's CS solve in the selector, so the candidates are scored
+    on the sense that will be flown, and to the committed plan."""
+
+    name = "adaptive_horizon_cs_hyst"
+
+
 REGISTRY = {
     AmplitudeAlgorithm.name: AmplitudeAlgorithm,
     AmplitudeOrbitAlgorithm.name: AmplitudeOrbitAlgorithm,
@@ -1194,6 +1350,10 @@ REGISTRY = {
     DubinsTargetOrbitAlgorithm.name: DubinsTargetOrbitAlgorithm,
     OrbitAlgorithm.name: OrbitAlgorithm,
     DubinsOrbitAlgorithm.name: DubinsOrbitAlgorithm,
+    DubinsTargetOrbitHystAlgorithm.name: DubinsTargetOrbitHystAlgorithm,
+    AdaptiveDbCircleHystAlgorithm.name: AdaptiveDbCircleHystAlgorithm,
+    VelocityDbCircleHystAlgorithm.name: VelocityDbCircleHystAlgorithm,
+    AdaptiveHorizonCsHystAlgorithm.name: AdaptiveHorizonCsHystAlgorithm,
     AdaptiveDbCircleAlgorithm.name: AdaptiveDbCircleAlgorithm,
     VelocityDbCircleAlgorithm.name: VelocityDbCircleAlgorithm,
     AdaptiveHorizonCsAlgorithm.name: AdaptiveHorizonCsAlgorithm,
@@ -1213,7 +1373,9 @@ IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
                "var_amplitude_orbit", "dubins", "dubins_target_circle",
                "dubins_target_orbit", "orbit", "dubins_orbit", "heading_a",
                "heading_a_orbit", "adaptive_db_circle", "adaptive_horizon_cs",
-               "rh_geometric", "velocity_db_circle")
+               "rh_geometric", "velocity_db_circle",
+               "dubins_target_orbit_hyst", "adaptive_db_circle_hyst",
+               "velocity_db_circle_hyst", "adaptive_horizon_cs_hyst")
 
 
 def build(name, config):
@@ -1298,4 +1460,6 @@ def config_dict(cfg):
         "rh_w_smooth": cfg.rh_w_smooth,
         # Arm D.
         "vd_step_ticks": cfg.vd_step_ticks,
+        # TASK-047 sense hysteresis.
+        "cs_sense_margin_m": cfg.cs_sense_margin_m,
     }

@@ -296,15 +296,82 @@ def commanded_curvature(history):
                   t_s, values, excluded)
 
 
+def post_contact_radial(history, orbit_radius_m, centre="target"):
+    """Signed radial error from **first contact** onward, metres (`TASK-045`).
+
+    The per-tick form of :func:`metrics.post_contact_radial`: ``None`` on every
+    tick before the aircraft first reaches or crosses inside the ring, the
+    signed ``range − R`` from that tick on. A run that never makes contact is
+    ``None`` throughout, with the reason counted — which is the expected
+    outcome for every unreachable cell of the grid, and must draw as a gap.
+    """
+    errors = metrics.signed_radial_errors(history, orbit_radius_m, centre)
+    i_c = metrics.first_contact_index(errors)
+    t_s, values, excluded = [], [], {}
+    for index, sample in enumerate(history):
+        t_s.append(sample["t_s"])
+        if i_c is None:
+            values.append(None)
+            excluded["no_contact"] = excluded.get("no_contact", 0) + 1
+        elif index < i_c:
+            values.append(None)
+            excluded["before_contact"] = excluded.get("before_contact", 0) + 1
+        elif errors[index] is None:
+            values.append(None)
+            excluded["no_centre"] = excluded.get("no_centre", 0) + 1
+        else:
+            values.append(errors[index])
+    label = ("post-contact\nradial vs target" if centre == "target"
+             else "post-contact\nradial vs held")
+    return Series("post_contact_radial_%s_m" % centre, label, "m", t_s, values,
+                  excluded, signed=True)
+
+
+def plane_velocity_error(history, config, plane_start_ne=None):
+    """``‖v_ground − v_commanded‖`` of the aircraft per tick, m/s (`TASK-045`).
+
+    **Identically zero in this harness** (`A-VAL-001`) and recorded anyway, so
+    the column exists under this name when the SITL repeat produces a non-zero
+    one. Tick 0 is ``None`` unless the pre-run position is given.
+    """
+    values = metrics.plane_velocity_errors(history, config.airspeed_ms,
+                                           config.dt_s, plane_start_ne)
+    t_s = [sample["t_s"] for sample in history]
+    excluded = {}
+    if values and values[0] is None:
+        excluded["no_previous_position"] = 1
+    return Series("plane_velocity_error_ms", "plane velocity\nerror (A-VAL-001)",
+                  "m/s", t_s, values, excluded)
+
+
+def target_velocity_estimate_error(history):
+    """``‖v̂_K − v_K‖`` per tick, m/s (`TASK-045`) — the estimator's velocity
+    against the truth. ``None`` throughout for an algorithm without an
+    estimator (arm 0), which :func:`all_series` then drops."""
+    values = metrics.target_velocity_estimate_errors(history)
+    t_s, excluded = [], {}
+    for sample, value in zip(history, values):
+        t_s.append(sample["t_s"])
+        if value is None:
+            excluded["no_estimate"] = excluded.get("no_estimate", 0) + 1
+    return Series("target_velocity_estimate_error_ms",
+                  "target velocity\nestimate error", "m/s", t_s, values,
+                  excluded)
+
+
 #: The series extracted for every run, in plotting order. Ring errors first
 #: because they are what the mission cares about; the target's speed last
-#: because it is context for the rest rather than a result.
-SERIES_ORDER = ("ring_error_target_m", "ring_error_ring_m", "e_tan_m",
-                "prediction_lead_m", "selected_horizon_s",
-                "commanded_curvature_1pm", "target_speed_ms")
+#: because it is context for the rest rather than a result. The `TASK-045`
+#: quantities sit after the ring errors they qualify.
+SERIES_ORDER = ("ring_error_target_m", "ring_error_ring_m",
+                "post_contact_radial_target_m", "post_contact_radial_ring_m",
+                "e_tan_m", "prediction_lead_m", "selected_horizon_s",
+                "commanded_curvature_1pm", "plane_velocity_error_ms",
+                "target_velocity_estimate_error_ms", "target_speed_ms")
 
 
-def all_series(history, config, n_a_max_steps=None, drop_empty=True):
+def all_series(history, config, n_a_max_steps=None, drop_empty=True,
+               plane_start_ne=None):
     """Every series for a run, as ``{name: Series}`` in :data:`SERIES_ORDER`.
 
     Args:
@@ -318,15 +385,25 @@ def all_series(history, config, n_a_max_steps=None, drop_empty=True):
             run never left the ring is a **finding**, and the two are
             indistinguishable from the series alone — so `False` keeps both and
             the caller reads ``excluded`` to tell them apart.
+        plane_start_ne: The aircraft's pre-run ``(n_m, e_m)``, for tick 0 of
+            the plane velocity error (`TASK-045`).
     """
     produced = {
         "ring_error_target_m": ring_error(history, config.orbit_radius_m,
                                           "target"),
         "ring_error_ring_m": ring_error(history, config.orbit_radius_m, "ring"),
+        "post_contact_radial_target_m": post_contact_radial(
+            history, config.orbit_radius_m, "target"),
+        "post_contact_radial_ring_m": post_contact_radial(
+            history, config.orbit_radius_m, "ring"),
         "e_tan_m": tangent_registration(history, config, n_a_max_steps),
         "prediction_lead_m": prediction_lead(history),
         "selected_horizon_s": selected_horizon(history, config.dt_s),
         "commanded_curvature_1pm": commanded_curvature(history),
+        "plane_velocity_error_ms": plane_velocity_error(history, config,
+                                                        plane_start_ne),
+        "target_velocity_estimate_error_ms":
+            target_velocity_estimate_error(history),
         "target_speed_ms": target_speed(history),
     }
     out = {}

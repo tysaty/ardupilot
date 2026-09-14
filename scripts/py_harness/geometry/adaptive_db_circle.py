@@ -148,8 +148,12 @@ def _orbit_hold(px, py, cx, cy, psi_i, R, look_ahead_m, precompensate):
 
 def guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
              look_ahead_m, delta_psi, delta_d, hold_policy=HOLD_PLAN,
-             precompensate=True):
+             precompensate=True, preferred_direction=None, sense_margin_m=0.0):
     """One guidance point about the held predicted ring centre ``(cx, cy)``.
+
+    ``preferred_direction`` / ``sense_margin_m`` (`TASK-048`): orbit-sense
+    hysteresis for the CS solve, as :func:`dubins_target_circle.shortest_path`;
+    the defaults reproduce the pre-`TASK-048` behaviour exactly.
 
     The caller (the adapter) owns the replan clock and decides whether this tick
     is a replan instant; this function is told the answer through ``plan`` and
@@ -209,7 +213,8 @@ def guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
     if hold_policy == HOLD_CENTRE_ONLY:
         # Re-solve the CS path from the live pose against the frozen centre.
         g = dtc.guidance(px, py, psi_i, cx, cy, R, turn_radius_m,
-                         look_ahead_m, delta_psi, delta_d)
+                         look_ahead_m, delta_psi, delta_d,
+                         preferred_direction, sense_margin_m)
         return {
             "gx": g["gx"],
             "gy": g["gy"],
@@ -224,7 +229,7 @@ def guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
 
     pts, _reach, direction, _arrival = dtc.shortest_path(
         plan["px"], plan["py"], plan["psi"], cx, cy, R, turn_radius_m,
-        delta_psi, delta_d)
+        delta_psi, delta_d, preferred_direction, sense_margin_m)
 
     # Where the aircraft actually is along that committed curve, then a look-ahead
     # further on. point_at_arc_length clamps at the path end, which is the tangency

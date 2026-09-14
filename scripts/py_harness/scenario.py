@@ -73,6 +73,15 @@ DEFAULT_LEGS = [
 DEFAULT_ALGORITHM = "dubins_target_orbit"
 
 
+def _leg_from_change(change):
+    """The leg tuple a change-log entry describes, five-element when it names
+    an ``elastic_base`` (`TASK-045` D2) and four-element otherwise."""
+    leg = (change["duration_s"], change["mode"], change["heading_deg"],
+           change["speed_ms"])
+    base = change.get(kang.ELASTIC_BASE_FIELD)
+    return leg if base is None else leg + (base,)
+
+
 class ScenarioSession:
     """A live run whose kangaroo schedule can be edited while it flies.
 
@@ -268,6 +277,11 @@ class ScenarioSession:
         heading_deg = current[2] if heading_deg is None else float(heading_deg)
         speed_ms = current[3] if speed_ms is None else float(speed_ms)
         leg = (float(duration_s), mode, heading_deg, speed_ms)
+        # An elastic leg over a non-straight base (TASK-045 D2) keeps its base
+        # through a heading or speed change, exactly as it keeps its mode.
+        elastic_base = kang.leg_elastic_base(current)
+        if elastic_base is not None:
+            leg = leg + (elastic_base,)
 
         tn, te = self.target_position()
         t_now = self.t_s
@@ -277,10 +291,13 @@ class ScenarioSession:
             [leg], start_n=tn, start_e=te, t0=t_now,
             radius_m=self.radius_m, length_m=self.length_m, width_m=self.width_m)
 
-        self.change_log.append({
+        entry = {
             "t_s": t_now, "duration_s": leg[0], "mode": leg[1],
             "heading_deg": leg[2], "speed_ms": leg[3], "source": source,
-        })
+        }
+        if elastic_base is not None:
+            entry[kang.ELASTIC_BASE_FIELD] = elastic_base
+        self.change_log.append(entry)
         self.markers.append(t_now)
         return leg
 
@@ -309,8 +326,7 @@ class ScenarioSession:
     def current_leg(self):
         """The leg in force now: the last applied change, else the schedule's."""
         if self.change_log:
-            c = self.change_log[-1]
-            return (c["duration_s"], c["mode"], c["heading_deg"], c["speed_ms"])
+            return _leg_from_change(self.change_log[-1])
         t, acc = self.t_s, 0.0
         for leg in self.legs:
             acc += leg[0]
@@ -342,7 +358,7 @@ class ScenarioSession:
                 break
             dur = min(leg[0], first_change - acc)
             if dur > 0:
-                legs.append((dur, leg[1], leg[2], leg[3]))
+                legs.append((dur,) + tuple(leg[1:]))
             acc += leg[0]
         prev_t = first_change
 
@@ -352,7 +368,7 @@ class ScenarioSession:
             dur = nxt - c["t_s"]
             if dur <= 0.0:
                 continue    # superseded before it ran; drop it
-            legs.append((dur, c["mode"], c["heading_deg"], c["speed_ms"]))
+            legs.append((dur,) + _leg_from_change(c)[1:])
             prev_t = nxt
         return legs
 

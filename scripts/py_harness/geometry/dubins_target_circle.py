@@ -105,7 +105,8 @@ def _reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d):
 
 
 def shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-                  delta_psi, delta_d):
+                  delta_psi, delta_d, preferred_direction=None,
+                  sense_margin_m=0.0):
     """The least-cost CS target-circle path that flies into the ring tangent.
 
     Forms the four candidates ({L, R} initial turn x {CW, CCW} orbit sense) and
@@ -113,10 +114,30 @@ def shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     open-ended orbit is not scored. Returns ``(points, reach_length, direction,
     arrival)``.
 
+    ``preferred_direction`` / ``sense_margin_m`` (`TASK-047`, `ISSUE-G11`):
+    when a direction (``"cw"``/``"ccw"``) is preferred, its best candidate is
+    kept unless the other sense's best candidate is cheaper by **more than**
+    ``sense_margin_m`` metres of turn-in cost. With no preference — the
+    default — this is the plain argmin the baseline has always used, so the
+    baseline's output is unchanged. :func:`sense_costs` exposes both costs.
+
     Raises:
         ValueError: If ``orbit_radius_m < turn_radius_m`` (the orbit would exceed
             the curvature bound), or if no tangent solves the geometry (e.g. the
             aircraft is inside the ring).
+    """
+    best_by_sense = sense_costs(px, py, psi_i, tx, ty, orbit_radius_m,
+                                turn_radius_m, delta_psi, delta_d)
+    return choose_sense(best_by_sense, preferred_direction, sense_margin_m)
+
+
+def sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
+                delta_psi, delta_d):
+    """The best candidate per orbit sense: ``{"cw": cand | None, "ccw": ...}``.
+
+    Each candidate is the ``(points, reach_length, direction, arrival)`` tuple
+    of :func:`_reach_path`, the cheaper of the two initial-turn senses for that
+    orbit sense. The guards of :func:`shortest_path` apply.
     """
     if orbit_radius_m < turn_radius_m - 1e-9:
         raise ValueError(
@@ -128,33 +149,68 @@ def shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
         # (continuing on the ring is TASK-025). Fail deterministically.
         raise ValueError("aircraft is inside the target ring; no approach tangent")
 
-    best = None
+    best_by_sense = {"cw": None, "ccw": None, "argmin": None}
     for s1 in (1, -1):
         for s2 in (1, -1):
             cand = _reach_path(px, py, psi_i, tx, ty, orbit_radius_m,
                                turn_radius_m, s1, s2, delta_psi, delta_d)
             if cand is None:
                 continue
-            if best is None or cand[1] < best[1]:
-                best = cand
-    if best is None:
+            key = cand[2]
+            if best_by_sense[key] is None or cand[1] < best_by_sense[key][1]:
+                best_by_sense[key] = cand
+            # The baseline's own choice: first visited wins a tie (strict <).
+            if (best_by_sense["argmin"] is None
+                    or cand[1] < best_by_sense["argmin"][1]):
+                best_by_sense["argmin"] = cand
+    return best_by_sense
+
+
+def choose_sense(best_by_sense, preferred_direction=None, sense_margin_m=0.0):
+    """Pick the candidate from :func:`sense_costs`, with optional hysteresis.
+
+    No preference: the baseline's argmin over all four candidates, in its
+    visit order with its strict-less tie rule (``best_by_sense["argmin"]``).
+    With a preference: the preferred sense's candidate unless it does not
+    exist or the other is cheaper by more than ``sense_margin_m``.
+
+    Raises:
+        ValueError: If neither sense has a candidate.
+    """
+    cw, ccw = best_by_sense.get("cw"), best_by_sense.get("ccw")
+    if cw is None and ccw is None:
         raise ValueError("no target-circle tangent solves this configuration")
-    return best
+    if preferred_direction in ("cw", "ccw"):
+        held = best_by_sense.get(preferred_direction)
+        other = ccw if preferred_direction == "cw" else cw
+        if held is None:
+            return other
+        if other is None or other[1] >= held[1] - float(sense_margin_m):
+            return held
+        return other
+    return best_by_sense["argmin"]
 
 
 def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-             look_ahead_m, delta_psi, delta_d):
+             look_ahead_m, delta_psi, delta_d, preferred_direction=None,
+             sense_margin_m=0.0):
     """One guidance point a look-ahead along the shortest target-circle path.
 
     Returns a dict ``{"gx", "gy", "direction", "reach_length_m", "curvature",
-    "arrival_e", "arrival_n"}``. ``curvature`` is ``1/orbit_radius_m`` (the final
-    arc's), which is ``<= 1/turn_radius_m`` by the guard in :func:`shortest_path`.
+    "arrival_e", "arrival_n", "cost_cw_m", "cost_ccw_m"}``. ``curvature`` is
+    ``1/orbit_radius_m`` (the final arc's), which is ``<= 1/turn_radius_m`` by
+    the guard in :func:`shortest_path`. ``cost_*_m`` are the two senses' best
+    turn-in costs (``None`` where no tangent exists), so a caller can see how
+    close the choice was. ``preferred_direction`` / ``sense_margin_m`` as in
+    :func:`shortest_path`; the defaults reproduce the baseline.
 
     Raises:
         ValueError: Propagated from :func:`shortest_path`.
     """
-    pts, reach, direction, arrival = shortest_path(
-        px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m, delta_psi, delta_d)
+    best_by_sense = sense_costs(px, py, psi_i, tx, ty, orbit_radius_m,
+                                turn_radius_m, delta_psi, delta_d)
+    pts, reach, direction, arrival = choose_sense(
+        best_by_sense, preferred_direction, sense_margin_m)
     gx, gy = orbit_geom.point_at_arc_length(pts, look_ahead_m)
     return {
         "gx": gx,
@@ -164,4 +220,6 @@ def guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
         "curvature": 1.0 / orbit_radius_m,
         "arrival_e": arrival[0],
         "arrival_n": arrival[1],
+        "cost_cw_m": None if best_by_sense["cw"] is None else best_by_sense["cw"][1],
+        "cost_ccw_m": None if best_by_sense["ccw"] is None else best_by_sense["ccw"][1],
     }

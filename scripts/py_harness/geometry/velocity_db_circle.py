@@ -84,7 +84,8 @@ def stepped_centre(est_raw, dt_s, step_ticks=1):
 
 
 def guidance(px, py, psi_i, cx, cy, orbit_radius_m, turn_radius_m,
-             look_ahead_m, delta_psi, delta_d, precompensate=True):
+             look_ahead_m, delta_psi, delta_d, precompensate=True,
+             preferred_direction=None, sense_margin_m=0.0):
     """One guidance point about the stepped ring centre ``(cx, cy)``.
 
     Delegates to :func:`adaptive_db_circle.guidance` with
@@ -117,7 +118,8 @@ def guidance(px, py, psi_i, cx, cy, orbit_radius_m, turn_radius_m,
     g = adb.guidance(
         px, py, psi_i, cx, cy, None,
         orbit_radius_m, turn_radius_m, look_ahead_m, delta_psi, delta_d,
-        adb.HOLD_CENTRE_ONLY, precompensate,
+        adb.HOLD_CENTRE_ONLY, precompensate, preferred_direction,
+        sense_margin_m,
     )
     # HOLD_CENTRE_ONLY never commits a plan, so no "plan" key comes back; strip
     # defensively so arm D's contract cannot drift if the delegate changes.

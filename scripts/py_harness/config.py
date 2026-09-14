@@ -282,6 +282,20 @@ RH_W_SMOOTH = 5.0e3
 VD_STEP_TICKS = 1
 
 # --------------------------------------------------------------------------
+# CS-onto-orbit sense hysteresis (TASK-047) — `dubins_target_orbit_hyst` only
+# --------------------------------------------------------------------------
+#: Margin, metres of turn-in cost (`rho * sweep_C1 + L`), by which the OTHER
+#: orbit sense must beat the held one before `dubins_target_orbit_hyst` switches
+#: sense. `ISSUE-G11`: the baseline's stateless argmin alternates between the
+#: mirror-image cw / ccw tangents once the aircraft is on the line of sight, so
+#: its carrot averages to the line of sight and the approach is pure pursuit.
+#: 10 m is about a fifth of the turn radius — large enough that rounding never
+#: flips the sense, small enough that a target crossing the aircraft's path
+#: still does. `0.0` recovers the baseline's behaviour exactly. A harness
+#: setting, not an approved limit (`SR-004`).
+CS_SENSE_MARGIN_M = 10.0
+
+# --------------------------------------------------------------------------
 # Amplitude weave parameters (TASK-004) — harness-only, illustrative
 # --------------------------------------------------------------------------
 # The names mirror `modules/continuous_weave.lua`. These are **not** tuned from
@@ -396,6 +410,7 @@ class HarnessConfig:
         "rh_w_effort",
         "rh_w_smooth",
         "vd_step_ticks",
+        "cs_sense_margin_m",
         "_frozen",
     )
 
@@ -438,6 +453,7 @@ class HarnessConfig:
         rh_w_effort=RH_W_EFFORT,
         rh_w_smooth=RH_W_SMOOTH,
         vd_step_ticks=VD_STEP_TICKS,
+        cs_sense_margin_m=CS_SENSE_MARGIN_M,
     ):
         object.__setattr__(self, "_frozen", False)
         self.airspeed_ms = float(airspeed_ms)
@@ -477,6 +493,7 @@ class HarnessConfig:
         self.rh_w_effort = float(rh_w_effort)
         self.rh_w_smooth = float(rh_w_smooth)
         self.vd_step_ticks = int(vd_step_ticks)
+        self.cs_sense_margin_m = float(cs_sense_margin_m)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
 
@@ -609,6 +626,12 @@ class HarnessConfig:
                 "vd_step_ticks must be >= 1 whole control tick; 0 would remove "
                 "the one-step projection that defines arm D and leave it a "
                 "slower dubins_target_orbit. Got %r" % self.vd_step_ticks
+            )
+        # -- CS sense hysteresis (TASK-047) -----------------------------------
+        if self.cs_sense_margin_m < 0.0:
+            raise ValueError(
+                "cs_sense_margin_m must be >= 0 m (0 recovers the baseline's "
+                "argmin). Got %r" % self.cs_sense_margin_m
             )
 
     def __setattr__(self, name, value):

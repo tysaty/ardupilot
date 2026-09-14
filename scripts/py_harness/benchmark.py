@@ -169,6 +169,41 @@ ARMS = {
 ARM_ORDER = ("0", "D", "A", "B", "C")
 
 
+def _with_sense_hysteresis(arm_id):
+    """The `TASK-048` counterpart of one arm: the same configuration, the
+    ``_hyst`` registry entry. Derived, not retyped, so the two tables cannot
+    drift apart in anything but the algorithm name."""
+    arm = dict(ARMS[arm_id])
+    arm["overrides"] = dict(arm["overrides"])
+    arm["algorithm"] = arm["algorithm"] + "_hyst"
+    arm["label"] = arm["label"] + " + sense hysteresis"
+    arm["task"] = "TASK-048 (from %s)" % arm["task"]
+    arm["note"] = ("As arm %s, with the orbit sense held across ticks unless the "
+                   "other sense is cheaper by more than cs_sense_margin_m "
+                   "(ISSUE-G11, TASK-047/048)." % arm_id)
+    return arm
+
+
+#: The `TASK-048` arm set: arms 0, D, A and B with orbit-sense hysteresis, and
+#: arm C **unchanged** — it builds no ring and chooses no sense, so it has no
+#: counterpart and is carried so the set is a complete five-arm comparison.
+#: Ids keep the base letter first, so figures colour them as their base arm.
+ARMS_HYST = {
+    "0H": _with_sense_hysteresis("0"),
+    "DH": _with_sense_hysteresis("D"),
+    "AH": _with_sense_hysteresis("A"),
+    "BH": _with_sense_hysteresis("B"),
+    "C": ARMS["C"],
+}
+ARM_ORDER_HYST = ("0H", "DH", "AH", "BH", "C")
+
+#: Named arm tables a campaign can be run over (`Py_Sweep_Experiment --arm-set`).
+ARM_SETS = {
+    "base": (ARMS, ARM_ORDER),
+    "hyst": (ARMS_HYST, ARM_ORDER_HYST),
+}
+
+
 def feasibility(orbit_radius_m, turn_radius_m, airspeed_ms, target_speed_ms):
     """Whether a constant-radius standoff is dynamically holdable at this speed.
 

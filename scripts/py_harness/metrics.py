@@ -399,3 +399,232 @@ def deformation_by_speed(history, orbit_radius_m, bands=None, n_bins=4,
             centre=centre, speed_min_ms=low,
             speed_max_ms=None if high == float("inf") else high)
     return out
+
+
+# --------------------------------------------------------------------------
+# Post-contact radial error (TASK-045) — how well the ring is held once reached
+# --------------------------------------------------------------------------
+
+def signed_radial_errors(history, orbit_radius_m, centre="target"):
+    """Signed radial error ``e_r(i) = ‖p − c‖ − R`` per tick, metres.
+
+    Negative is **inside** the ring. ``None`` where the centre is undefined for
+    that tick (see :func:`centre_of`). Plain loop, no array library (`VR-015`):
+    the same expression will be needed against ``.bin`` logs in `TASK-046`.
+    """
+    out = []
+    for s in history:
+        try:
+            cn, ce = centre_of(s, centre)
+        except (KeyError, ValueError):
+            out.append(None)
+            continue
+        out.append(math.hypot(s["plane_n_m"] - cn, s["plane_e_m"] - ce)
+                   - orbit_radius_m)
+    return out
+
+
+def first_contact_index(radial_errors):
+    """Index of the **first contact** tick, ``min { i : e_r(i) <= 0 }``, or ``None``.
+
+    Contact is the first instant the aircraft reaches or crosses inside the
+    ring. ``None`` — never ``0`` — when ``e_r > 0`` for the whole run, which is
+    the expected outcome for every unreachable cell of the `TASK-045` grid.
+    """
+    for i, e in enumerate(radial_errors):
+        if e is not None and e <= 0.0:
+            return i
+    return None
+
+
+def post_contact_radial(history, orbit_radius_m, dt_s, centre="target"):
+    """Post-contact cumulative radial error (`TASK-045`, decision `D4`).
+
+    Let ``t_c`` be the first contact instant (:func:`first_contact_index`).
+    Then::
+
+        post_contact_cum_radial_m_s = sum_{i >= i_c} |e_r(i)| * dt_s
+
+    Nothing before ``t_c`` contributes, so the approach transient — which
+    :func:`min_orbit_distance` measures — is excluded by construction. This is
+    the only scalar that isolates **how well the ring is held once it has been
+    reached**: the steady-state RMS uses a fixed tail fraction, not the contact
+    instant.
+
+    Also reported, per `D4`: the **time-normalised** form
+    ``post_contact_mean_radial_m = cum / window_s`` where ``window_s`` is the
+    post-contact window ``n_post * dt_s`` (contact tick to the end of the run,
+    inclusive). It is the mean absolute radial error over that window, in
+    metres, and is what is comparable across cells with different ``t_c`` — a
+    run that makes contact at 55 s of a 60 s run accumulates for 5 s and its
+    cumulative is not comparable with one that makes contact at 10 s.
+
+    Args:
+        history: Recorded run history.
+        orbit_radius_m: Commanded ring radius ``R``, metres.
+        dt_s: Control interval, seconds — the integration step.
+        centre: Ring centre selector; see :data:`CENTRES`. Both must be
+            reported (`TASK-033` D2).
+
+    Returns:
+        ``None`` for an empty history, else a dict with ``contact_tick``,
+        ``t_contact_s``, ``post_contact_ticks``, ``post_contact_window_s``,
+        ``post_contact_cum_radial_m_s``, ``post_contact_mean_radial_m``,
+        ``post_contact_max_abs_radial_m`` and ``post_contact_coverage`` (the
+        post-contact fraction of the run). **Every value is ``None`` when
+        contact never occurs** — never ``0.0``, which would read as a perfect
+        hold.
+    """
+    if not history:
+        return None
+    errors = signed_radial_errors(history, orbit_radius_m, centre)
+    i_c = first_contact_index(errors)
+    empty = {
+        "contact_tick": None, "t_contact_s": None, "post_contact_ticks": None,
+        "post_contact_window_s": None, "post_contact_cum_radial_m_s": None,
+        "post_contact_mean_radial_m": None, "post_contact_max_abs_radial_m": None,
+        "post_contact_coverage": None,
+    }
+    if i_c is None:
+        return empty
+    total, worst, count = 0.0, 0.0, 0
+    for e in errors[i_c:]:
+        if e is None:
+            continue
+        a = abs(e)
+        total += a * dt_s
+        worst = max(worst, a)
+        count += 1
+    window_s = count * dt_s
+    return {
+        "contact_tick": i_c,
+        "t_contact_s": history[i_c]["t_s"],
+        "post_contact_ticks": count,
+        "post_contact_window_s": window_s,
+        "post_contact_cum_radial_m_s": total,
+        "post_contact_mean_radial_m": (total / window_s) if window_s > 0.0
+        else None,
+        "post_contact_max_abs_radial_m": worst,
+        "post_contact_coverage": count / float(len(history)),
+    }
+
+
+# --------------------------------------------------------------------------
+# Velocity errors (TASK-045) — two forms, one of them zero here by construction
+# --------------------------------------------------------------------------
+
+#: Below this magnitude a plane velocity error is recorded as exactly ``0.0``,
+#: m/s. In the kinematic harness the aircraft's ground velocity is its commanded
+#: velocity **by construction** (`A-VAL-001`: no wind, no airframe response), and
+#: the finite difference of the recorded position reproduces it only to
+#: floating-point rounding (~1e-14 m/s). Snapping that residual to zero records
+#: the value the harness actually models rather than its rounding noise; a SITL
+#: wind error is metres per second, never this small.
+VELOCITY_ZERO_TOL_MS = 1e-9
+
+
+def plane_velocity_errors(history, airspeed_ms, dt_s, plane_start_ne=None):
+    """``‖v_ground(plane) − v_commanded(plane)‖`` per tick, m/s (`TASK-045` (a)).
+
+    The commanded velocity is ``airspeed_ms`` along the recorded ``plane_hdg_rad``;
+    the ground velocity is the **backward finite difference** of the recorded
+    position over ``dt_s``. Tick 0 needs the pre-run position, ``plane_start_ne``
+    as ``(n_m, e_m)``; when it is not given tick 0 is ``None``.
+
+    **Identically zero in the Python harness** (`A-VAL-001`), and recorded
+    anyway so the column exists, with this name and unit, when the SITL half
+    runs and wind makes it non-zero (`TASK-046`). A zero here means "no wind
+    model", not "no velocity error". See :data:`VELOCITY_ZERO_TOL_MS`.
+    """
+    out = []
+    prev = plane_start_ne
+    for s in history:
+        if prev is None:
+            out.append(None)
+        else:
+            vn = (s["plane_n_m"] - prev[0]) / dt_s
+            ve = (s["plane_e_m"] - prev[1]) / dt_s
+            cn = airspeed_ms * math.cos(s["plane_hdg_rad"])
+            ce = airspeed_ms * math.sin(s["plane_hdg_rad"])
+            err = math.hypot(vn - cn, ve - ce)
+            out.append(0.0 if err < VELOCITY_ZERO_TOL_MS else err)
+        prev = (s["plane_n_m"], s["plane_e_m"])
+    return out
+
+
+def target_velocity_estimate_errors(history):
+    """``‖v̂_K − v_K‖`` per tick, m/s (`TASK-045` (b)) — the Kalman velocity
+    estimate against the true target velocity.
+
+    The prediction input every predicting arm consumes; it spikes at every
+    elastic ramp and every ``kangaroo_rand`` leg change. ``None`` on every tick
+    for a run without an estimator (arm 0), and on any tick before the
+    estimator produced its first output.
+
+    Compared **on the same recorded tick**, as ``prediction_lead`` is: the
+    estimate on row ``i`` is the one the guidance law consumed during the step
+    that ended at ``t_i``, formed from the measurement one tick earlier, so the
+    figure includes that one-tick staleness along with the filter's own lag.
+    Requires the ``target_est_raw_vn_ms`` / ``_ve_ms`` history fields.
+    """
+    out = []
+    for s in history:
+        vn = s.get("target_est_raw_vn_ms")
+        ve = s.get("target_est_raw_ve_ms")
+        if vn is None or ve is None:
+            out.append(None)
+            continue
+        out.append(math.hypot(vn - s["target_vn_ms"], ve - s["target_ve_ms"]))
+    return out
+
+
+def _rms_max(values):
+    present = [v for v in values if v is not None]
+    if not present:
+        return {"rms_ms": None, "max_ms": None, "samples": 0}
+    return {"rms_ms": math.sqrt(sum(v * v for v in present) / len(present)),
+            "max_ms": max(present), "samples": len(present)}
+
+
+def velocity_errors(history, config, plane_start_ne=None, contact_tick=None):
+    """Both velocity-error forms summarised over the run and post-contact.
+
+    Args:
+        history: Recorded run history.
+        config: A :class:`~py_harness.config.HarnessConfig` (``airspeed_ms``,
+            ``dt_s``).
+        plane_start_ne: The aircraft's pre-run ``(n_m, e_m)``, for tick 0 of
+            the plane form.
+        contact_tick: First-contact index from :func:`post_contact_radial`
+            (about the true target); ``None`` when contact never occurred, in
+            which case the post-contact blocks are ``None``.
+
+    Returns:
+        ``None`` for an empty history, else ``{"plane": {...},
+        "target_estimate": {...} | None, "not_a_wind_measurement": str}``.
+        Each block is ``{rms_ms, max_ms, samples, coverage, post_contact}``;
+        ``target_estimate`` is ``None`` when no estimator ran.
+    """
+    if not history:
+        return None
+    plane = plane_velocity_errors(history, config.airspeed_ms, config.dt_s,
+                                  plane_start_ne)
+    est = target_velocity_estimate_errors(history)
+
+    def block(values):
+        out = _rms_max(values)
+        out["coverage"] = out["samples"] / float(len(values))
+        out["post_contact"] = (None if contact_tick is None
+                               else _rms_max(values[contact_tick:]))
+        return out
+
+    est_block = block(est) if any(v is not None for v in est) else None
+    return {
+        "plane": block(plane),
+        "target_estimate": est_block,
+        "not_a_wind_measurement": (
+            "plane_velocity_error_ms is 0.0 by construction in the kinematic "
+            "harness (A-VAL-001: no wind, no airframe response). The column "
+            "exists so the SITL repeat (TASK-046) has a like-named baseline; "
+            "a zero here means no wind model, not no velocity error."),
+    }

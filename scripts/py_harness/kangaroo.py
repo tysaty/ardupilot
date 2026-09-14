@@ -130,11 +130,16 @@ def rectangle_state(t, heading_deg, fwd_m, disp_m, length_m, width_m, speed_ms):
     return corners[0][0], corners[0][1], 0.0, 0.0
 
 
-def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms):
+def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms,
+                  elastic_base=None):
     """A local-time ``state(t) -> (n, e, vn, ve)`` for one segment at the origin.
 
     ``fwd``/``disp`` are 0 — the segment's absolute placement comes from the
     continuity offset in :func:`_rand_segments`, not from the sub-mode's own start.
+
+    ``elastic_base`` (`TASK-045` D2) is the base mode an ``elastic`` leg is
+    travelled over; ``None`` keeps the pre-`TASK-045` straight base, so every
+    existing four-element leg is unchanged.
     """
     if mode == "point":
         return lambda t: point_state(t, heading_deg, 0.0, 0.0)
@@ -144,10 +149,12 @@ def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms):
         return lambda t: circle_state(t, heading_deg, 0.0, 0.0, radius_m, speed_ms)
     if mode == ELASTIC_MODE:
         # A scripted/interactive elastic leg: the leg's speed is the fast phase,
-        # over a straight base, using the module defaults for the profile shape
-        # (TASK-030). A different base or shape is a `build()` call.
+        # over the leg's base mode (straight unless the leg says otherwise),
+        # using the module defaults for the profile shape (TASK-030). A
+        # different profile shape is still a `build()` call.
+        base = DEFAULT_ELASTIC_BASE if elastic_base is None else elastic_base
         return lambda t: elastic_state(
-            t, "straight", heading_deg, 0.0, 0.0, radius_m, length_m, width_m,
+            t, base, heading_deg, 0.0, 0.0, radius_m, length_m, width_m,
             speed_ms * ELASTIC_SLOW_FACTOR, speed_ms)
     return lambda t: rectangle_state(t, heading_deg, 0.0, 0.0, length_m, width_m,
                                      speed_ms)
@@ -163,6 +170,22 @@ def _rand_segments(seed, start_n, start_e, radius_m, length_m, width_m, speed_ms
     same ``seed`` always yields the same schedule (`A-SW-003` — reproducible,
     unlike the Lua which seeded from ``millis()``).
     """
+    legs = rand_legs(seed, speed_ms, min_seg_s, max_seg_s, horizon_s)
+    # Same chaining engine as the scripted form (`TASK-029`); random legs in,
+    # continuous segments out.
+    return make_segments(legs, start_n, start_e, radius_m, length_m, width_m)
+
+
+def rand_legs(seed, speed_ms, min_seg_s, max_seg_s, horizon_s):
+    """The seeded leg list behind ``kangaroo_rand``, as ordinary scripted legs.
+
+    ``[(duration_s, mode, heading_deg, speed_ms), ...]`` covering at least
+    ``horizon_s``. Lifted out of :func:`_rand_segments` (`TASK-045`) so an
+    experiment spec — whose legs must be explicit — can carry a
+    ``kangaroo_rand`` schedule **and** the seed that produced it: the legs are
+    the reproducible expansion of ``seed + config``, and the seed is recorded
+    beside them rather than replacing them.
+    """
     rng = random.Random(seed)
     legs, t0 = [], 0.0
     while t0 < horizon_s:
@@ -173,9 +196,7 @@ def _rand_segments(seed, start_n, start_e, radius_m, length_m, width_m, speed_ms
         dur = rng.uniform(min_seg_s, max_seg_s)
         legs.append((dur, mode, heading, speed_ms))
         t0 += dur
-    # Same chaining engine as the scripted form (`TASK-029`); random legs in,
-    # continuous segments out.
-    return make_segments(legs, start_n, start_e, radius_m, length_m, width_m)
+    return legs
 
 
 def _build_rand(seed, heading_deg, fwd_m, disp_m, radius_m, length_m, width_m,
@@ -218,6 +239,14 @@ ELASTIC_RAMP_S = 4.0
 
 #: Meta-mode name, alongside ``kangaroo_rand``.
 ELASTIC_MODE = "elastic"
+
+#: Base mode an ``elastic`` leg is travelled over when the leg names none — the
+#: only base a scripted leg could reach before `TASK-045`.
+DEFAULT_ELASTIC_BASE = "straight"
+
+#: Base modes an ``elastic`` leg may name (`TASK-045` D2). ``point`` is excluded:
+#: a stationary target has no pace to vary.
+ELASTIC_BASES = tuple(m for m in MODES if m != "point")
 
 
 def smoothstep(q):
@@ -354,15 +383,28 @@ def elastic_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m, length_m,
 #: speed for the entire run).
 SEGMENT_FIELDS = ("duration_s", "mode", "heading_deg", "speed_ms")
 
+#: The optional fifth leg field (`TASK-045` D2): the base mode an ``elastic``
+#: leg is travelled over. Absent means :data:`DEFAULT_ELASTIC_BASE`.
+ELASTIC_BASE_FIELD = "elastic_base"
+
+
+def leg_elastic_base(leg):
+    """The ``elastic_base`` a leg names, or ``None`` for a four-element leg."""
+    if len(leg) > 4 and leg[4] is not None:
+        return str(leg[4]).lower()
+    return None
+
 
 def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
                   width_m=150.0, t0=0.0):
     """Chain ``legs`` into continuous segments starting at ``(start_n, start_e)``.
 
-    ``legs`` is a sequence of ``(duration_s, mode, heading_deg, speed_ms)``. Each
-    segment carries a positional offset so it **begins exactly where the previous
-    ended**: position is continuous across a switch and only velocity steps, which
-    is what a manoeuvre is (``TASK-029``).
+    ``legs`` is a sequence of ``(duration_s, mode, heading_deg, speed_ms)``, or
+    ``(duration_s, mode, heading_deg, speed_ms, elastic_base)`` for an
+    ``elastic`` leg over a non-straight base (`TASK-045` D2; see
+    :data:`ELASTIC_BASES`). Each segment carries a positional offset so it
+    **begins exactly where the previous ended**: position is continuous across a
+    switch and only velocity steps, which is what a manoeuvre is (``TASK-029``).
 
     This is the engine `kangaroo_rand` has always used (`_rand_segments`), lifted
     out so the scripted and random forms share one implementation rather than
@@ -379,7 +421,8 @@ def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
     segments = []
     t, pos_n, pos_e = float(t0), float(start_n), float(start_e)
     for i, leg in enumerate(legs):
-        dur, mode, heading_deg, speed_ms = leg
+        dur, mode, heading_deg, speed_ms = leg[:4]
+        elastic_base = leg_elastic_base(leg)
         if dur <= 0.0:
             raise ValueError("leg %d: duration must be > 0, got %r" % (i, dur))
         if speed_ms < 0.0:
@@ -388,8 +431,11 @@ def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
         if mode not in LEG_MODES:
             raise ValueError("leg %d: unknown mode %r; use one of %s"
                              % (i, mode, ", ".join(LEG_MODES)))
+        if elastic_base is not None and elastic_base not in ELASTIC_BASES:
+            raise ValueError("leg %d: unknown elastic_base %r; use one of %s"
+                             % (i, elastic_base, ", ".join(ELASTIC_BASES)))
         sub = _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m,
-                            speed_ms)
+                            speed_ms, elastic_base)
         s0n, s0e, _, _ = sub(0.0)
         off_n, off_e = pos_n - s0n, pos_e - s0e
         segments.append((t, t + dur, sub, off_n, off_e))
