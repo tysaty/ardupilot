@@ -56,8 +56,11 @@ def arm_colour(arm):
 
 
 def arm_label(arm):
-    base = ARM_LABELS[str(arm)[0]]
-    return base if len(str(arm)) == 1 else base.replace("arm %s" % arm[0], "arm %s" % arm) + " (hyst)"
+    """The arm's legend label by its base letter. A hysteresis counterpart
+    (``AH``) is labelled as its parent (author's direction, 2026-09-15): the
+    hysteresis is described once in the thesis and inherited by the arms, so
+    figures name the arm only."""
+    return ARM_LABELS[str(arm)[0]]
 
 
 def arm_order(manifest):
@@ -114,7 +117,7 @@ F4_CELLS = ("straight-constant-half", "circle-elastic-half",
             "rand-constant-half-s01")
 
 FIGURE_NAMES = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
-                "F11", "F12", "F13")
+                "F11", "F12", "F13", "F20")
 
 
 # --------------------------------------------------------------------------
@@ -432,8 +435,15 @@ def _marker_times(spec, record):
     return sorted(set(round(t, 6) for t in times))
 
 
-def _overlay_ring_error(ax, out_dir, manifest, suffix, mark_contact=True):
-    """Draw ring_error_target_m of every arm's ``<arm>-<suffix>`` cell."""
+def _overlay_ring_error(ax, out_dir, manifest, suffix, mark_contact=True,
+                        cut_at_containment=False):
+    """Draw ring_error_target_m of every arm's ``<arm>-<suffix>`` cell.
+
+    ``cut_at_containment`` stops every trace at the cell's first zone
+    containment turn and draws no marker for it (the straight kangaroo at
+    ratio 0.5 is turned back at 50.4 s, `ISSUE-M9`): what follows is the
+    zone's manoeuvre, not the arm's response to the schedule.
+    """
     drawn = 0
     markers = None
     for arm in arm_order(manifest):
@@ -446,6 +456,13 @@ def _overlay_ring_error(ax, out_dir, manifest, suffix, mark_contact=True):
         if s is None:
             continue
         t, v = s["t_s"], s["values"]
+        record = _load_json(directory, "record.json")
+        cut_s = (first_containment_turn_s(record) if cut_at_containment
+                 else None)
+        if cut_s is not None:
+            keep = [i for i, ti in enumerate(t) if ti <= cut_s + 1e-9]
+            t = [t[i] for i in keep]
+            v = [v[i] for i in keep]
         # Draw defined spans only.
         xs, ys = [], []
         for ti, vi in zip(t, v):
@@ -458,9 +475,10 @@ def _overlay_ring_error(ax, out_dir, manifest, suffix, mark_contact=True):
                 ys.append(vi)
         ax.plot(xs, ys, color=arm_colour(arm), linewidth=1.0,
                 label=arm_label(arm))
-        record = _load_json(directory, "record.json")
         if markers is None:
             markers = _marker_times(_load_json(directory, "spec.json"), record)
+            if cut_s is not None:
+                markers = [m for m in markers if m < cut_s - 1e-9]
         if mark_contact:
             contact = ((record["metrics"].get("post_contact") or {})
                        .get("target") or {}).get("t_contact_s")
@@ -507,9 +525,11 @@ def figure_f12(out_dir, rows, manifest):
                          "differ, so the overlay would not be like-for-like: %r"
                          % conditions)
     fig, ax = plt.subplots(1, 1, figsize=(7.0, 3.0))
-    _overlay_ring_error(ax, out_dir, manifest, "straight-constant-half")
+    _overlay_ring_error(ax, out_dir, manifest, "straight-constant-half",
+                        cut_at_containment=True)
     ax.set_title("Straight kangaroo at ratio 0.5, same start for every arm "
-                 "(▼ = first contact)", fontsize=8)
+                 "(▼ = first contact; drawn to the zone's containment turn)",
+                 fontsize=8)
     ax.legend(loc="upper right", frameon=False, ncol=3)
     fig.tight_layout()
     return [("F12", _save(fig, out_dir, "F12", "radial-error-five-arms"))]
@@ -816,11 +836,46 @@ def _fit_extent(history, pad_m=40.0):
     return (ce - span / 2.0, ce + span / 2.0), (cn - span / 2.0, cn + span / 2.0)
 
 
+def first_containment_turn_s(record):
+    """Time of the zone's first containment turn in a cell, or ``None``."""
+    times = [c["t_s"] for c in (record.get("kangaroo") or {}).get("changes") or []
+             if c.get("source") == "zone"]
+    return min(times) if times else None
+
+
+def _kangaroo_phrase(cell):
+    """``"kangaroo travelling <mode>"`` for a render title."""
+    base = cell.get("mode_base")
+    pace = cell.get("mode_pace")
+    if base == "point":
+        return "a stationary kangaroo"
+    if base == "composite":
+        return "the composite kangaroo"
+    mode = base if base != "rand" else "kangaroo_rand"
+    if pace == "elastic":
+        mode = "elastic " + mode
+    return "kangaroo travelling %s" % mode
+
+
+def render_title(cell):
+    """``Arm <X> following kangaroo travelling <mode>``, by the arm's base
+    letter: a hysteresis counterpart (``AH``) is titled as its parent (author's
+    direction, 2026-09-15)."""
+    arm = str(cell.get("arm") or "?")
+    return "Arm %s following %s" % (arm[0], _kangaroo_phrase(cell))
+
+
 def render_cell(out_dir, manifest, cell_id, stem, name="F11"):
-    """One cell's final scene from its ``history.json``: flown track, kangaroo
+    """One cell's scene from its ``history.json``: flown track, kangaroo
     track, the ring and, for a predicting arm, the held centre. Fitted extent
     (the campaign's ``view.png`` is drawn at the 2 km zone extent, which is
-    unreadable at thesis width)."""
+    unreadable at thesis width).
+
+    Drawn **up to the zone's first containment turn** when there is one: the
+    straight kangaroo at ratio 0.5 is turned back at 50.4 s in the 2 km zone
+    (`ISSUE-M9`), and the bounce misconstrues the final geometry the figure
+    is meant to show. The cut is recorded in the title's duration.
+    """
     plt = _plt()
     directory = _bundle(out_dir, manifest, cell_id)
     if directory is None:
@@ -829,12 +884,19 @@ def render_cell(out_dir, manifest, cell_id, stem, name="F11"):
     record = _load_json(directory, "record.json")
     spec = _load_json(directory, "spec.json")
     R = record["config"]["orbit_radius_m"]
-    arm = (record.get("cell") or {}).get("arm")
+    cell = record.get("cell") or {}
+    arm = cell.get("arm")
+    cut_s = first_containment_turn_s(record)
+    if cut_s is not None:
+        # The turn is applied at t and governs from the next step, so the
+        # sample at t itself is still on the un-turned path.
+        history = [h for h in history if h["t_s"] <= cut_s + 1e-9]
+    markers = [t for t in _marker_times(spec, record)
+               if cut_s is None or t < cut_s - 1e-9]
     fig, ax = plt.subplots(1, 1, figsize=(4.2, 4.2))
     ax.grid(color="#E3E9ED", linewidth=0.6)
     ax.set_axisbelow(True)
-    plotter.draw_scene(ax, history, orbit_radius_m=R,
-                       markers=_marker_times(spec, record),
+    plotter.draw_scene(ax, history, orbit_radius_m=R, markers=markers,
                        track_colour=arm_colour(arm) if arm else "#1F6FEB")
     # The held centre, where the arm reports one (arms A, B, C, D).
     cn = [(s.get("algorithm_state") or {}).get("centre_n_m") for s in history]
@@ -851,8 +913,11 @@ def render_cell(out_dir, manifest, cell_id, stem, name="F11"):
     ax.set_aspect("equal")
     ax.set_xlabel("East (m)")
     ax.set_ylabel("North (m)")
-    ax.set_title("%s — %s, %.0f s" % (cell_id, record["algorithm"]["name"],
-                                      record["metrics"]["duration_s"]), fontsize=8)
+    shown_s = history[-1]["t_s"] if history else 0.0
+    ax.set_title("%s\n%s, %.1f s%s" % (
+        render_title(cell), cell_id, shown_s,
+        " (to the zone's containment turn)" if cut_s is not None else ""),
+        fontsize=8)
     ax.legend(loc="best", frameon=False, fontsize=6)
     return _save(fig, out_dir, name, stem)
 
@@ -908,6 +973,136 @@ def figure_f13(out_dir, rows, manifest):
 
 
 # --------------------------------------------------------------------------
+# F20 — the composite kangaroo in the box, every arm over it (TASK-050)
+# --------------------------------------------------------------------------
+# Drawn from a composite sub-experiment directory (`<campaign>/composite-box350`
+# or `<campaign>/composite`), whose manifest holds one cell per arm per ratio.
+# Colour follows the MODE FAMILY (five hues, fixed order, the F13 set); the
+# elastic variant of a family is the same hue dashed, so the nine phases need
+# no ninth hue and a colour-blind reader still separates pace by line style.
+
+F20_RATIO = 0.5
+F20_FAMILY_COLOURS = {"point": "#4D4D4D", "straight": "#0072B2",
+                      "circle": "#009E73", "rectangle": "#E69F00",
+                      "rand": "#CC79A7"}
+
+
+def _phase_family(phase):
+    if phase.startswith("point"):
+        return "point"
+    if phase == "rand":
+        return "rand"
+    return phase.replace("elastic-", "")
+
+
+def _f20_phase_runs(ticks, spec):
+    """``[(phase, [(e, n), ...]), ...]`` of the kangaroo track from
+    ``ticks.csv``'s ``mode_leg`` and the spec's recorded phases."""
+    phases = spec["kangaroo"]["composite_fit"]["phases"]
+    runs = []
+    for row in ticks:
+        index = int(row["mode_leg"].split(":")[0])
+        phase = phases[index] if index < len(phases) else phases[-1]
+        point = (float(row["target_e_m"]), float(row["target_n_m"]))
+        if runs and runs[-1][0] == phase:
+            runs[-1][1].append(point)
+        else:
+            # Repeat the previous point so the runs join without a gap.
+            start = [runs[-1][1][-1]] if runs else []
+            runs.append((phase, start + [point]))
+    return runs
+
+
+def figure_f20(out_dir, rows, manifest, ratio=F20_RATIO):
+    """Left: the composite kangaroo track coloured by mode family (elastic
+    dashed), the zone, its containment inset and the fit's usable region.
+    Right: the same track in grey with every arm's flown track over it."""
+    plt = _plt()
+    sub = [r for r in rows if r["mode_base"] == "composite"
+           and r["speed_ratio"] == ratio and r["status"] == "complete"]
+    if not sub:
+        raise ValueError("F20: no complete composite cell at ratio %g in %s"
+                         % (ratio, out_dir))
+    by_arm = dict((r["arm"], r) for r in sub)
+    arms = [a for a in arm_order(manifest) if a in by_arm]
+    first = _bundle(out_dir, manifest, by_arm[arms[0]]["cell_id"])
+    spec = _load_json(first, "spec.json")
+    record = _load_json(first, "record.json")
+    fit = spec["kangaroo"]["composite_fit"]
+    side = spec["zone"]["side_m"]
+    R = record["config"]["orbit_radius_m"]
+    with open(os.path.join(first, "ticks.csv"), newline="") as handle:
+        ticks = list(csv.DictReader(handle))
+
+    fig, (ax_k, ax_a) = plt.subplots(1, 2, figsize=(8.4, 4.4))
+    for ax in (ax_k, ax_a):
+        for half, colour, style, label in (
+                (side / 2.0, "#9E2F27", (0, (7, 4)), "zone %.0f m" % side),
+                (side / 2.0 - R, "#9E2F27", (0, (2, 2)),
+                 "containment inset (R = %.0f m)" % R),
+                (fit["half_m"], "#6B7A85", (0, (1, 2)),
+                 "usable region (margin %.0f m)" % fit["margin_m"])):
+            xs = [-half, half, half, -half, -half]
+            ys = [-half, -half, half, half, -half]
+            # The boundary lines are labelled once, on the left panel.
+            ax.plot(xs, ys, color=colour, linewidth=0.9, linestyle=style,
+                    label=label if ax is ax_k else None)
+        ax.set_aspect("equal")
+        ax.grid(color="#E3E9ED", linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.set_xlabel("East (m)")
+        ax.set_ylabel("North (m)")
+        pad = side / 2.0 + 25.0
+        ax.set_xlim(-pad, pad)
+        ax.set_ylim(-pad, pad)
+
+    seen = set()
+    for phase, pts in _f20_phase_runs(ticks, spec):
+        family = _phase_family(phase)
+        colour = F20_FAMILY_COLOURS[family]
+        dashed = phase.startswith("elastic")
+        label = None
+        key = (family, dashed)
+        if key not in seen:
+            seen.add(key)
+            label = family + (" (elastic)" if dashed else "")
+        if family == "point":
+            ax_k.plot([pts[-1][0]], [pts[-1][1]], marker="*", markersize=9,
+                      color=colour, linestyle="none", label=label)
+        else:
+            ax_k.plot([p[0] for p in pts], [p[1] for p in pts], color=colour,
+                      linewidth=1.3, linestyle=(0, (3, 2)) if dashed else "-",
+                      label=label)
+    ax_k.plot([0.0], [0.0], marker="s", markersize=4, color="black",
+              linestyle="none", label="aircraft start")
+    ax_k.set_title("Composite kangaroo, ratio %g: start %.0f m, circle r %.1f m, "
+                   "rectangle %.0f x %.1f m,\nrand seed %d, %.0f s"
+                   % (ratio, fit["start_range_m"], fit["radius_m"],
+                      fit["length_m"], fit["width_m"], fit["rand_seed"],
+                      fit["duration_s"]), fontsize=8)
+    ax_k.legend(frameon=False, fontsize=6, loc="upper center",
+                bbox_to_anchor=(0.5, -0.12), ncol=3)
+
+    es = [float(r["target_e_m"]) for r in ticks]
+    ns = [float(r["target_n_m"]) for r in ticks]
+    ax_a.plot(es, ns, color="#B0B7BC", linewidth=1.0, label="kangaroo")
+    turns = []
+    for arm in arms:
+        directory = _bundle(out_dir, manifest, by_arm[arm]["cell_id"])
+        history = _load_history(directory)
+        ax_a.plot([h["plane_e_m"] for h in history],
+                  [h["plane_n_m"] for h in history], color=arm_colour(arm),
+                  linewidth=0.7, alpha=0.9, label=arm_label(arm))
+        turns.append(by_arm[arm]["zone_containment_turns"])
+    ax_a.set_title("Every arm's flown track over it (containment turns: %s)"
+                   % ", ".join("%g" % (t or 0) for t in turns), fontsize=8)
+    ax_a.legend(frameon=False, fontsize=6, loc="upper center",
+                bbox_to_anchor=(0.5, -0.12), ncol=3)
+    fig.tight_layout()
+    return [("F20", _save(fig, out_dir, "F20", "composite-in-box"))]
+
+
+# --------------------------------------------------------------------------
 # Driver
 # --------------------------------------------------------------------------
 
@@ -915,7 +1110,7 @@ FIGURES = {
     "F1": figure_f1, "F2": figure_f2, "F3": figure_f3, "F4": figure_f4,
     "F5": figure_f5, "F6": figure_f6, "F7": figure_f7, "F8": figure_f8,
     "F9": figure_f9, "F10": figure_f10, "F11": figure_f11, "F12": figure_f12,
-    "F13": figure_f13,
+    "F13": figure_f13, "F20": figure_f20,
 }
 
 
@@ -934,6 +1129,13 @@ def make_figures(out_dir, names=None):
         # draw, and "all figures" should mean all that exist for it.
         if not any(r["sub"] == "chord" for r in rows):
             names.remove("F10")
+        # F20 is the composite figure (TASK-050) and lives in a composite
+        # sub-experiment directory; a grid directory has no composite cells,
+        # and a composite directory has only those.
+        if any(r["mode_base"] == "composite" for r in rows):
+            names = ["F20"]
+        else:
+            names.remove("F20")
     for name in names:
         if name not in FIGURES:
             raise ValueError("unknown figure %r; choose from %s"

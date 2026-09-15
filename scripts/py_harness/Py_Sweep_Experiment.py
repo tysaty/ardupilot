@@ -60,6 +60,22 @@ orbit chord-cutting. Its falsifiable prediction, written before the run, is in
 S2 (the 350 m flight-area repeat) is **deliberately not implemented** here
 (`D10`): it waits on the first write-up of the main grid.
 
+The composite sub-experiments (``--sub composite``, ``--sub composite-box350``)
+------------------------------------------------------------------------------
+`TASK-050`: one cell per arm per ratio in which the kangaroo starts as a point
+and then cycles once through every harness mode as one continuous schedule
+(:func:`kangaroo.composite_legs`), fitted to the zone by
+:func:`kangaroo.fit_to_box` and **checked** by :func:`kangaroo.schedule_fits`
+before the run — the spec carries ``kangaroo.composite: true`` so
+:func:`experiment.validate_spec` refuses an unfitted schedule. The two subs
+differ only in the zone: the harness default 2 km square, and the 350 m
+flight area. Each lives in its **own directory** under the campaign
+(``<campaign>/composite/``, ``<campaign>/composite-box350/``) with its own
+manifest, because a composite cell's start range and run length are derived
+from the fit and so are not the main grid's like-for-like start. A ratio the
+box cannot hold is planned as a cell with status ``does_not_fit`` and the
+refusal recorded, never run (`TASK-050` D2).
+
 Not a configuration of record
 -----------------------------
 No value in any spec, manifest or bundle written here is an approved
@@ -104,9 +120,14 @@ CAMPAIGN_IDS = {
 }
 
 
-def default_out_dir(arm_set=DEFAULT_ARM_SET):
-    return os.path.join(REPO_ROOT, "experiments", "campaigns",
-                        CAMPAIGN_IDS[arm_set])
+def default_out_dir(arm_set=DEFAULT_ARM_SET, sub=None):
+    """The campaign directory; a composite sub (`TASK-050`) has its own
+    directory beneath it so its manifest is not mixed with the grid's."""
+    out = os.path.join(REPO_ROOT, "experiments", "campaigns",
+                       CAMPAIGN_IDS[arm_set])
+    if sub in COMPOSITE_SUBS:
+        out = os.path.join(out, sub)
+    return out
 
 
 def arm_table(arm_set=DEFAULT_ARM_SET):
@@ -191,7 +212,21 @@ STATUS_ERROR = "error"
 #: Sub-experiment names.
 SUB_MAIN = "main"
 SUB_CHORD = "chord"
-SUBS = (SUB_MAIN, SUB_CHORD)
+SUB_COMPOSITE = "composite"
+SUB_COMPOSITE_BOX = "composite-box350"
+SUBS = (SUB_MAIN, SUB_CHORD, SUB_COMPOSITE, SUB_COMPOSITE_BOX)
+COMPOSITE_SUBS = (SUB_COMPOSITE, SUB_COMPOSITE_BOX)
+
+#: The flight-area square the box sub-experiment fits to (`TASK-045` S2,
+#: `TASK-046`), metres. A scenario constraint, not a limit (`SR-004`).
+BOX_SIDE_M = 350.0
+
+#: Zone side per composite sub.
+COMPOSITE_ZONE_SIDE_M = {SUB_COMPOSITE: ZONE["side_m"],
+                         SUB_COMPOSITE_BOX: BOX_SIDE_M}
+
+#: Manifest status of a composite cell the zone cannot hold at that ratio.
+STATUS_DOES_NOT_FIT = "does_not_fit"
 
 # --------------------------------------------------------------------------
 # Sub-experiment S1 — chord-cutting against replanning and carrot resolution
@@ -470,9 +505,123 @@ def expand_s1(duration_s=DURATION_S):
     return cells
 
 
+# --------------------------------------------------------------------------
+# The composite sub-experiments (TASK-050)
+# --------------------------------------------------------------------------
+
+def composite_cell_id(arm_id, ratio_name):
+    """``<arm>-composite-<ratio-name>``."""
+    return "%s-composite-%s" % (arm_id, ratio_name)
+
+
+def composite_initial_conditions(fit):
+    """The main grid's start pose with the fitted start range: the aircraft
+    at the origin on 140 deg is kept (`D9`); the kangaroo's start is the
+    fit's, due North, as in the grid."""
+    out = dict(INITIAL_CONDITIONS)
+    out["start_range_m"] = fit["start_range_m"]
+    out["target_n_m"] = fit["start_range_m"]
+    out["target_e_m"] = 0.0
+    out["kangaroo_heading_deg"] = None       # every leg carries its own
+    return out
+
+
+def _fit_summary(fit):
+    """The fit without its legs, for the manifest and the record."""
+    out = dict((k, v) for k, v in fit.items()
+               if k not in ("legs", "phases", "check"))
+    out["check"] = dict(fit["check"])
+    out["phases"] = list(fit["phases"])
+    return out
+
+
+def build_composite_spec(arm_id, ratio_name, speed_ratio, side_m,
+                         arm_set=DEFAULT_ARM_SET, objective=None):
+    """One complete composite spec for one arm at one ratio in one zone.
+
+    Returns ``(spec, fit)``. Raises :class:`ValueError` from
+    :func:`kangaroo.fit_to_box` when the zone cannot hold the composite at
+    this ratio; the caller records the refusal (`TASK-050` D2).
+    """
+    aircraft, algorithm, cfg = _fixed_config_fields(arm_id, arm_set)
+    speed_ms = speed_for(speed_ratio, cfg.airspeed_ms)
+    fit = kang.fit_to_box(side_m, cfg.orbit_radius_m, speed_ms, dt_s=cfg.dt_s)
+    spec = experiment.default_spec()
+    spec["experiment_id"] = composite_cell_id(arm_id, ratio_name)
+    spec["objective"] = objective or (
+        "TASK-050 composite: arm %s (%s), every kangaroo mode once in a %.0f m "
+        "zone, speed ratio %s" % (arm_id, algorithm["name"], side_m,
+                                  speed_ratio))
+    spec["aircraft"] = aircraft
+    spec["algorithm"] = algorithm
+    spec["initial_conditions"] = composite_initial_conditions(fit)
+    spec["kangaroo"] = {
+        "radius_m": fit["radius_m"],
+        "length_m": fit["length_m"],
+        "width_m": fit["width_m"],
+        "seed": fit["rand_seed"],
+        "composite": True,
+        "composite_margin_m": fit["margin_m"],
+        "composite_fit": _fit_summary(fit),
+        "legs": [experiment.leg_dict(leg) for leg in fit["legs"]],
+    }
+    spec["zone"] = dict(ZONE, side_m=side_m)
+    spec["run"] = {"duration_s": fit["duration_s"], "visualise": False}
+    return experiment.validate_spec(spec), fit
+
+
+def expand_composite(sub, arms=None, ratios=None, arm_set=DEFAULT_ARM_SET):
+    """The composite cells for one sub, in reporting order: every arm at every
+    ratio. A ratio the zone cannot hold is a cell with ``spec`` None and its
+    ``refusal`` recorded, so the manifest shows it rather than omitting it
+    (`VR-012`)."""
+    if sub not in COMPOSITE_SUBS:
+        raise ValueError("unknown composite sub %r; use one of %s"
+                         % (sub, ", ".join(COMPOSITE_SUBS)))
+    side_m = COMPOSITE_ZONE_SIDE_M[sub]
+    _arms, order = arm_table(arm_set)
+    arm_ids = [a for a in order if a in (arms or order)]
+    n_a = int(round(TRANSIT_WINDOW_S / benchmark.FIXED["dt_s"]))
+    cells = []
+    for name, ratio in ratio_table(ratios):
+        for arm_id in arm_ids:
+            try:
+                spec, fit = build_composite_spec(arm_id, name, ratio, side_m,
+                                                 arm_set)
+            except ValueError as exc:
+                cells.append({
+                    "cell_id": composite_cell_id(arm_id, name),
+                    "sub": sub, "arm_set": arm_set, "arm": arm_id,
+                    "algorithm": _fixed_config_fields(arm_id, arm_set)[1]["name"],
+                    "mode_base": "composite", "mode_pace": "mixed",
+                    "ratio_name": name, "speed_ratio": ratio,
+                    "target_speed_ms": speed_for(
+                        ratio, _fixed_config_fields(arm_id, arm_set)[2].airspeed_ms),
+                    "seed": None, "n_a_max_steps": n_a,
+                    "feasibility": benchmark.feasibility(
+                        benchmark.FIXED["orbit_radius_m"],
+                        benchmark.FIXED["turn_radius_m"],
+                        benchmark.FIXED["airspeed_ms"],
+                        speed_for(ratio, benchmark.FIXED["airspeed_ms"])),
+                    "spec": None, "refusal": str(exc), "zone_side_m": side_m,
+                })
+                continue
+            cell = _cell(sub, arm_id, "composite", "mixed", name, ratio,
+                         fit["rand_seed"], spec, n_a,
+                         extra={"composite": _fit_summary(fit),
+                                "zone_side_m": side_m},
+                         arm_set=arm_set)
+            cells.append(cell)
+    return cells
+
+
 def expand(sub=SUB_MAIN, **kwargs):
     if sub == SUB_MAIN:
         return expand_grid(**kwargs)
+    if sub in COMPOSITE_SUBS:
+        return expand_composite(sub, arms=kwargs.get("arms"),
+                                ratios=kwargs.get("ratios"),
+                                arm_set=kwargs.get("arm_set", DEFAULT_ARM_SET))
     if sub == SUB_CHORD:
         if kwargs.get("arm_set", DEFAULT_ARM_SET) != DEFAULT_ARM_SET:
             raise ValueError("S1 (--sub chord) is a baseline-resolution study "
@@ -541,6 +690,16 @@ def _manifest_entry(cell):
     }
     if "s1" in cell:
         entry["s1"] = dict(cell["s1"])
+    if cell["sub"] in COMPOSITE_SUBS:
+        entry["zone_side_m"] = cell.get("zone_side_m")
+        if cell.get("spec") is None:
+            entry["status"] = STATUS_DOES_NOT_FIT
+            entry["error"] = cell.get("refusal")
+        else:
+            entry["duration_s"] = cell["spec"]["run"]["duration_s"]
+            entry["initial_conditions"] = dict(
+                cell["spec"]["initial_conditions"])
+            entry["composite"] = dict(cell["composite"])
     return entry
 
 
@@ -561,7 +720,20 @@ def plan(out_dir, sub=SUB_MAIN, arms=None, modes=None, ratios=None,
                    duration_s=duration_s, arm_set=arm_set)
     arms_table, arm_order = arm_table(arm_set)
     for cell in cells:
-        if cell["spec"]["initial_conditions"] != INITIAL_CONDITIONS:
+        if cell.get("spec") is None:
+            continue                     # a composite refusal; recorded below
+        ic = cell["spec"]["initial_conditions"]
+        if sub in COMPOSITE_SUBS:
+            # TASK-050: the kangaroo's start range is the fit's; the aircraft's
+            # start pose is still the grid's, checked field by field.
+            drift = [k for k in ("plane_n_m", "plane_e_m", "plane_heading_deg")
+                     if ic.get(k) != INITIAL_CONDITIONS[k]]
+            if drift:
+                raise ValueError(
+                    "composite cell %s moves the aircraft start (%s); the "
+                    "aircraft pose is the grid's" % (cell["cell_id"], drift))
+            continue
+        if ic != INITIAL_CONDITIONS:
             raise ValueError(
                 "cell %s carries initial conditions %r, which differ from "
                 "INITIAL_CONDITIONS; every cell must start from the same place"
@@ -613,6 +785,18 @@ def plan(out_dir, sub=SUB_MAIN, arms=None, modes=None, ratios=None,
         "speed_ratios_overridden": ratios is not None,
         "seeds": list(RAND_SEEDS if seeds is None else seeds),
     }
+    if sub in COMPOSITE_SUBS:
+        sub_block.update({
+            "task": "TASK-050",
+            "zone_side_m": COMPOSITE_ZONE_SIDE_M[sub],
+            "margin_m": kang.COMPOSITE_MARGIN_M,
+            "phases": list(kang.COMPOSITE_PHASES),
+            "duration_s": "per cell: the fitted schedule's length",
+            "initial_conditions": "per cell: the grid's aircraft pose, the "
+                                  "fit's start range",
+            "does_not_fit": [c["cell_id"] for c in cells
+                             if c.get("spec") is None],
+        })
     if sub == SUB_CHORD:
         sub_block.update({
             "prediction": S1_PREDICTION,
@@ -630,10 +814,11 @@ def plan(out_dir, sub=SUB_MAIN, arms=None, modes=None, ratios=None,
 
     os.makedirs(os.path.join(out_dir, "spec"), exist_ok=True)
     for cell in cells:
-        path = spec_path(out_dir, cell["cell_id"])
-        experiment.save_spec(cell["spec"], path)
         entry = _manifest_entry(cell)
-        entry["spec"] = os.path.relpath(path, out_dir)
+        if cell.get("spec") is not None:
+            path = spec_path(out_dir, cell["cell_id"])
+            experiment.save_spec(cell["spec"], path)
+            entry["spec"] = os.path.relpath(path, out_dir)
         manifest["cells"][cell["cell_id"]] = entry
     save_manifest(manifest, out_dir)
     return manifest, cells
@@ -650,12 +835,19 @@ def cells_from_manifest(manifest, out_dir, sub=None, only=None, resume=False):
             continue
         if resume and entry["status"] == STATUS_COMPLETE:
             continue
+        if entry.get("spec") is None:
+            continue                     # a composite refusal has no run
         spec = experiment.load_spec(os.path.join(out_dir, entry["spec"]))
+        extra = {}
+        if "s1" in entry:
+            extra["s1"] = entry["s1"]
+        if entry["sub"] in COMPOSITE_SUBS:
+            extra["composite"] = entry["composite"]
+            extra["zone_side_m"] = entry.get("zone_side_m")
         cell = _cell(entry["sub"], entry["arm"], entry["mode_base"],
                      entry["mode_pace"], entry["ratio_name"],
                      entry["speed_ratio"], entry["seed"], spec,
-                     entry["n_a_max_steps"],
-                     extra={"s1": entry["s1"]} if "s1" in entry else None,
+                     entry["n_a_max_steps"], extra=extra or None,
                      arm_set=arm_set)
         cells.append(cell)
     return cells
@@ -741,6 +933,9 @@ def run_cell(cell, out_dir, render=False, verify=True, visualise=False):
     extra = {"cell": cell_block}
     if cell["sub"] == SUB_CHORD:
         extra["s1"] = s1_block(session, cell)
+    if cell["sub"] in COMPOSITE_SUBS:
+        extra["composite"] = dict(cell["composite"],
+                                  zone_side_m=cell.get("zone_side_m"))
 
     written = experiment.write_bundle(
         spec, session, verify=verify, render=render,
@@ -903,6 +1098,10 @@ MASTER_COLUMNS = (
     "s1_target", "s1_dt_s", "s1_rate_hz", "s1_look_ahead_m",
     "s1_precompensate", "s1_sampling", "s1_flown_radius_m",
     "s1_predicted_radius_m", "s1_residual_m",
+    # TASK-050 composite cells: the fitted geometry and the fit check.
+    "composite_zone_side_m", "composite_start_range_m", "composite_radius_m",
+    "composite_length_m", "composite_width_m", "composite_rand_seed",
+    "composite_worst_excursion_m",
 )
 
 
@@ -921,6 +1120,7 @@ def master_row(cid, entry, record):
     m = (record or {}).get("metrics") or {}
     cell = (record or {}).get("cell") or {}
     s1 = (record or {}).get("s1") or {}
+    comp = (record or {}).get("composite") or entry.get("composite") or {}
     ring_t = _get(m, "ring", "target") or {}
     ring_r = _get(m, "ring", "ring") or {}
     pc_t = _get(m, "post_contact", "target") or {}
@@ -1001,6 +1201,13 @@ def master_row(cid, entry, record):
         "s1_flown_radius_m": s1.get("flown_radius_m"),
         "s1_predicted_radius_m": s1.get("predicted_radius_m"),
         "s1_residual_m": s1.get("residual_m"),
+        "composite_zone_side_m": entry.get("zone_side_m"),
+        "composite_start_range_m": comp.get("start_range_m"),
+        "composite_radius_m": comp.get("radius_m"),
+        "composite_length_m": comp.get("length_m"),
+        "composite_width_m": comp.get("width_m"),
+        "composite_rand_seed": comp.get("rand_seed"),
+        "composite_worst_excursion_m": _get(comp, "check", "worst_excursion_m"),
     }
     return row
 
@@ -1058,7 +1265,11 @@ def build_parser():
     action.add_argument("--evaluate-s1", action="store_true",
                         help="Evaluate the S1 prediction against its bundles.")
     parser.add_argument("--sub", default=SUB_MAIN, choices=SUBS,
-                        help="Sub-experiment: main (default) or chord (S1).")
+                        help="Sub-experiment: main (default), chord (S1), or "
+                             "the TASK-050 composite in the 2 km zone "
+                             "(composite) or the 350 m box "
+                             "(composite-box350); the composite subs plan "
+                             "into their own directory under the campaign.")
     parser.add_argument("--arm-set", default=DEFAULT_ARM_SET,
                         choices=sorted(benchmark.ARM_SETS),
                         help="Arm table: base (TASK-045, CAMP-002) or hyst "
@@ -1107,7 +1318,7 @@ def _progress(index, total, cid, entry, record, elapsed):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    out_dir = args.out_dir or default_out_dir(args.arm_set)
+    out_dir = args.out_dir or default_out_dir(args.arm_set, args.sub)
     if args.arms:
         unknown = [a for a in args.arms if a not in arm_table(args.arm_set)[1]]
         if unknown:
@@ -1133,7 +1344,11 @@ def main(argv=None):
         print("planned %d %s cells -> %s" % (len(cells), args.sub,
                                               manifest_path(out_dir)))
         for cell in cells:
-            print("  %s" % cell["cell_id"])
+            if cell.get("spec") is None:
+                print("  %s  [%s] %s" % (cell["cell_id"], STATUS_DOES_NOT_FIT,
+                                         cell["refusal"]))
+            else:
+                print("  %s" % cell["cell_id"])
         return 0
 
     manifest = load_manifest(out_dir)

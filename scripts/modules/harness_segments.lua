@@ -50,7 +50,14 @@ local M = {}
 
 --- Build continuous segments from a leg list.
 --
---  `legs` is a 1-indexed array of {duration_s, mode, heading_deg, speed_ms}.
+--  `legs` is a 1-indexed array of {duration_s, mode, heading_deg, speed_ms}
+--  or, for an elastic leg over a non-straight base (TASK-045 D2),
+--  {duration_s, "elastic", heading_deg, speed_ms, elastic_base}; the named
+--  form uses the keys duration_s, mode, heading_deg, speed_ms, elastic_base.
+--  A four-element leg keeps the pre-TASK-045 straight base. (Found by
+--  TASK-050, 2026-09-15: the composite schedule's elastic-circle and
+--  elastic-rectangle legs diverged from the Python until the base was
+--  carried here; the differential test now gates it.)
 --  Each segment records its own start time, end time, mode parameters and the
 --  POSITION OFFSET that makes it begin exactly where the previous one ended --
 --  which is what keeps position continuous while allowing velocity to step at a
@@ -77,6 +84,7 @@ function M.make_segments(legs, start_n, start_e, opts, t0)
         local mode = leg.mode or leg[2]
         local heading_deg = leg.heading_deg or leg[3]
         local speed_ms = leg.speed_ms or leg[4]
+        local elastic_base = leg.elastic_base or leg[5]
         if duration_s == nil or duration_s <= 0.0 then
             return nil, "leg duration must be positive"
         end
@@ -87,6 +95,10 @@ function M.make_segments(legs, start_n, start_e, opts, t0)
         if speed_ms < 0.0 then
             return nil, "leg speed must be >= 0"
         end
+        if elastic_base ~= nil and elastic_base ~= "straight"
+                and elastic_base ~= "circle" and elastic_base ~= "rectangle" then
+            return nil, "unknown elastic_base"
+        end
 
         local seg = {
             t_start = t_cursor,
@@ -94,6 +106,7 @@ function M.make_segments(legs, start_n, start_e, opts, t0)
             mode = mode,
             heading_deg = heading_deg,
             speed_ms = speed_ms,
+            elastic_base = elastic_base or "straight",
             radius_m = radius_m,
             length_m = length_m,
             width_m = width_m,
@@ -136,7 +149,7 @@ function M.local_state(seg, t_local)
         radius_m = seg.radius_m,
         length_m = seg.length_m,
         width_m = seg.width_m,
-        base_mode = "straight",
+        base_mode = seg.elastic_base or "straight",
         slow_ms = seg.speed_ms * kang.ELASTIC_SLOW_FACTOR,
         fast_ms = seg.speed_ms,
         hold_s = kang.ELASTIC_HOLD_S,

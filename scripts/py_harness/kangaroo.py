@@ -529,3 +529,342 @@ def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
     raise ValueError(
         "unknown kangaroo mode %r; use one of %s" % (mode, ", ".join(ALL_MODES))
     )
+
+
+# --------------------------------------------------------------------------
+# Composite schedule fitted to a flight boundary (``TASK-050``)
+# --------------------------------------------------------------------------
+# One scripted leg list that visits every mode the harness offers, once, in a
+# fixed order, and that is CHECKED to stay inside a square flight area without
+# the inclusion zone ever having to turn the kangaroo back (TASK-032's
+# containment turn is the safety net, not the design). Composition only: no new
+# motion model, every leg is an ordinary `make_segments` leg.
+#
+# Layout (TASK-050 D1, D5). `h` is the contained half-width, `side/2 - R -
+# margin`: the zone turns the kangaroo back `R` inside the wall, and the
+# schedule keeps a further `margin` clear of that. The initial point sits
+# `start_range_m` due North of the aircraft; the straight leg runs South
+# through the centre; the elastic-straight leg bounces back North by the
+# distance one slow hold plus one ramp covers, and is timed so it lands on the
+# centre. Every closed shape therefore starts and ends AT THE CENTRE, which is
+# what makes the fit independent of where the straight legs happened to end.
+
+#: Fixed-order phase names. The rand block is one phase expanded to several
+#: legs; the closing point is its own phase so a run ends as it began.
+COMPOSITE_PHASES = ("point", "straight", "elastic-straight", "circle",
+                    "elastic-circle", "rectangle", "elastic-rectangle",
+                    "rand", "point-end")
+
+#: Hold at the opening and closing points, seconds (D1).
+COMPOSITE_POINT_S = 10.0
+
+#: The elastic-straight leg: one slow hold plus one ramp, so it ends at the
+#: fast speed the circle then continues at (D1).
+COMPOSITE_ELASTIC_STRAIGHT_S = ELASTIC_HOLD_S + ELASTIC_RAMP_S
+
+#: The seeded random block, seconds (D1, D4).
+COMPOSITE_RAND_S = 30.0
+
+#: Default seed for the rand block (D4).
+COMPOSITE_RAND_SEED = 1
+
+#: Clearance the schedule keeps inside the contained region, metres. Must
+#: exceed one tick's travel (`speed * dt`, 3.75 m at 37.5 m/s and 0.1 s) or
+#: `ScenarioSession._contain_target`'s one-step look-ahead could still fire.
+COMPOSITE_MARGIN_M = 10.0
+
+#: The grid's geometry, which a box larger than it needs does not enlarge:
+#: start range, circle radius, rectangle length and width (metres) and the
+#: `kangaroo_rand` leg bounds (seconds). A 2 km zone therefore reproduces the
+#: `TASK-045` geometry exactly and only a small box shrinks it.
+COMPOSITE_CAPS = {"start_range_m": 300.0, "radius_m": 150.0, "length_m": 300.0,
+                  "width_m": 150.0, "rand_min_s": 5.0, "rand_max_s": 20.0}
+
+#: A rand-block straight leg may cover at most this fraction of `h`, so one
+#: leg from the centre cannot reach the wall on its own.
+COMPOSITE_RAND_REACH = 0.5
+
+#: How many consecutive seeds `fit_to_box` tries for the rand block before
+#: refusing (D4: seed 1 first; the seed actually used is recorded).
+COMPOSITE_RAND_SEED_TRIES = 25
+
+#: Floating-point slack on the fit test, metres. The fitted circle's far side
+#: lies exactly on the usable boundary (``r = h/2``), so an excursion of a
+#: few 1e-14 m is the geometry, not a breach.
+FIT_TOLERANCE_M = 1e-6
+
+#: Phases whose failure to fit is a refusal outright; a failure in the rand
+#: block, or at the closing point the block leaves the kangaroo on, is tried
+#: again with the next seed.
+_DETERMINISTIC_PHASES = COMPOSITE_PHASES[:7]
+
+
+def elastic_time_for_distance(dist_m, slow_ms, fast_ms, hold_s=ELASTIC_HOLD_S,
+                              ramp_s=ELASTIC_RAMP_S, tol_m=1e-9):
+    """Seconds until :func:`elastic_distance` first reaches ``dist_m``.
+
+    Bisection on the closed-form integral, which is monotone. Used to time an
+    elastic lap so it closes exactly where it opened.
+
+    Raises:
+        ValueError: For a negative distance, or a profile that never moves.
+    """
+    if dist_m < 0.0:
+        raise ValueError("distance must be >= 0, got %r" % dist_m)
+    if dist_m == 0.0:
+        return 0.0
+    mean = 0.5 * (slow_ms + fast_ms)
+    if mean <= 0.0:
+        raise ValueError("an elastic profile with zero mean speed never covers "
+                         "%.1f m" % dist_m)
+    period = elastic_period_s(hold_s, ramp_s)
+    hi = (dist_m / mean + period) * 2.0
+    lo = 0.0
+    while elastic_distance(hi, slow_ms, fast_ms, hold_s, ramp_s) < dist_m:
+        hi *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if elastic_distance(mid, slow_ms, fast_ms, hold_s, ramp_s) < dist_m:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-12:
+            break
+    return hi
+
+
+def contained_half_m(side_m, containment_m, margin_m=COMPOSITE_MARGIN_M):
+    """Half-width of the region a composite may use: ``side/2 - containment -
+    margin``. ``containment_m`` is the zone's containment inset (the orbit
+    radius by default, `TASK-032`)."""
+    return 0.5 * float(side_m) - float(containment_m) - float(margin_m)
+
+
+def _toward_centre_heading(n_m):
+    """North when the kangaroo is at or South of the centre line, else South:
+    the bounce (D1) written as a rule rather than a number."""
+    return 0.0 if n_m <= 0.0 else 180.0
+
+
+def composite_legs(speed_ms, start_range_m, radius_m, length_m, width_m,
+                   rand_min_s, rand_max_s, rand_seed=COMPOSITE_RAND_SEED,
+                   point_s=COMPOSITE_POINT_S,
+                   elastic_straight_s=COMPOSITE_ELASTIC_STRAIGHT_S,
+                   rand_s=COMPOSITE_RAND_S, end_point_s=None):
+    """The composite schedule as an ordinary leg list (`TASK-050`).
+
+    Every harness mode once, in :data:`COMPOSITE_PHASES` order, starting and
+    ending on ``point``. The kangaroo's start is ``start_range_m`` North of
+    the origin; the straight leg is timed so the elastic-straight leg that
+    follows returns it to the origin, and every closed shape then starts and
+    ends there.
+
+    Returns ``(legs, phases)``: the legs, and one phase name per leg (the rand
+    block's legs all carry ``"rand"``).
+
+    Raises:
+        ValueError: For a non-positive speed or geometry, or rand bounds that
+            are not ``0 < min <= max``.
+    """
+    if speed_ms <= 0.0:
+        raise ValueError("composite needs a positive speed, got %r" % speed_ms)
+    if radius_m <= 0.0 or length_m <= 0.0 or width_m <= 0.0:
+        raise ValueError("composite geometry must be positive, got r=%r l=%r w=%r"
+                         % (radius_m, length_m, width_m))
+    if not (0.0 < rand_min_s <= rand_max_s):
+        raise ValueError("need 0 < rand_min_s <= rand_max_s, got %r, %r"
+                         % (rand_min_s, rand_max_s))
+    end_point_s = point_s if end_point_s is None else end_point_s
+    slow = speed_ms * ELASTIC_SLOW_FACTOR
+
+    # Straight South through the centre, then elastic-straight back North for
+    # exactly what one slow hold plus one ramp covers, landing on the centre.
+    d_elastic = elastic_distance(elastic_straight_s, slow, speed_ms)
+    straight_s = (float(start_range_m) + d_elastic) / speed_ms
+    n_after_straight = float(start_range_m) - speed_ms * straight_s
+    heading_back = _toward_centre_heading(n_after_straight)
+    n_after_elastic = n_after_straight + d_elastic * math.cos(
+        math.radians(heading_back))
+
+    # One lap and one perimeter, closed exactly, at constant and elastic pace.
+    circle_m = 2.0 * math.pi * radius_m
+    perimeter_m = 2.0 * (length_m + width_m)
+    circle_s = circle_m / speed_ms
+    elastic_circle_s = elastic_time_for_distance(circle_m, slow, speed_ms)
+    rectangle_s = perimeter_m / speed_ms
+    elastic_rectangle_s = elastic_time_for_distance(perimeter_m, slow, speed_ms)
+    # The rectangle extends along its heading and to its right; run it
+    # towards the centre line like the straight legs do.
+    rect_heading = _toward_centre_heading(n_after_elastic)
+
+    legs = [
+        (point_s, "point", 0.0, 0.0),
+        (straight_s, "straight", 180.0, speed_ms),
+        (elastic_straight_s, ELASTIC_MODE, heading_back, speed_ms, "straight"),
+        (circle_s, "circle", 0.0, speed_ms),
+        (elastic_circle_s, ELASTIC_MODE, 0.0, speed_ms, "circle"),
+        (rectangle_s, "rectangle", rect_heading, speed_ms),
+        (elastic_rectangle_s, ELASTIC_MODE, rect_heading, speed_ms, "rectangle"),
+    ]
+    phases = list(COMPOSITE_PHASES[:7])
+    rand = rand_legs(rand_seed, speed_ms, rand_min_s, rand_max_s, rand_s)
+    # `rand_legs` covers AT LEAST `rand_s`; trim the last leg so the block is
+    # exactly the stated length and the closing point starts on time.
+    covered = sum(leg[0] for leg in rand[:-1])
+    last = rand[-1]
+    rand[-1] = (rand_s - covered, last[1], last[2], last[3])
+    legs.extend(rand)
+    phases.extend(["rand"] * len(rand))
+    legs.append((end_point_s, "point", 0.0, 0.0))
+    phases.append("point-end")
+    return legs, phases
+
+
+def schedule_fits(legs, start, side_m, containment_m, radius_m=150.0,
+                  length_m=300.0, width_m=150.0, margin_m=COMPOSITE_MARGIN_M,
+                  dt_s=0.1, centre=(0.0, 0.0)):
+    """Sample a schedule at the tick and check it stays inside the contained
+    region of a square zone, with ``margin_m`` to spare (`TASK-050`).
+
+    ``start`` is the kangaroo's ``(n, e)`` at ``t = 0``; ``side_m`` the zone
+    side; ``containment_m`` the inset at which the zone would turn the
+    kangaroo back (the orbit radius by default, `TASK-032`); ``centre`` the
+    zone centre. A schedule that passes here is one the zone never touches,
+    because the one-step look-ahead in ``_contain_target`` cannot reach a wall
+    ``margin_m`` away when ``margin_m`` exceeds one tick's travel.
+
+    Returns a dict: ``fits``, ``half_m`` (the usable half-width),
+    ``worst_excursion_m`` (how far the worst sample lies beyond the usable
+    region; negative is clearance), ``leg_index``, ``leg_mode``, ``t_s``,
+    ``n_m``, ``e_m`` of that sample, and ``samples``.
+    """
+    half = contained_half_m(side_m, containment_m, margin_m)
+    segments = make_segments(legs, start[0], start[1], radius_m, length_m,
+                             width_m)
+    kangaroo = segments_callable(segments)
+    total = segments[-1][1]
+    steps = int(math.ceil(total / dt_s - 1e-9))
+    worst = None
+    for i in range(steps + 1):
+        t = min(i * dt_s, total)
+        n, e, _vn, _ve = kangaroo(t)
+        excursion = max(abs(n - centre[0]), abs(e - centre[1])) - half
+        if worst is None or excursion > worst[0]:
+            worst = (excursion, t, n, e)
+    # Attribute a sample on a leg boundary to the leg that ENDED there: it is
+    # that leg's travel that put the kangaroo at the worst point.
+    leg_index = len(segments) - 1
+    for k, seg in enumerate(segments):
+        if worst[1] <= seg[1]:
+            leg_index = k
+            break
+    leg = legs[leg_index]
+    mode = str(leg[1])
+    base = leg_elastic_base(leg)
+    if base is not None:
+        mode = "%s/%s" % (mode, base)
+    return {
+        "fits": worst[0] <= FIT_TOLERANCE_M,
+        "half_m": half,
+        "margin_m": float(margin_m),
+        "worst_excursion_m": worst[0],
+        "leg_index": leg_index,
+        "leg_mode": mode,
+        "t_s": worst[1],
+        "n_m": worst[2],
+        "e_m": worst[3],
+        "samples": steps + 1,
+    }
+
+
+def fit_to_box(side_m, orbit_radius_m, speed_ms, margin_m=COMPOSITE_MARGIN_M,
+               rand_seed=COMPOSITE_RAND_SEED, dt_s=0.1,
+               rand_seed_tries=COMPOSITE_RAND_SEED_TRIES, caps=None):
+    """Fit the composite to a square flight area of ``side_m`` (`TASK-050`).
+
+    Derives the start range, circle radius, rectangle length and width, the
+    straight-leg durations and the rand-block leg bounds from the contained
+    half-width ``h = side/2 - R - margin`` (each capped at the grid's value,
+    :data:`COMPOSITE_CAPS`, so a large zone reproduces the `TASK-045`
+    geometry), builds the schedule and **checks it** with
+    :func:`schedule_fits`. Nothing is shortened to force a fit (D2).
+
+    The rand block is seeded with ``rand_seed``; if that block leaves the
+    region the next seeds are tried, up to ``rand_seed_tries``, and the seed
+    used is returned (D4). A deterministic leg that leaves the region is a
+    refusal outright.
+
+    Returns a dict with the geometry, the legs, their phases, ``duration_s``
+    and the ``check`` block, or raises.
+
+    Raises:
+        ValueError: When the region is too small for the ring, or no fit
+            exists at ``speed_ms``; the message names the leg and the
+            excursion.
+    """
+    caps = dict(COMPOSITE_CAPS, **(caps or {}))
+    half = contained_half_m(side_m, orbit_radius_m, margin_m)
+    if half <= 0.0:
+        raise ValueError(
+            "a %.0f m box leaves no room: %.1f m half-side minus the %.1f m "
+            "ring and %.1f m margin is %.1f m" % (side_m, 0.5 * side_m,
+                                                  orbit_radius_m, margin_m, half))
+    if speed_ms <= 0.0:
+        raise ValueError("fit_to_box needs a positive speed, got %r" % speed_ms)
+    geometry = {
+        "start_range_m": min(caps["start_range_m"], half),
+        "radius_m": min(caps["radius_m"], 0.5 * half),
+        "length_m": min(caps["length_m"], half),
+        "width_m": min(caps["width_m"], 0.5 * half),
+    }
+    rand_max_s = min(caps["rand_max_s"], COMPOSITE_RAND_REACH * half / speed_ms)
+    rand_min_s = min(caps["rand_min_s"], 0.5 * rand_max_s)
+
+    last_check = None
+    for attempt in range(max(1, int(rand_seed_tries))):
+        seed = int(rand_seed) + attempt
+        legs, phases = composite_legs(
+            speed_ms, geometry["start_range_m"], geometry["radius_m"],
+            geometry["length_m"], geometry["width_m"], rand_min_s, rand_max_s,
+            rand_seed=seed)
+        check = schedule_fits(legs, (geometry["start_range_m"], 0.0), side_m,
+                              orbit_radius_m, geometry["radius_m"],
+                              geometry["length_m"], geometry["width_m"],
+                              margin_m, dt_s)
+        last_check = (seed, check)
+        if check["fits"]:
+            out = dict(geometry)
+            out.update({
+                "side_m": float(side_m),
+                "orbit_radius_m": float(orbit_radius_m),
+                "margin_m": float(margin_m),
+                "half_m": half,
+                "speed_ms": float(speed_ms),
+                "straight_s": legs[1][0],
+                "elastic_straight_s": legs[2][0],
+                "circle_s": legs[3][0],
+                "elastic_circle_s": legs[4][0],
+                "rectangle_s": legs[5][0],
+                "elastic_rectangle_s": legs[6][0],
+                "rand_s": COMPOSITE_RAND_S,
+                "rand_min_s": rand_min_s,
+                "rand_max_s": rand_max_s,
+                "rand_seed": seed,
+                "rand_seed_tries": attempt + 1,
+                "point_s": COMPOSITE_POINT_S,
+                "duration_s": sum(leg[0] for leg in legs),
+                "legs": legs,
+                "phases": phases,
+                "check": check,
+            })
+            return out
+        if phases[check["leg_index"]] in _DETERMINISTIC_PHASES:
+            break                      # a deterministic leg: refuse outright
+    seed, check = last_check
+    raise ValueError(
+        "the composite does not fit a %.0f m box at %.2f m/s: leg %d (%s, %s) "
+        "reaches %.1f m beyond the usable %.1f m half-width at t = %.1f s "
+        "(n = %.1f, e = %.1f; rand seed %d)"
+        % (side_m, speed_ms, check["leg_index"], check["leg_mode"],
+           phases[check["leg_index"]], check["worst_excursion_m"],
+           check["half_m"], check["t_s"], check["n_m"], check["e_m"], seed))

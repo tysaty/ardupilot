@@ -137,8 +137,11 @@ end
 
 --- The least turn-in cost CS path onto the ring.
 --  Returns the same table shape as reach_path, or nil plus a reason.
+--  preferred_direction / sense_margin_m (optional; TASK-047): hold the
+--  previous tick's orbit sense unless the other is cheaper by more than the
+--  margin. Both nil reproduces the pre-2026-09-14 argmin exactly.
 function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-                         delta_psi, delta_d)
+                         delta_psi, delta_d, preferred_direction, sense_margin_m)
     if orbit_radius_m < turn_radius_m - 1e-9 then
         return nil, "target circle radius < minimum turn radius: the orbit " ..
                     "would exceed the curvature bound"
@@ -151,30 +154,81 @@ function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
         return nil, "aircraft is inside the target ring; no approach tangent"
     end
 
-    local best = nil
-    for _, s1 in ipairs({ 1, -1 }) do
-        for _, s2 in ipairs({ 1, -1 }) do
-            local cand = M.reach_path(px, py, psi_i, tx, ty, orbit_radius_m,
-                                      turn_radius_m, s1, s2, delta_psi, delta_d)
-            if cand ~= nil then
-                if best == nil or cand.reach < best.reach then
-                    best = cand
-                end
-            end
-        end
-    end
+    local costs = M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m,
+                                turn_radius_m, delta_psi, delta_d)
+    local best = M.choose_sense(costs, preferred_direction, sense_margin_m)
     if best == nil then
         return nil, "no target-circle tangent solves this configuration"
     end
     return best
 end
 
+-- ---------------------------------------------------------
+-- Orbit-sense hysteresis (TASK-047 / TASK-048; Lua port 2026-09-14)
+-- ---------------------------------------------------------
+
+--- The best candidate per orbit sense, and the baseline's argmin.
+--  Returns {cw = cand|nil, ccw = cand|nil, argmin = cand|nil}. `argmin` is
+--  the first-visited least-cost candidate over all four pairs, in the
+--  (+1,+1), (+1,-1), (-1,+1), (-1,-1) order with strict-less replacement,
+--  which is exactly what shortest_path returned before the port.
+function M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
+                       delta_psi, delta_d)
+    local out = { cw = nil, ccw = nil, argmin = nil }
+    for _, s1 in ipairs({ 1, -1 }) do
+        for _, s2 in ipairs({ 1, -1 }) do
+            local cand = M.reach_path(px, py, psi_i, tx, ty, orbit_radius_m,
+                                      turn_radius_m, s1, s2, delta_psi, delta_d)
+            if cand ~= nil then
+                local key = cand.direction
+                if out[key] == nil or cand.reach < out[key].reach then
+                    out[key] = cand
+                end
+                if out.argmin == nil or cand.reach < out.argmin.reach then
+                    out.argmin = cand
+                end
+            end
+        end
+    end
+    return out
+end
+
+--- Pick the candidate, with optional hysteresis (ISSUE-G11).
+--  With no preferred_direction: the baseline argmin. With one ("cw"/"ccw"):
+--  the held sense's candidate unless it does not exist or the other sense is
+--  cheaper by MORE than sense_margin_m metres of turn-in cost. Returns the
+--  candidate table, or nil when neither sense has one.
+function M.choose_sense(costs, preferred_direction, sense_margin_m)
+    local cw, ccw = costs.cw, costs.ccw
+    if cw == nil and ccw == nil then
+        return nil
+    end
+    if preferred_direction == "cw" or preferred_direction == "ccw" then
+        local held = costs[preferred_direction]
+        local other = ccw
+        if preferred_direction == "ccw" then
+            other = cw
+        end
+        if held == nil then
+            return other
+        end
+        local margin = sense_margin_m or 0.0
+        if other == nil or other.reach >= held.reach - margin then
+            return held
+        end
+        return other
+    end
+    return costs.argmin
+end
+
 --- One guidance point a look-ahead along the shortest CS path (TASK-024 only,
 --  no orbit continuation). Returns a table, or nil plus a reason.
 function M.approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
-                             turn_radius_m, look_ahead_m, delta_psi, delta_d)
+                             turn_radius_m, look_ahead_m, delta_psi, delta_d,
+                             preferred_direction, sense_margin_m)
     local path, reason = M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m,
-                                         turn_radius_m, delta_psi, delta_d)
+                                         turn_radius_m, delta_psi, delta_d,
+                                         preferred_direction, sense_margin_m)
     if path == nil then
         return nil, reason
     end
@@ -205,7 +259,8 @@ end
 --  Returns a table {gx, gy, phase, direction, curvature, ring_angle_rad?} or
 --  nil plus a reason.
 function M.guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-                    look_ahead_m, delta_psi, delta_d, precompensate)
+                    look_ahead_m, delta_psi, delta_d, precompensate,
+                    preferred_direction, sense_margin_m)
     local R = orbit_radius_m
     if R < turn_radius_m - 1e-9 then
         return nil, "target circle radius < minimum turn radius: the orbit " ..
@@ -220,7 +275,8 @@ function M.guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     if d > R then
         local g, reason = M.approach_guidance(px, py, psi_i, tx, ty, R,
                                               turn_radius_m, look_ahead_m,
-                                              delta_psi, delta_d)
+                                              delta_psi, delta_d,
+                                              preferred_direction, sense_margin_m)
         if g == nil then
             return nil, reason
         end

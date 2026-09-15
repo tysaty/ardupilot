@@ -132,13 +132,17 @@ M.bearing_from_velocity = bearing_from_velocity
 --  because the predicted centre has been led so far that the aircraft is inside
 --  the ring about it. That is a legitimate exclusion, not an error, and the
 --  caller counts it.
+--  preferred_direction / sense_margin_m (optional; TASK-048): the held orbit
+--  sense applied to every candidate's CS solve. Both nil: unchanged.
 function M.score_candidate(px, py, psi_i, est_x, est_y, vx, vy, k_steps,
                            k_prev_steps, dt_s, airspeed_ms, orbit_radius_m,
                            turn_radius_m, delta_psi, delta_d, weights,
-                           path_samples, tube_len_m)
+                           path_samples, tube_len_m,
+                           preferred_direction, sense_margin_m)
     local cx, cy = M.predicted_centre(est_x, est_y, vx, vy, k_steps, dt_s)
     local path = dtc.shortest_path(px, py, psi_i, cx, cy, orbit_radius_m,
-                                   turn_radius_m, delta_psi, delta_d)
+                                   turn_radius_m, delta_psi, delta_d,
+                                   preferred_direction, sense_margin_m)
     if path == nil then
         return nil
     end
@@ -244,7 +248,7 @@ end
 function M.select_horizon(px, py, psi_i, est_x, est_y, vx, vy, k_prev_steps,
                           dt_s, airspeed_ms, orbit_radius_m, turn_radius_m,
                           delta_psi, delta_d, horizons, weights, path_samples,
-                          tube_len_m)
+                          tube_len_m, preferred_direction, sense_margin_m)
     local best = nil
     local solved = 0
     for i = 1, #horizons do
@@ -252,7 +256,8 @@ function M.select_horizon(px, py, psi_i, est_x, est_y, vx, vy, k_prev_steps,
                                        horizons[i], k_prev_steps, dt_s,
                                        airspeed_ms, orbit_radius_m,
                                        turn_radius_m, delta_psi, delta_d,
-                                       weights, path_samples, tube_len_m)
+                                       weights, path_samples, tube_len_m,
+                                       preferred_direction, sense_margin_m)
         if cand ~= nil then
             solved = solved + 1
             if best == nil or cand.cost < best.cost then

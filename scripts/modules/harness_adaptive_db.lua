@@ -104,8 +104,12 @@ M.orbit_hold = orbit_hold
 --  Returns a table {gx, gy, phase, direction, curvature, ring_angle_rad?,
 --  plan?} or nil plus a reason. `plan` is present in the approach phase only:
 --  the orbit phase commits no curve.
+--  preferred_direction / sense_margin_m (optional; TASK-048): orbit-sense
+--  hysteresis on the CS solve, passed through to harness_cs_orbit. Both nil
+--  reproduces the pre-2026-09-14 behaviour exactly.
 function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
-                    look_ahead_m, delta_psi, delta_d, hold_policy, precompensate)
+                    look_ahead_m, delta_psi, delta_d, hold_policy, precompensate,
+                    preferred_direction, sense_margin_m)
     if hold_policy ~= M.HOLD_PLAN and hold_policy ~= M.HOLD_CENTRE_ONLY then
         return nil, "unknown hold policy"
     end
@@ -131,7 +135,8 @@ function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
         -- Re-solve the CS path from the live pose against the frozen centre.
         local g, reason = cs.approach_guidance(px, py, psi_i, cx, cy, R,
                                                turn_radius_m, look_ahead_m,
-                                               delta_psi, delta_d)
+                                               delta_psi, delta_d,
+                                               preferred_direction, sense_margin_m)
         if g == nil then
             return nil, reason
         end
@@ -154,7 +159,8 @@ function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
 
     local path, reason = cs.shortest_path(commit_x, commit_y, commit_psi,
                                           cx, cy, R, turn_radius_m,
-                                          delta_psi, delta_d)
+                                          delta_psi, delta_d,
+                                          preferred_direction, sense_margin_m)
     if path == nil then
         return nil, reason
     end

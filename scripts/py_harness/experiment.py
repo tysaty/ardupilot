@@ -62,6 +62,7 @@ from . import scenario
 from . import series as series_mod
 from . import tangent_error
 from .config import HarnessConfig, InfeasibleConfiguration
+from . import kangaroo as kang
 from .kangaroo import ELASTIC_BASE_FIELD, ELASTIC_BASES, ELASTIC_MODE, LEG_MODES
 
 
@@ -138,6 +139,9 @@ def default_spec():
             "length_m": 300.0,
             "width_m": 150.0,
             "seed": None,
+            # TASK-050: True declares the legs a composite fitted to the zone,
+            # and validate_spec then proves it before anything runs.
+            "composite": False,
             "legs": [
                 {"duration_s": 60.0, "mode": "straight", "heading_deg": 0.0,
                  "speed_ms": 5.0},
@@ -268,7 +272,56 @@ def validate_spec(spec):
     duration = _require(run, "duration_s", "run")
     if not isinstance(duration, (int, float)) or duration <= 0.0:
         raise SpecError("run.duration_s must be > 0 seconds, got %r" % duration)
+
+    if kangaroo.get("composite"):
+        _validate_composite_fit(spec)
     return spec
+
+
+def _validate_composite_fit(spec):
+    """`TASK-050`: a spec declaring ``kangaroo.composite`` must fit its zone.
+
+    The schedule is sampled at the tick against the zone's contained region
+    (side less the containment inset, less ``kangaroo.composite_margin_m``)
+    and refused, naming the leg, when any sample lies outside. A composite is
+    designed never to need the zone's containment turn; this is where that
+    claim is tested rather than assumed. An unbounded zone has nothing to fit.
+    """
+    kangaroo = spec["kangaroo"]
+    zone_spec = spec.get("zone") or {}
+    side = zone_spec.get("side_m")
+    if side is None:
+        return
+    aircraft = spec["aircraft"]
+    containment = zone_spec.get("containment_margin_m")
+    if containment is None:
+        containment = aircraft["orbit_radius_m"]
+    margin = kangaroo.get("composite_margin_m", kang.COMPOSITE_MARGIN_M)
+    if not isinstance(margin, (int, float)) or margin < 0.0:
+        raise SpecError("kangaroo.composite_margin_m must be >= 0 metres, got %r"
+                        % (margin,))
+    initial = spec.get("initial_conditions") or {}
+    start_n = initial.get("target_n_m")
+    start_e = initial.get("target_e_m")
+    start = (initial.get("start_range_m", 300.0) if start_n is None else start_n,
+             0.0 if start_e is None else start_e)
+    legs = [leg_tuple(leg) for leg in kangaroo["legs"]]
+    check = kang.schedule_fits(
+        legs, start, side, containment,
+        radius_m=kangaroo.get("radius_m", 150.0),
+        length_m=kangaroo.get("length_m", 300.0),
+        width_m=kangaroo.get("width_m", 150.0),
+        margin_m=margin, dt_s=aircraft["dt_s"])
+    if not check["fits"]:
+        raise SpecError(
+            "kangaroo.composite is set but the schedule does not fit the "
+            "%.0f m zone: kangaroo.legs[%d] (%s) reaches %.1f m beyond the "
+            "usable %.1f m half-width at t = %.1f s (n = %.1f, e = %.1f). A "
+            "composite must fit without a containment turn (TASK-050); refit "
+            "it with kangaroo.fit_to_box"
+            % (side, check["leg_index"], check["leg_mode"],
+               check["worst_excursion_m"], check["half_m"], check["t_s"],
+               check["n_m"], check["e_m"]))
 
 
 def spec_warnings(spec):
@@ -696,7 +749,8 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
 
     written["ticks"] = write_ticks_csv(
         os.path.join(directory, "ticks.csv"), session.history, config,
-        every_series, record["metrics"], experiment_id, cell)
+        every_series, record["metrics"], experiment_id, cell,
+        legs=session.export_legs())
 
     written["history"] = plotter.save_run(
         os.path.join(directory, "history.json"), experiment_id,
@@ -736,10 +790,13 @@ def write_bundle(spec, session, root=DEFAULT_ROOT, verify=True,
 #: the label ("where the kangaroo actually was") is the target-truth group at
 #: tick ``i + k``; the features are everything at tick ``i``. Undefined is an
 #: **empty cell, never 0** (the `series.py` rule carried through).
+#: ``mode_leg`` (`TASK-050`) names the kangaroo leg in force at the tick as
+#: ``<index>:<mode>[/<elastic_base>]`` over the legs actually flown, so a
+#: composite run's rows can be split by mode.
 TICKS_COLUMNS = (
     # identity
     "cell_id", "arm", "algorithm", "mode_base", "mode_pace", "speed_ratio",
-    "seed", "tick", "t_s",
+    "seed", "mode_leg", "tick", "t_s",
     # plane state
     "plane_n_m", "plane_e_m", "plane_hdg_rad", "plane_vn_ms", "plane_ve_ms",
     # target truth
@@ -786,8 +843,31 @@ def _csv_cell(value):
     return str(value)
 
 
+def leg_labels(legs):
+    """``[(t_end_s, label), ...]`` for :func:`write_ticks_csv`'s ``mode_leg``
+    column: each flown leg's end time and its ``<index>:<mode>[/<base>]``."""
+    out, elapsed = [], 0.0
+    for index, leg in enumerate(legs):
+        elapsed += float(leg[0])
+        label = "%d:%s" % (index, leg[1])
+        base = kang.leg_elastic_base(leg)
+        if base is not None:
+            label += "/" + base
+        out.append((elapsed, label))
+    return out
+
+
+def _leg_label_at(labels, t_s):
+    """The label of the leg in force at ``t_s``; the last leg past the end,
+    matching :func:`kangaroo.segments_callable`'s clamp."""
+    for t_end, label in labels:
+        if t_s < t_end:                 # the same [start, end) rule as the segments
+            return label
+    return labels[-1][1] if labels else None
+
+
 def write_ticks_csv(path, history, config, every_series, metrics_block,
-                    experiment_id, cell=None):
+                    experiment_id, cell=None, legs=None):
     """Write the flat per-tick table (:data:`TICKS_COLUMNS`) and return ``path``.
 
     A run with no history writes the header only: the file exists with the
@@ -801,8 +881,11 @@ def write_ticks_csv(path, history, config, every_series, metrics_block,
         metrics_block: The record's ``metrics`` (for the contact tick).
         experiment_id: The ``cell_id`` column.
         cell: Optional identity dict (see :func:`write_bundle`).
+        legs: The legs actually flown (``session.export_legs()``) for the
+            ``mode_leg`` column; empty when omitted.
     """
     cell = cell or {}
+    labels = leg_labels(legs or [])
     contact = ((metrics_block or {}).get("post_contact") or {}).get("target")
     contact_tick = contact.get("contact_tick") if contact else None
     identity = {
@@ -823,6 +906,7 @@ def write_ticks_csv(path, history, config, every_series, metrics_block,
             row = dict(identity)
             row["tick"] = tick
             row["t_s"] = sample["t_s"]
+            row["mode_leg"] = _leg_label_at(labels, sample["t_s"])
             for name in ("plane_n_m", "plane_e_m", "plane_hdg_rad",
                          "target_n_m", "target_e_m", "target_vn_ms",
                          "target_ve_ms", "target_est_raw_n_m",
