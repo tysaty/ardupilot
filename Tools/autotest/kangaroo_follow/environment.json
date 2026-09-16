@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "captured_utc": "2026-09-16",
+  "captured_on": {
+    "os": "macOS 26.5.2 (Darwin 25.5.0), arm64",
+    "note": "The last machine the environment was captured on. check_env.py reports the live OS beside it; a different OS is a warning, not a failure."
+  },
+  "ardupilot": {
+    "commit": "ef19597660f2edf820ab2982e4880275fbce0219",
+    "describe": "ArduPilot-4.6.0-beta1-7773-gef19597660",
+    "gitlink_in_parent": "3c9b154a1b8ed6d47a44ceea5b6493af0c0ead24",
+    "note": "The checkout at src/ardupilot is pinned to `commit`. The parent repository's recorded gitlink differs (uncommitted submodule move); check_env.py reports both and pins to `commit`."
+  },
+  "build": {
+    "configure": ["./waf", "configure", "--board", "sitl"],
+    "build": ["./waf", "plane"],
+    "binary": "build/sitl/bin/arduplane",
+    "sitl_model": "plane",
+    "frame": "plane"
+  },
+  "python": {
+    "minor": "3.13",
+    "packages": {
+      "pymavlink": "2.4.49",
+      "lupa": "2.8",
+      "numpy": "2.4.1",
+      "matplotlib": "3.11.1",
+      "MAVProxy": "1.8.71"
+    },
+    "note": "MAVProxy is a hard import of Tools/autotest/vehicle_test_suite.py, so a cell cannot be flown without it; check_env.py fails on its absence except under --dry-run. It was not installed on the capture machine (the dry run was)."
+  },
+  "location": {
+    "name": "CMAC",
+    "note": "ArduPilot's default SITL site. The local frame is anchored at the aircraft when the window opens (HANC), so the absolute site does not enter any result. A real flight-area location must not be committed (AGENTS.md); supply one through --location if wanted and it is recorded in provenance only."
+  },
+  "params": {
+    "file": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/kangaroo-follow.parm",
+    "sources": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/SOURCES.md"
+  },
+  "lua": {
+    "runner": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/sitl_harness_runner.lua",
+    "arms": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/sitl_arms.lua",
+    "modules_dir": "src/ardupilot/scripts/modules",
+    "modules": [
+      "harness_geom.lua", "harness_dubins.lua", "harness_orbit.lua",
+      "harness_cs_orbit.lua", "harness_kangaroo.lua", "harness_segments.lua",
+      "harness_estimator.lua", "harness_adaptive_db.lua",
+      "harness_adaptive_horizon.lua", "harness_rh_geometric.lua"
+    ]
+  }
+}

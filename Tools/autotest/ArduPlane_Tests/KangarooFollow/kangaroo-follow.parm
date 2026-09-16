@@ -1,0 +1,37 @@
+# SITL test configuration for the harness campaign (TASK-052).
+# NOT a flight configuration: no value here is an approved flight limit
+# (SR-004). Every value's source is in sitl/params/SOURCES.md; change a
+# value there first, then here.
+#
+# Loaded by the AutoTest driver after the SITL reboot and before take-off.
+# Script (SHR_*) parameters are set by the driver per cell, because they
+# exist only once sitl_harness_runner.lua has registered them.
+
+# --- Scripting -----------------------------------------------------------
+SCR_ENABLE        1
+SCR_HEAP_SIZE     1048576
+SCR_VM_I_COUNT    200000
+
+# --- Aircraft: the harness's V and the flight code's bank limit -----------
+AIRSPEED_CRUISE   25
+AIRSPEED_MIN      10
+AIRSPEED_MAX      30
+ARSPD_USE         1
+ROLL_LIMIT_DEG    45
+
+# --- Navigation: the SITL plane model's L1 tuning, unchanged --------------
+WP_LOITER_RAD     80
+NAVL1_PERIOD      15
+NAVL1_DAMPING     0.75
+
+# --- Take-off ---------------------------------------------------------------
+TKOFF_ALT         100
+
+# --- Simulation: calm baseline; the wind sub-campaign overrides per cell ---
+SIM_WIND_SPD      0
+SIM_WIND_DIR      0
+SIM_WIND_TURB     0
+SIM_SPEEDUP       1
+
+# --- Fence: TASK-046 D7 undecided; off until answered -----------------------
+FENCE_ENABLE      0

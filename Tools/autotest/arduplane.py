@@ -5,6 +5,7 @@ AP_FLAKE8_CLEAN
 '''
 
 import copy
+import json
 import math
 import operator
 import os
@@ -9054,6 +9055,202 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         best_row = self._dubins_find_best_config()
         self._dubins_run_best_trial(best_row, stamp)
 
+    # ---------------------------------------------------------
+    # Kangaroo-follow harness repeat (TASK-052) - added 16 Sep
+    # ---------------------------------------------------------
+    # Flies one Python-harness cell (a TASK-040 spec.json plus the legs the
+    # harness actually flew) against the ported Lua guidance laws, through
+    # ArduPlane_Tests/KangarooFollow/sitl_harness_runner.lua, and leaves the
+    # DataFlash log for kangaroo_follow/extract_bundle.py. The plan is a
+    # plan.json written by kangaroo_follow/campaign.py; the sequence is the
+    # DubinsSweep pattern (reboot with parameters, wait for the script, take
+    # off, GUIDED, collect) with the start pose established before the window
+    # opens (TASK-046 D6) and the runner reporting completion on SHR_DONE.
+
+    KANGAROO_FOLLOW_HEADING_TOL_DEG = 5.0
+    KANGAROO_FOLLOW_AIRSPEED_TOL_MS = 3.0
+    # distance along the initial heading to fly toward while settling onto it
+    KANGAROO_FOLLOW_LEAD_IN_M = 3000.0
+
+    def _kangaroo_follow_package(self):
+        # the campaign package lives beside this file; import late so the
+        # plane suite never depends on it unless these tests run
+        import kangaroo_follow.paths as kf_paths
+        return kf_paths
+
+    def _kangaroo_follow_load_plan(self, path=None):
+        kf_paths = self._kangaroo_follow_package()
+        path = path or os.environ.get(kf_paths.PLAN_ENV)
+        if not path:
+            raise PreconditionFailedException(
+                "set %s to a plan.json written by kangaroo_follow.campaign" % kf_paths.PLAN_ENV)
+        with open(path) as handle:
+            plan = json.load(handle)
+        # plan paths are repository-relative (TASK-052 P2)
+        for key in ("param_file", "logs_dir", "bin_out", "result_out"):
+            if plan.get(key) and not os.path.isabs(plan[key]):
+                plan[key] = os.path.join(kf_paths.REPO_ROOT, plan[key])
+        return plan
+
+    def _kangaroo_follow_new_result(self, plan):
+        return {"cell_id": plan["cell_id"], "status": "error", "reason": None,
+                "statustexts": [], "timings": {}, "start_pose": None, "bin": None,
+                "tolerances": {"heading_deg": self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
+                               "airspeed_ms": self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS}}
+
+    def _kangaroo_follow_statustexts(self):
+        try:
+            texts = [m.text for m in self.context_collection("STATUSTEXT")]
+        except Exception:
+            texts = []
+        return [t for t in texts if t.startswith("SHR")]
+
+    def _kangaroo_follow_copy_bin(self, dest):
+        src = self.current_onboard_log_filepath()
+        if not os.path.isabs(src):
+            src = os.path.join(self.rootdir(), src)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(src, dest)
+        return dest
+
+    def _kangaroo_follow_fly_cell(self, plan):
+        """Fly one planned cell; returns the result dict also written to plan['result_out']."""
+        result = self._kangaroo_follow_new_result(plan)
+        t_wall = time.time()
+        self.context_push()
+        self.context_collect("STATUSTEXT")
+        try:
+            # 1. parameters, then reboot so scripting starts with them
+            self.progress("KangarooFollow: applying %s" % plan["param_file"])
+            self.repeatedly_apply_parameter_filepath(plan["param_file"])
+            base = {k: v for k, v in plan.get("params", {}).items() if not k.startswith("SHR_")}
+            if base:
+                self.set_parameters(base)
+            if self.armed():
+                self.disarm_vehicle(force=True)
+            self.reboot_sitl()
+            self.wait_statustext("SHR: loaded cell", timeout=plan.get("load_timeout_s", 90),
+                                 check_context=True)
+            result["timings"]["loaded_s"] = time.time() - t_wall
+
+            # 2. the runner's own parameters exist only now
+            shr = {k: v for k, v in plan.get("params", {}).items() if k.startswith("SHR_")}
+            if shr:
+                self.set_parameters(shr)
+
+            # 3. take off and establish the start pose (TASK-046 D6)
+            self.wait_ready_to_arm(timeout=300)
+            self.takeoff(alt=plan["alt_m"], mode="TAKEOFF",
+                         timeout=plan.get("takeoff_timeout_s", 180))
+            self.change_mode("GUIDED")
+            heading = float(plan["plane_heading_deg"])
+            here = self.mav.location()
+            ahead = self.offset_location_heading_distance(
+                here, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
+            ahead.alt = plan["alt_m"]
+            self.send_do_reposition(ahead, frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT)
+            self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
+                              timeout=plan.get("pose_timeout_s", 240))
+            cruise = float(plan.get("airspeed_ms", 25.0))
+            self.wait_airspeed(cruise - self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS,
+                               cruise + self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS, timeout=60)
+            self.wait_altitude(plan["alt_m"] - 15, plan["alt_m"] + 15, relative=True, timeout=60)
+            result["timings"]["posed_s"] = time.time() - t_wall
+
+            # 4. open the window; the runner anchors the frame at the aircraft
+            self.set_parameter("SHR_START", 1)
+            self.wait_statustext("SHR: started", timeout=20, check_context=True)
+            hud = self.mav.recv_match(type="VFR_HUD", blocking=True, timeout=5)
+            loc = self.mav.location()
+            result["start_pose"] = {
+                "lat_deg": loc.lat, "lng_deg": loc.lng, "alt_m": loc.alt,
+                "heading_deg": float(hud.heading) if hud else None,
+                "airspeed_ms": float(hud.airspeed) if hud else None,
+                "groundspeed_ms": float(hud.groundspeed) if hud else None,
+                "heading_error_deg": (((float(hud.heading) - heading + 180.0) % 360.0) - 180.0)
+                if hud else None,
+                "sim_time_s": self.get_sim_time_cached(),
+            }
+
+            # 5. wait for the runner: SHR_DONE 1 done, 2 refused, 3 load error
+            timeout = float(plan["duration_s"]) + float(plan.get("margin_s", 30.0))
+            tstart = self.get_sim_time()
+            done = 0
+            while self.get_sim_time_cached() - tstart < timeout:
+                done = int(self.get_parameter("SHR_DONE", attempts=1))
+                if done != 0:
+                    break
+                self.delay_sim_time(2, "kangaroo-follow window")
+            result["timings"]["window_s"] = time.time() - t_wall
+            result["shr_done"] = done
+            result["shr_t_s"] = float(self.get_parameter("SHR_T_S", attempts=1))
+            result["shr_tick"] = int(self.get_parameter("SHR_TICK", attempts=1))
+            if done == 1:
+                result["status"] = "complete"
+            elif done == 2:
+                result["status"] = "partial"
+                result["reason"] = "runner refused (no solution); see statustexts"
+            elif done == 3:
+                result["status"] = "error"
+                result["reason"] = "runner load error; see statustexts"
+            else:
+                result["status"] = "partial"
+                result["reason"] = "cell timeout after %.0f s sim time" % timeout
+        finally:
+            result["statustexts"] = self._kangaroo_follow_statustexts()
+            try:
+                self.disarm_vehicle(force=True)
+            except Exception as exc:
+                self.progress("KangarooFollow: disarm failed: %s" % exc)
+            try:
+                self.delay_sim_time(2, "log close")
+                result["bin"] = self._kangaroo_follow_copy_bin(plan["bin_out"])
+            except Exception as exc:
+                result["reason"] = (result.get("reason") or "") + "; log copy failed: %s" % exc
+            self.context_pop()
+            result["timings"]["total_s"] = time.time() - t_wall
+            os.makedirs(os.path.dirname(plan["result_out"]), exist_ok=True)
+            with open(plan["result_out"], "w") as handle:
+                json.dump(result, handle, indent=2)
+                handle.write("\n")
+            self.progress("KangarooFollow: %s -> %s (%s)" % (
+                plan["cell_id"], result["status"], result.get("reason")))
+        return result
+
+    def KangarooFollowCell(self):
+        """Fly one kangaroo-follow harness cell named by KANGAROO_FOLLOW_PLAN (TASK-052)."""
+        plan = self._kangaroo_follow_load_plan()
+        result = self._kangaroo_follow_fly_cell(plan)
+        if result["status"] == "error":
+            raise NotAchievedException(result["reason"])
+
+    def KangarooFollowCampaign(self):
+        """Fly every planned cell of the manifest directory named by KANGAROO_FOLLOW_CAMPAIGN (TASK-052)."""
+        kf_paths = self._kangaroo_follow_package()
+        out_dir = os.environ.get(kf_paths.CAMPAIGN_ENV)
+        if not out_dir:
+            raise PreconditionFailedException(
+                "set %s to a campaign directory holding MANIFEST.json or MANIFEST-wind.json"
+                % kf_paths.CAMPAIGN_ENV)
+        errors = []
+        for name in ("MANIFEST.json", "MANIFEST-wind.json"):
+            path = os.path.join(out_dir, name)
+            if not os.path.isfile(path):
+                continue
+            with open(path) as handle:
+                manifest = json.load(handle)
+            for cid in sorted(manifest["cells"]):
+                entry = manifest["cells"][cid]
+                plan_path = os.path.join(out_dir, cid, "plan.json")
+                if entry.get("status") != "planned" or not os.path.isfile(plan_path):
+                    self.progress("KangarooFollow: skipping %s (%s)" % (cid, entry.get("status")))
+                    continue
+                result = self._kangaroo_follow_fly_cell(self._kangaroo_follow_load_plan(plan_path))
+                if result["status"] == "error":
+                    errors.append("%s: %s" % (cid, result["reason"]))
+        if errors:
+            raise NotAchievedException("; ".join(errors))
+
 
     def tests(self):
         '''return list of all tests'''
@@ -9260,6 +9457,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.steplessAHRSSwitch,
             self.DubinsSweep,
             self.DubinsBestTrial,
+            self.KangarooFollowCell,
+            self.KangarooFollowCampaign,
         ]
 
     def UTMGlobalPositionWaypoint(self):
@@ -9463,6 +9662,8 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "InteractTest": "requires user interaction",
             "ClimbThrottleSaturation": "requires https://github.com/ArduPilot/ardupilot/pull/27106 to pass",
             "SoaringClimbRate": "very bad sink rate",
+            "KangarooFollowCell": "campaign test; run explicitly with KANGAROO_FOLLOW_PLAN set (TASK-052)",
+            "KangarooFollowCampaign": "campaign test; run explicitly with KANGAROO_FOLLOW_CAMPAIGN set (TASK-052)",
         }
 
 

@@ -1,0 +1,11 @@
+# Pinned Python environment for the SITL campaign (TASK-052 P3).
+# Captured 2026-09-16 on the machine recorded in src/ardupilot/Tools/autotest/kangaroo_follow/environment.json.
+# Install into the interpreter that runs the harness tests:
+#     python3 -m pip install -r src/ardupilot/Tools/autotest/kangaroo_follow/requirements.txt
+pymavlink==2.4.49
+lupa==2.8
+numpy==2.4.1
+matplotlib==3.11.1
+# Required to fly a cell: Tools/autotest/vehicle_test_suite.py imports
+# MAVProxy at module level. The dry run does not need it.
+MAVProxy==1.8.71
