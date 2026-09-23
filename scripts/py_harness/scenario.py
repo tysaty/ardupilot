@@ -94,7 +94,8 @@ class ScenarioSession:
                  start_range_m=300.0, plane_heading_deg=0.0,
                  target_n_m=None, target_e_m=None, radius_m=150.0,
                  length_m=300.0, width_m=150.0, zone=None, contain_target=True,
-                 containment_margin_m=None, estimate=False, lookahead_steps=0):
+                 containment_margin_m=None, estimate=False, lookahead_steps=0,
+                 allow_infeasible=False):
         """
         Args:
             legs: Initial schedule, ``[(duration_s, mode, heading_deg, speed_ms)]``.
@@ -129,6 +130,16 @@ class ScenarioSession:
                 (``TASK-017``). Projects the estimate ``lookahead_steps * dt_s``
                 seconds ahead; ``0`` is the identity. Ignored when no estimator
                 runs.
+            allow_infeasible: The turn-radius guard (2026-09-18). A
+                configuration whose ``turn_radius_m`` is below the bank-limited
+                floor ``V^2 / (g tan phi_max)`` is refused here with
+                :class:`~config.InfeasibleConfiguration`, and the violation is
+                printed, unless this is True; then the run proceeds with every
+                history sample stamped ``infeasible``. Until this guard the
+                scenario and experiment paths built the harness without
+                validating, so the register's statement that the configuration
+                is accepted only if ``rho >= rho_min`` held for the front end
+                alone.
         """
         self.config = config or HarnessConfig()
         self.algorithm_name = algorithm
@@ -164,7 +175,10 @@ class ScenarioSession:
         #: Absolute times at which a change was applied, for the plot markers.
         self.markers = []
 
+        #: The turn-radius guard: refuse (and print) unless explicitly allowed.
+        problems = self.config.validate(allow_infeasible=allow_infeasible)
         self.harness = Harness(
+            infeasible=bool(problems),
             plane=PlaneState(n_m=0.0, e_m=0.0,
                              hdg_rad=math.radians(plane_heading_deg),
                              speed_ms=self.config.airspeed_ms),

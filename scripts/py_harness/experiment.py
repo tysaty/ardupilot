@@ -273,9 +273,44 @@ def validate_spec(spec):
     if not isinstance(duration, (int, float)) or duration <= 0.0:
         raise SpecError("run.duration_s must be > 0 seconds, got %r" % duration)
 
+    _validate_zone(spec)
     if kangaroo.get("composite"):
         _validate_composite_fit(spec)
     return spec
+
+
+#: Optional rectangular-zone fields (`TASK-052`, 2026-09-17): a flight area
+#: that is not a square about the aircraft's start. ``height_m`` is the full
+#: North extent (defaults to ``side_m``); ``centre_n_m`` / ``centre_e_m`` place
+#: the zone's centre in the local frame (default the origin). Pure additions:
+#: a spec without them is the square zone every recorded campaign used.
+ZONE_OPTIONAL_FIELDS = ("height_m", "centre_n_m", "centre_e_m")
+
+
+def _validate_zone(spec):
+    zone_spec = spec.get("zone") or {}
+    if zone_spec.get("side_m") is None:
+        return
+    height = zone_spec.get("height_m")
+    if height is not None and (not isinstance(height, (int, float))
+                               or height <= 0.0):
+        raise SpecError("zone.height_m must be > 0 metres, got %r" % height)
+    for name in ("centre_n_m", "centre_e_m"):
+        value = zone_spec.get(name)
+        if value is not None and not isinstance(value, (int, float)):
+            raise SpecError("zone.%s must be a number in metres, got %r"
+                            % (name, value))
+    if spec["kangaroo"].get("composite"):
+        # The composite fit (`TASK-050`) is checked about the origin on the
+        # zone's `side_m`; a moved centre would make that check wrong, and a
+        # North extent shorter than the side would make it optimistic.
+        if zone_spec.get("centre_n_m") or zone_spec.get("centre_e_m"):
+            raise SpecError("a composite schedule needs the zone centred at "
+                            "the origin (zone.centre_n_m / centre_e_m must be "
+                            "absent or 0): the fit is checked about the origin")
+        if height is not None and height < zone_spec["side_m"]:
+            raise SpecError("a composite schedule needs zone.height_m >= "
+                            "zone.side_m (the fit is checked on side_m)")
 
 
 def _validate_composite_fit(spec):
@@ -423,7 +458,11 @@ def session_from_spec(spec):
         zone = False                      # explicitly unbounded
     else:
         from . import zone as zone_mod
-        zone = zone_mod.InclusionZone(side_m=zone_spec["side_m"])
+        zone = zone_mod.InclusionZone(
+            side_m=zone_spec["side_m"],
+            height_m=zone_spec.get("height_m"),
+            centre_n_m=zone_spec.get("centre_n_m") or 0.0,
+            centre_e_m=zone_spec.get("centre_e_m") or 0.0)
 
     return scenario.ScenarioSession(
         legs=legs,

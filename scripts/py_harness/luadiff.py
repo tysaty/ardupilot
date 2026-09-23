@@ -193,13 +193,23 @@ class LuaSandbox:
     :meth:`assert_stateless` exists to catch that rather than let it hide.
     """
 
-    def __init__(self):
+    def __init__(self, extra_module_dirs=()):
+        """
+        Args:
+            extra_module_dirs: Directories searched **before** the ported
+                modules' own (``TASK-055``): the generated upstream module
+                ``standoff_orbit.lua`` lives in the ArduPilot tree, and the
+                gate must load the file the applet loads, not a copy.
+        """
         self.runtime, self.info = _make_runtime()
         #: Reason string from the last refusal (``nil, "why"``), else ``None``.
         self.last_reason = None
         self._lua_path = os.path.join(MODULE_DIR, "?.lua")
+        paths = [os.path.join(str(d), "?.lua") for d in extra_module_dirs]
+        paths.append(self._lua_path)
         self.runtime.execute(
-            'package.path = %s .. ";" .. package.path' % _lua_quote(self._lua_path))
+            'package.path = %s .. ";" .. package.path'
+            % _lua_quote(";".join(paths)))
 
     # -- loading -----------------------------------------------------------
 

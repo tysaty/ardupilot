@@ -32,6 +32,7 @@ this boundary, time seconds.
 """
 
 import math
+import sys
 
 # --------------------------------------------------------------------------
 # Requested flight parameters — user direction, 2026-07-22
@@ -772,6 +773,11 @@ class HarnessConfig:
                 ``allow_infeasible`` is False.
         """
         problems = self.infeasibility_report()
+        for problem in problems:
+            # Printed as well as raised (2026-09-18): a run built through the
+            # scenario or experiment path never showed the caller why it was
+            # refused, and a run allowed to proceed never said it was infeasible.
+            print("harness config: %s" % problem, file=sys.stderr)
         if problems and not allow_infeasible:
             raise InfeasibleConfiguration(
                 "configuration violates the %.1f deg bank limit:\n  - %s\n"

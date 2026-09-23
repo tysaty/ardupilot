@@ -49,7 +49,6 @@
 --  Frame x = East, y = North, psi from North clockwise (IR-008). Stateless.
 -- =========================================================
 
-local geom = require("harness_geom")
 local dubins = require("harness_dubins")
 local orbit = require("harness_orbit")
 
