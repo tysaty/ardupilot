@@ -71,6 +71,9 @@
 // number of seconds a request to reset the yaw to the GSF estimate is active before it times out
 #define YAW_RESET_TO_GSF_TIMEOUT_MS 5000
 
+// age at which a terrain altitude from the database is no longer used
+#define TERRAIN_SRTM_ALT_TIMEOUT_MS 5000
+
 // accuracy threshold applied to GSF yaw estimate use
 #define GSF_YAW_ACCURACY_THRESHOLD_DEG 15.0f
 
@@ -330,8 +333,10 @@ public:
      * all measurement lag and transmission delays.
      * type: An integer specifying Euler rotation order used to define the yaw angle.
      * type = 1 specifies a 312 (ZXY) rotation order, type = 2 specifies a 321 (ZYX) rotation order.
+     * antOffset: body-frame antenna offset the yaw angle was calculated from assuming the vehicle was
+     * level, zero (the default) when the measurement does not require attitude correction (m)
     */
-    void writeEulerYawAngle(float yawAngle, float yawAngleErr, uint32_t timeStamp_ms, uint8_t type);
+    void writeEulerYawAngle(float yawAngle, float yawAngleErr, uint32_t timeStamp_ms, uint8_t type, const Vector3f &antOffset=Vector3f());
 
     /*
     * Write position and quaternion data from an external navigation system
@@ -437,7 +442,8 @@ public:
     enum class MagFuseSel {
         NOT_FUSING = 0,
         FUSE_YAW = 1,
-        FUSE_MAG = 2
+        FUSE_MAG = 2,
+        FUSE_MAG_ANCHORED = 3
     };
 
     // are we using (aka fusing) a non-compass yaw?
@@ -666,6 +672,10 @@ private:
         ftype         yawAng;         // yaw angle measurement (rad)
         ftype         yawAngErr;      // yaw angle 1SD measurement accuracy (rad)
         rotationOrder order;          // type specifiying Euler rotation order used, 0 = 321 (ZYX), 1 = 312 (ZXY)
+#if EK3_FEATURE_MOVING_BASELINE
+        Vector3F      antOffset;      // body-frame antenna offset the yaw measurement was calculated from assuming the
+                                      // vehicle was level, zero when the measurement does not require attitude correction (m)
+#endif
     };
 
     struct ext_nav_elements : EKF_obs_element_t {
@@ -849,6 +859,21 @@ private:
     // align the yaw angle for the quaternion states to the given yaw angle which should be at the fusion horizon
     void alignYawAngle(const yaw_elements &yawAngData);
 
+    // build the body-to-earth rotation matrix at the current state attitude with yaw
+    // set to zero, using the given Euler rotation order. Optionally returns the yaw
+    // angle removed. Returns false if the rotation order is not supported
+    bool buildTbnZeroYaw(rotationOrder order, Matrix3F &Tbn, ftype *yawAng=nullptr) const;
+
+#if EK3_FEATURE_MOVING_BASELINE
+    // correct a yaw measurement calculated from a moving baseline antenna offset for
+    // vehicle attitude using this core's attitude estimate at the fusion time horizon,
+    // inflating yawAngErr by the attitude uncertainty the correction introduces.
+    // returns false when the baseline is too close to vertical at the estimated
+    // attitude for the measurement to contain usable yaw information, or when the
+    // rotation order is not supported
+    bool correctGPSYawForAntennaOffset(yaw_elements &yawAngData) const;
+#endif // EK3_FEATURE_MOVING_BASELINE
+
     // update mag field states and associated variances using magnetomer and declination data
     void resetMagFieldStates();
 
@@ -955,6 +980,10 @@ private:
 
     // set the class variable true if the delta angle bias variances are sufficiently small
     void checkGyroCalStatus(void);
+
+    // return true if GPS, compass or external nav yaw has been fused within the last 5 seconds. Optical
+    // flow must not learn the Z gyro bias without one, or it absorbs a flow error as a phantom bias
+    bool recentYawFusion(void) const;
 
     // update inflight calculaton that determines if GPS data is good enough for reliable navigation
     void calcGpsGoodForFlight(void);
@@ -1085,7 +1114,7 @@ private:
     uint32_t vertVelVarClipCounter; // counter used to control reset of vertical velocity variance following collapse against the lower limit
 
     ftype gpsNoiseScaler;           // Used to scale the  GPS measurement noise and consistency gates to compensate for operation with small satellite counts
-    Matrix24 P;                     // covariance matrix
+    Matrix24 Pmut;                  // covariance matrix, must remain symmetric and positive semi-definite
     EKF_IMU_buffer_t<imu_elements> storedIMU;      // IMU data buffer
     EKF_obs_buffer_t<gps_elements> storedGPS;      // GPS data buffer
     EKF_obs_buffer_t<mag_elements> storedMag;      // Magnetometer data buffer
@@ -1143,6 +1172,7 @@ private:
     uint32_t lastTimeGpsReceived_ms;// last time we received GPS data
     uint32_t timeAtLastAuxEKF_ms;   // last time the auxiliary filter was run to fuse range or optical flow measurements
     uint32_t lastHealthyMagTime_ms; // time the magnetometer was last declared healthy
+    uint32_t last_mag_yaw_fuse_ms;  // time magnetometer data was last fused
     bool allMagSensorsFailed;       // true if all magnetometer sensors have timed out on this flight and we are no longer using magnetometer data
     uint32_t lastSynthYawTime_ms;   // time stamp when yaw observation was last fused (msec)
     uint32_t ekfStartTime_ms;       // time the EKF was started (msec)
@@ -1522,6 +1552,7 @@ private:
     EKF_obs_buffer_t<yaw_elements> storedExtNavYawAng;  // external navigation yaw angle buffer
     yaw_elements extNavYawAngDataDelayed;   // external navigation yaw angle at the fusion time horizon
     uint32_t last_extnav_yaw_fusion_ms; // system time that external nav yaw was last fused
+    uint32_t last_extnav_yaw_fuse_ms;   // system time that external nav yaw last passed its innovation check and was fused
 #endif // EK3_FEATURE_EXTERNAL_NAV
     bool useExtNavVel;                  // true if external nav velocity should be used
 

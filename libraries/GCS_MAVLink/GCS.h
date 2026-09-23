@@ -36,7 +36,7 @@
 
 #ifndef HAL_GCS_ALLOW_PARAM_SET_DEFAULT
 #define HAL_GCS_ALLOW_PARAM_SET_DEFAULT 1
-#endif  // HAL_GCS_IGNORE_PARAM_SET_DEFAULT
+#endif  // HAL_GCS_ALLOW_PARAM_SET_DEFAULT
 
 // macros used to determine if a message will fit in the space available.
 
@@ -449,6 +449,8 @@ public:
     // return true if channel is private
     bool is_private(void) const { return is_private(chan); }
 
+    bool is_unicast() const { return option_enabled(Option::UNICAST); }
+
 #if HAL_HIGH_LATENCY2_ENABLED
     // true if this is a high latency link
     bool is_high_latency_link;
@@ -531,6 +533,7 @@ protected:
 
     // saveable rate of each stream
     AP_Int16        streamRates[NUM_STREAMS];
+    AP_Int32        devid;  // ID for device using this mavlink channel
 
     void handle_heartbeat(const mavlink_message_t &msg);
 
@@ -543,6 +546,7 @@ protected:
         NO_FORWARD                = (1U << 1),  // don't forward MAVLink data to or from this device
         NOSTREAMOVERRIDE          = (1U << 2),  // ignore REQUEST_DATA_STREAM messages (eg. from GCSs)
         FORWARD_BAD_CRC           = (1U << 3),  // forward mavlink packets that don't pass CRC
+        UNICAST                   = (1U << 4),  // addressed forwarding only; no default telemetry streams
     };
     bool option_enabled(Option option) const {
         return options & static_cast<uint16_t>(option);
@@ -717,6 +721,7 @@ protected:
 
     MAV_RESULT handle_command_camera(const mavlink_command_int_t &packet);
     MAV_RESULT handle_command_do_set_roi(const mavlink_command_int_t &packet);
+    MAV_RESULT handle_command_do_set_roi_location(const mavlink_command_int_t &packet);
     virtual MAV_RESULT handle_command_do_set_roi(const Location &roi_loc);
     MAV_RESULT handle_command_do_gripper(const mavlink_command_int_t &packet);
     MAV_RESULT handle_command_do_sprayer(const mavlink_command_int_t &packet);

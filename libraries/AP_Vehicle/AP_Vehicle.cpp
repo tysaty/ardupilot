@@ -961,9 +961,7 @@ void AP_Vehicle::notify_no_such_mode(uint8_t mode_number)
 // flashing LEDs as appropriate
 void AP_Vehicle::reboot(bool hold_in_bootloader)
 {
-    if (should_zero_rc_outputs_on_reboot()) {
-        SRV_Channels::zero_rc_outputs();
-    }
+    SRV_Channels::prepare_for_reboot();
 
     // Notify might want to blink some LEDs:
     AP_Notify::flags.firmware_update = 1;
@@ -998,10 +996,6 @@ void AP_Vehicle::reboot(bool hold_in_bootloader)
 void AP_Vehicle::publish_osd_info()
 {
 #if AP_MISSION_ENABLED
-    AP_Mission *mission = AP::mission();
-    if (mission == nullptr) {
-        return;
-    }
     AP_OSD *osd = AP::osd();
     if (osd == nullptr) {
         return;
@@ -1018,20 +1012,25 @@ void AP_Vehicle::publish_osd_info()
     if (!get_wp_crosstrack_error_m(nav_info.wp_xtrack_error)) {
         return;
     }
-    nav_info.wp_number = mission->get_current_nav_index();
+    nav_info.wp_number = AP::mission().get_current_nav_index();
     osd->set_nav_info(nav_info);
 #endif
 }
 #endif
 
-void AP_Vehicle::get_osd_roll_pitch_rad(float &roll, float &pitch) const
+void AP_Vehicle::get_osd_attitude_rad(float &roll, float &pitch, float &yaw)
 {
 #if AP_AHRS_ENABLED
+    // Take semaphore as this can be called from a thread
+    WITH_SEMAPHORE(ahrs.get_semaphore());
+
     roll = ahrs.get_roll_rad();
     pitch = ahrs.get_pitch_rad();
+    yaw = ahrs.get_yaw_rad();
 #else
     roll = 0.0;
     pitch = 0.0;
+    yaw = 0.0;
 #endif
 }
 

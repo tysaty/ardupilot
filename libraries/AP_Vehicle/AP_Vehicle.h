@@ -273,9 +273,6 @@ public:
     // returns true if vehicle is in the process of taking off
     virtual bool is_taking_off() const { return false; }
 
-    // zeroing the RC outputs can prevent unwanted motor movement:
-    virtual bool should_zero_rc_outputs_on_reboot() const { return false; }
-
     // reboot the vehicle in an orderly manner, doing various cleanups
     // and flashing LEDs as appropriate
     void reboot(bool hold_in_bootloader);
@@ -312,8 +309,8 @@ public:
      */
     virtual bool get_pan_tilt_norm(float &pan_norm, float &tilt_norm) const { return false; }
 
-    // Returns roll and  pitch for OSD Horizon, Plane overrides to correct for VTOL view and fixed wing PTCH_TRIM_DEG
-    virtual void get_osd_roll_pitch_rad(float &roll, float &pitch) const;
+    // Returns roll, pitch, and yaw for OSD Horizon, Plane overrides to correct for VTOL view and fixed wing PTCH_TRIM_DEG
+    virtual void get_osd_attitude_rad(float &roll, float &pitch, float &yaw);
 
     /*
      get the target earth-frame angular velocities in rad/s (Z-axis component used by some gimbals)

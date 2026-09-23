@@ -249,7 +249,7 @@ userdata RangeFinder::RangeFinder_State depends AP_RANGEFINDER_ENABLED
 userdata RangeFinder::RangeFinder_State rename RangeFinder_State
 userdata RangeFinder::RangeFinder_State field last_reading_ms uint32_t'skip_check read write
 userdata RangeFinder::RangeFinder_State field last_reading_ms rename last_reading
-userdata RangeFinder::RangeFinder_State field status RangeFinder::Status'enum read write RangeFinder::Status::NotConnected RangeFinder::Status::Good
+userdata RangeFinder::RangeFinder_State field status RangeFinder::Status'enum read write RangeFinder::Status::NotConnected RangeFinder::Status::PoweredDown
 userdata RangeFinder::RangeFinder_State field range_valid_count uint8_t'skip_check read write
 userdata RangeFinder::RangeFinder_State field distance_m float'skip_check read write
 userdata RangeFinder::RangeFinder_State field distance_m rename distance
@@ -290,6 +290,19 @@ singleton RangeFinder method has_data_orient boolean Rotation'enum ROTATION_NONE
 singleton RangeFinder method get_pos_offset_orient Vector3f Rotation'enum ROTATION_NONE ROTATION_MAX-1
 
 singleton RangeFinder method get_backend AP_RangeFinder_Backend uint8_t'skip_check
+
+include AP_Airspeed/AP_Airspeed_config.h
+include AP_Airspeed/AP_Airspeed.h depends AP_AIRSPEED_SCRIPTING_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+include AP_Airspeed/AP_Airspeed_Backend.h depends AP_AIRSPEED_SCRIPTING_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+
+ap_object AP_Airspeed_Backend depends AP_AIRSPEED_SCRIPTING_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+ap_object AP_Airspeed_Backend method handle_script_differential_pressure boolean float'skip_check
+ap_object AP_Airspeed_Backend method handle_script_airspeed boolean float'skip_check
+ap_object AP_Airspeed_Backend method handle_script_temperature boolean float'skip_check
+
+singleton AP_Airspeed depends AP_AIRSPEED_SCRIPTING_ENABLED && APM_BUILD_TYPE(APM_BUILD_ArduPlane)
+singleton AP_Airspeed rename airspeed
+singleton AP_Airspeed method get_backend AP_Airspeed_Backend uint8_t'skip_check
 
 include AP_Terrain/AP_Terrain.h
 
@@ -844,8 +857,8 @@ singleton AC_AttitudeControl depends APM_BUILD_TYPE(APM_BUILD_ArduPlane)||APM_BU
 singleton AC_AttitudeControl method get_rpy_srate void float'Ref float'Ref float'Ref
 singleton AC_AttitudeControl method get_att_error_angle_deg float
 
-include AC_AttitudeControl/AC_PosControl.h depends APM_BUILD_COPTER_OR_HELI
-singleton AC_PosControl depends APM_BUILD_COPTER_OR_HELI
+include AC_AttitudeControl/AC_PosControl.h depends APM_BUILD_COPTER_OR_HELI||APM_BUILD_TYPE(APM_BUILD_ArduSub)
+singleton AC_PosControl depends APM_BUILD_COPTER_OR_HELI||APM_BUILD_TYPE(APM_BUILD_ArduSub)
 singleton AC_PosControl rename poscontrol
 singleton AC_PosControl method set_posvelaccel_offset boolean Vector3f Vector3f Vector3f
 singleton AC_PosControl method get_posvelaccel_offset boolean Vector3f'Null Vector3f'Null Vector3f'Null

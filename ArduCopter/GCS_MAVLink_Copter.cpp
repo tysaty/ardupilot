@@ -324,6 +324,7 @@ bool GCS_MAVLINK_Copter::try_send_message(enum ap_message id)
 }
 
 
+#if MODE_AUTO_ENABLED
 MISSION_STATE GCS_MAVLINK_Copter::mission_state(const class AP_Mission &mission) const
 {
     if (copter.mode_auto.paused()) {
@@ -331,6 +332,7 @@ MISSION_STATE GCS_MAVLINK_Copter::mission_state(const class AP_Mission &mission)
     }
     return GCS_MAVLINK::mission_state(mission);
 }
+#endif  // MODE_AUTO_ENABLED
 
 bool GCS_MAVLINK_Copter::handle_guided_request(AP_Mission::Mission_Command &cmd)
 {
@@ -1360,7 +1362,9 @@ uint8_t GCS_MAVLINK_Copter::send_available_mode(uint8_t index) const
         &copter.mode_acro,
 #endif
         &copter.mode_stabilize,
+#if MODE_ALTHOLD_ENABLED
         &copter.mode_althold,
+#endif
 #if MODE_CIRCLE_ENABLED
         &copter.mode_circle,
 #endif
