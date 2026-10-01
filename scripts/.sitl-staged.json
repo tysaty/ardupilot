@@ -1,0 +1,38 @@
+{
+  "cell_id": "A-straight-constant-half-r1",
+  "scripts_dir": "src/ardupilot/scripts",
+  "moved_aside": [
+    "control_cont.lua",
+    "kangaroo_MAV.lua"
+  ],
+  "staged": [
+    "sitl_harness_runner.lua",
+    "modules/sitl_arms.lua",
+    "modules/sitl_cell.lua"
+  ],
+  "hashes": {
+    "sitl_harness_runner.lua": "447a8d5005768ff5df4e555481a74f1de908a74c90b61c6ec56b47d0ae98707f",
+    "modules/sitl_arms.lua": "6a7cf5a48dcf97b60c1ca2e4a7c207b03bfe74595b2cfdab2d15ca18b28b7143",
+    "modules/sitl_cell.lua": "d170a2479f21b5a0bdfc79085c71252118b6965b89e516d3c108f733ec03052c",
+    "modules/harness_geom.lua": "b656fedc31d4d728aba85cc10de7b21c7cb29b8c08f4e75bb329ec57b7de7005",
+    "modules/harness_dubins.lua": "b8cddb4c2fbbedb66cdbd5f0e9491ed518deb54e362ab4359d3e65ef969dab19",
+    "modules/harness_orbit.lua": "eb9971de851c0dde740c46ffb134c3f1e6e3c3ffa44ad4fc000b41dcec7d7a33",
+    "modules/harness_cs_orbit.lua": "ddcfc78bf4bc61fb2ee7b5788b1fff4bb4f6489bdae8482e9c1e19c4cb6a6082",
+    "modules/harness_kangaroo.lua": "f09feda19e157e62cfc7e47c6dfe0c4ff86b1be184dfc4f201f0a7ddf6e15d6b",
+    "modules/harness_segments.lua": "4d2d93d64fbb3857864a48790bd2de65ec2d3aaf73464b31428ad8ea9012042c",
+    "modules/harness_estimator.lua": "591590d6cf4009902e528c4c7147b21b3a743cc44d794323d148655417244fd8",
+    "modules/harness_adaptive_db.lua": "e717266171380e1b3b9c85ac845aacf547a6d54315e0cba19586f36eaeaa2c5c",
+    "modules/harness_adaptive_horizon.lua": "3993c1b3071f8848adfa109263c56ff9e764df0b12ee73499e130f9a66a9c424",
+    "modules/harness_rh_geometric.lua": "1ceb476017f699b64eefb415fc48a260bf40d17af6ab9fb5ed2795b714cb5c71"
+  },
+  "cell_table": {
+    "algorithm": "adaptive_db_circle",
+    "duration_s": 60.0,
+    "dt_s": 0.1,
+    "estimate": true,
+    "lookahead_steps": 25,
+    "heading_source": "course",
+    "target_n_m": 300.0,
+    "target_e_m": 0.0
+  }
+}

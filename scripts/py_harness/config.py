@@ -282,6 +282,16 @@ RH_W_SMOOTH = 5.0e3
 #: estimate itself and still replans every tick.
 VD_STEP_TICKS = 1
 
+#: How many control ticks ahead arm F leads the CARROT (`TASK-060`): the
+#: baseline's guidance point is shifted by the raw estimated velocity times
+#: ``af_step_ticks * dt_s``; the path, ring, phase and sense are left as the
+#: baseline built them. **1 is the arm as the author specified it**
+#: (2026-10-01: "shift by dt * v", dt one control tick). Configurable so a
+#: longer carrot lead can be swept (`A-VAL-005`: leading the carrot by its own
+#: time of flight cut the moving-target ring spread from 63.7 to 22.6 m). No
+#: arm reads it yet.
+AF_STEP_TICKS = 1
+
 # --------------------------------------------------------------------------
 # CS-onto-orbit sense hysteresis (TASK-047) — `dubins_target_orbit_hyst` only
 # --------------------------------------------------------------------------
@@ -411,6 +421,7 @@ class HarnessConfig:
         "rh_w_effort",
         "rh_w_smooth",
         "vd_step_ticks",
+        "af_step_ticks",
         "cs_sense_margin_m",
         "_frozen",
     )
@@ -454,6 +465,7 @@ class HarnessConfig:
         rh_w_effort=RH_W_EFFORT,
         rh_w_smooth=RH_W_SMOOTH,
         vd_step_ticks=VD_STEP_TICKS,
+        af_step_ticks=AF_STEP_TICKS,
         cs_sense_margin_m=CS_SENSE_MARGIN_M,
     ):
         object.__setattr__(self, "_frozen", False)
@@ -494,6 +506,7 @@ class HarnessConfig:
         self.rh_w_effort = float(rh_w_effort)
         self.rh_w_smooth = float(rh_w_smooth)
         self.vd_step_ticks = int(vd_step_ticks)
+        self.af_step_ticks = int(af_step_ticks)
         self.cs_sense_margin_m = float(cs_sense_margin_m)
         self._check_parameters()
         object.__setattr__(self, "_frozen", True)
@@ -627,6 +640,13 @@ class HarnessConfig:
                 "vd_step_ticks must be >= 1 whole control tick; 0 would remove "
                 "the one-step projection that defines arm D and leave it a "
                 "slower dubins_target_orbit. Got %r" % self.vd_step_ticks
+            )
+        # -- arm F, carrot lead (TASK-060) -------------------------------------
+        if self.af_step_ticks < 1:
+            raise ValueError(
+                "af_step_ticks must be >= 1 whole control tick; 0 would remove "
+                "the carrot lead that defines arm F and leave it the baseline "
+                "on the estimate. Got %r" % self.af_step_ticks
             )
         # -- CS sense hysteresis (TASK-047) -----------------------------------
         if self.cs_sense_margin_m < 0.0:

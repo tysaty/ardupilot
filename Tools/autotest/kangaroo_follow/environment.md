@@ -5,7 +5,7 @@ The machine-readable pin is `src/ardupilot/Tools/autotest/kangaroo_follow/enviro
 
 | Item | Pinned | Where it is checked |
 |---|---|---|
-| ArduPilot | commit `ef19597660f2edf820ab2982e4880275fbce0219` (`ArduPilot-4.6.0-beta1-7773-gef19597660`), checked out at `src/ardupilot` | `git rev-parse HEAD` in the checkout; `--allow-commit` to override, recorded |
+| ArduPilot | commit `163bf8b04f6f02e4229a4b4a4ecc37d5e1da1683` (the fork commit carrying the KangarooFollow tests, 2026-09-17), checked out at `src/ardupilot` | `git rev-parse HEAD` in the checkout; `--allow-commit` to override, recorded |
 | Parent gitlink | `3c9b154a1b8ed6d47a44ceea5b6493af0c0ead24` (differs; uncommitted submodule move) | reported as a warning; the checkout is what flies |
 | Build | `./waf configure --board sitl && ./waf plane` -> `build/sitl/bin/arduplane` | binary present and executable (warning under `--dry-run`) |
 | SITL model / frame | `plane` | `plan.json` |

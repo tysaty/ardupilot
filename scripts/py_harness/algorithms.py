@@ -1460,6 +1460,8 @@ def config_dict(cfg):
         "rh_w_smooth": cfg.rh_w_smooth,
         # Arm D.
         "vd_step_ticks": cfg.vd_step_ticks,
+        # Arm F (TASK-060).
+        "af_step_ticks": cfg.af_step_ticks,
         # TASK-047 sense hysteresis.
         "cs_sense_margin_m": cfg.cs_sense_margin_m,
     }

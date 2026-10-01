@@ -109,21 +109,45 @@ groundspeed and ring radius by bearing relative to the wind, and the velocity
 error along and across the wind. `wind-compare.csv` lays each direction
 against the calm SITL cell and the Python cell.
 
+## 3b. The site (`environment.json` `flight_area`, 2026-09-17)
+
+Cells fly at **Spring Valley Farm** (`SpringValley2` in `locations.txt`, the
+home of the 2026-07-18 flight log) inside the thesis's rough boundary: a
+**600 m (East-West) x 800 m (North-South)** box centred 337 m N, 183 m E of
+home (the log's GUIDED centroid), uploaded per cell as a **report-only**
+polygon fence (`FENCE_TYPE 4`, `FENCE_ACTION 0`). The window is flown at
+**60 m** above home (`TKOFF_ALT`, `SHR_ALT_M`) for **60 s**.
+
+Like-for-like is kept by re-running every selected Python cell **inside the
+same box** as the SITL cell's counterpart (`campaign.box_counterpart`, into
+`<campaign>/sitl/python/`): its zone is the box placed where the fence is
+relative to the aircraft at the window's start, its duration the window,
+and its `legs_flown` (with the box's containment turns) are what the vehicle
+replays. Grid cells open the window with the aircraft 250 m South of the box
+centre on the spec's heading (the kangaroo, 300 m North of the aircraft,
+starts 50 m North of centre); composite cells are re-fitted to the box's
+600 m side and anchor at the centre. The test flies a 1 km run-in through
+the anchor point so position and heading are both established.
+`--no-box` plans the original 2 km cells instead; `--window-s`, `--alt-m`
+and `--location` override the pins. `plan.json` names the site and carries
+no coordinates.
+
 ## 4. What a cell does (`KangarooFollowCell`)
 
 1. Applies `kangaroo-follow.parm` and the cell's `SIM_WIND_*`, reboots so
    scripting starts, waits for `SHR: loaded cell`.
-2. Takes off (`TAKEOFF`, 100 m), enters `GUIDED`, flies toward a point
-   3 km along the spec's initial heading (140 deg) until on heading at
-   cruise: the `TASK-046` D6 start pose (tolerances 5 deg, 3 m/s, recorded
-   in `result.json`).
+2. Takes off (`TAKEOFF`, 60 m), enters `GUIDED`, and with a site box flies
+   a 1 km run-in through the anchor point on the spec's initial heading
+   (140 deg); without one, toward a point 3 km along that heading until on
+   heading at cruise. The `TASK-046` D6 start pose (tolerances 5 deg,
+   3 m/s, 60 m of the anchor, recorded in `result.json`).
 3. Sets `SHR_START = 1`. The runner anchors the local frame at the aircraft
    (`HANC`), places the kangaroo 300 m North of it (the spec's start), and
    evaluates the schedule from that instant.
 4. Each 100 ms: kangaroo from `harness_segments.state_at`, estimator
    update then projection (when the arm needs it), the arm's
    `guidance_point(snapshot, cfg)`, `set_target_location()` at 100 m above
-   home, and the record rows.
+   home (60 m), and the record rows.
 5. `SHR_DONE = 1` at the end of the window (2 on a refusal, which becomes
    `partial = true`); disarm; the `.bin` is copied to the cell directory and
    `extract_bundle.py` writes the bundle through the unchanged Python
@@ -131,6 +155,57 @@ against the calm SITL cell and the Python cell.
 
 The scripts directory is restored after every cell (`stage_scripts.py`),
 including on failure. If a run was killed hard, `python3 -m kangaroo_follow.stage_scripts --restore`.
+
+## 4b. The live demonstration (`TASK-058`)
+
+Not a cell and not evidence: the baseline flown against a kangaroo whose mode
+and speed are changed while you watch. `kangaroo_demo.lua` takes its algorithm,
+configuration and geometry from a Python cell's spec (default
+`0H-straight-constant-half`), shows the kangaroo on the map as the ADS-B
+contact `KANGAROO` (`sitl_adsb.lua`), and rebuilds the kangaroo's schedule
+from where it is whenever a `KDEM_*` parameter changes.
+
+```bash
+# by hand, changing the mode from MAVProxy
+cd src/ardupilot/Tools/autotest               # kangaroo_follow is a package here: -m fails elsewhere
+python3 -m kangaroo_follow.demo --stage       # prints the sim_vehicle.py command and the KDEM_ cheat sheet
+                                              #   add --look-ahead-m 5 for the short-carrot baseline
+cd ../..                                      # sim_vehicle.py runs from src/ardupilot
+Tools/autotest/sim_vehicle.py -v ArduPlane -L SpringValley2 --console --map -N \
+    --add-param-file=Tools/autotest/ArduPlane_Tests/KangarooFollow/kangaroo-follow.parm \
+    --add-param-file=Tools/autotest/ArduPlane_Tests/KangarooFollow/kangaroo-demo.parm
+#   mode TAKEOFF ; arm throttle ; mode GUIDED ; param set KDEM_MODE 2 ; param set KDEM_SPD 18.75 ...
+cd Tools/autotest
+python3 -m kangaroo_follow.demo --restore     # put control_cont.lua and kangaroo_MAV.lua back
+
+# automatically: every mode through 6.25 to 37.5 m/s, 30 s each (from src/ardupilot)
+./Tools/autotest/autotest.py --map test.Plane.KangarooFollowDemo
+# options: KANGAROO_DEMO_LOOK_AHEAD_M=25 (carrot, m), KANGAROO_DEMO_ROLL_LIMIT_DEG=60
+# (the harness's bank; default the parameter file's 45), KANGAROO_DEMO_SPEEDUP=10
+```
+
+The autotest is also the demonstration's certification: every mode at five
+speeds plus elastic pace, judged against five criteria fixed in `arduplane.py`
+(on the map; straight speed; stationary kangaroo on the ring; the ring reached
+at or below 12.5 m/s; no script fault). It clears `src/ardupilot/logs/` when it
+starts, so copy a flight log out before the next run.
+
+`KDEM_LOOK` sets the carrot look-ahead in flight (50 m, the thesis default;
+5 m, the short-carrot baseline). `KDEM_MODE` 0 point, 1 straight, 2 circle,
+3 rectangle, 4 rand; `KDEM_PACE`
+0 constant, 1 elastic; `KDEM_SPD` m/s; `KDEM_HDG` degrees (-1 = the aircraft's
+heading at start); `KDEM_RESET` 1 re-places the kangaroo ahead; `KDEM_BOUND_M`
+turns a straight kangaroo back towards the start.
+
+**Command channel.** `KDEM_CHAN` 1 (default) steers the aircraft at the
+guidance point with a course command (`GUIDED_CHANGE_HEADING`, COG), the
+follow applet's channel. `KDEM_CHAN` 0 sends the point with
+`set_target_location()` as the campaign runner does; GUIDED then loiters
+about it at `WP_LOITER_RAD` (80 m), and because the point is about 50 m
+ahead the aircraft circles hard and never closes (2026-09-24 flight: range
+200 to 390 m from a stationary kangaroo for 30 s at 45 deg bank). Channel 1
+needs `kangaroo-demo.parm` (`GUIDED_P` 15000, `SCR_VM_I_COUNT` 1000000;
+`SOURCES.md`).
 
 ## 5. Adding a cell
 

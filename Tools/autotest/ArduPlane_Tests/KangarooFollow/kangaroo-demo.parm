@@ -1,0 +1,13 @@
+# SITL overlay for the live kangaroo demonstration (TASK-058), applied AFTER
+# kangaroo-follow.parm. NOT a flight configuration (SR-004), and NOT used by
+# campaign cells: the campaign runner's configuration is kangaroo-follow.parm
+# alone. Sources in SOURCES.md, section "kangaroo-demo.parm".
+
+# --- Scripting: room for the baseline's approach far from the kangaroo ------
+SCR_VM_I_COUNT    1000000
+
+# --- GUIDED heading controller: the demo's heading command channel ---------
+GUIDED_P          15000
+
+# --- Scripting heap: the approach's sampled paths grow with range ------------
+SCR_HEAP_SIZE     2097152

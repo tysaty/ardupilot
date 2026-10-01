@@ -71,10 +71,15 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         return os.path.realpath(__file__)
 
     def sitl_start_location(self):
-        return SITL_START_LOCATION
+        # KangarooFollow (TASK-052) may move the site for a cell; see
+        # _kangaroo_follow_set_home
+        return getattr(self, "_kangaroo_follow_home", None) or SITL_START_LOCATION
 
     def sitl_start_heading(self):
-        return SITL_START_HEADING
+        # KangarooFollow (TASK-052) may move the site for a cell; Location
+        # carries no heading, so the cell's heading rides here
+        heading = getattr(self, "_kangaroo_follow_heading", None)
+        return SITL_START_HEADING if heading is None else heading
 
     def set_current_test_name(self, name):
         self.current_test_name_directory = "ArduPlane_Tests/" + name + "/"
@@ -9378,6 +9383,133 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         self.reboot_sitl()
 
+    def PlaneFollowAppletStandoff(self):
+        '''Plane Follow standoff orbit: approach and hold a ring about a target the test itself supplies'''
+        self.start_subtest("Plane Follow standoff orbit about a stationary MAVLink target")
+
+        self.install_applet_script_context("plane_follow.lua")
+        self.install_script_module_context(self.script_modules_source_path("pid.lua"), "pid.lua")
+        self.install_script_module_context(self.script_modules_source_path("mavlink_attitude.lua"), "mavlink_attitude.lua")
+        self.install_script_module_context(self.script_modules_source_path("standoff_orbit.lua"), "standoff_orbit.lua")
+        self.install_mavlink_module_context()
+
+        ring_m = 70
+        alt_m = 60
+        self.set_parameters({
+            "SCR_ENABLE": 1,
+            "SCR_VM_I_COUNT": 200000,   # the approach samples four candidate paths per update
+            "SCR_HEAP_SIZE": 1048576,
+            "SIM_SPEEDUP": 3,
+            "RC7_OPTION": 301,
+            "FOLL_ENABLE": 1,
+            # the GUIDED heading controller is proportional (default 5000 cd/rad): a
+            # 30 deg course error gives 27 deg of bank, too little for the planned arc
+            "GUIDED_P": 15000,
+        })
+        self.set_parameters({
+            "FOLL_SYSID": self.mav.source_system,   # the test is the target
+            "FOLL_DIST_MAX": 2000,
+            "FOLL_ALT_TYPE": 1,                     # FOLLP_ALT_OVR is metres above home
+            # the test framework's message loop stalls for about 2.5 s of wall
+            # time each cycle, during which no target is sent; the follow
+            # estimate must outlive that at the chosen speed-up
+            "FOLL_TIMEOUT": 20,
+        })
+
+        self.context_collect("STATUSTEXT")
+        self.reboot_sitl()
+        self.wait_text("Plane Follow .* script loaded", timeout=30, regex=True, check_context=True)
+        # the FOLLP_ table exists only once the script has run; these are read live
+        self.set_parameters({
+            "FOLLP_SO_ENABLE": 1,
+            "FOLLP_SO_RADIUS": ring_m,
+            "FOLLP_SO_ASPD": 22,        # one airspeed; the turn radius is derived from it
+            "FOLLP_ALT_OVR": alt_m,     # the target is on the ground; hold the aircraft's altitude
+            "FOLLP_TIMEOUT": 30,
+        })
+
+        self.wait_ready_to_arm()
+        self.takeoff(alt=alt_m, mode="TAKEOFF")
+        self.change_mode("GUIDED")
+
+        # a stationary target 300 m North of the aircraft, on the ground,
+        # sent by the test at about 10 Hz for the whole run
+        here = self.mav.location()
+        target = self.offset_location_ne(here, 300, 0)
+        ground_alt_m = self.get_altitude(relative=False) - self.get_altitude(relative=True)
+
+        def send_target():
+            # stamp with the vehicle's own clock, as echoed in its last position
+            # message, so the follow library's jitter correction sees a steady
+            # offset; a constant stamp makes its corrected time lag and the
+            # target drops out in bursts
+            gpi = self.mav.messages.get("GLOBAL_POSITION_INT")
+            stamp_ms = int(gpi.time_boot_ms) if gpi is not None else 0
+            self.mav.mav.global_position_int_send(
+                stamp_ms,
+                int(target.lat * 1e7),
+                int(target.lng * 1e7),
+                int(ground_alt_m * 1000),   # mm AMSL
+                0,                          # mm above home
+                0, 0, 0,                    # velocity cm/s
+                0,                          # heading cdeg
+            )
+
+        for _ in range(20):
+            send_target()
+            self.delay_sim_time(0.1, "standoff: priming the follow target")
+        self.set_rc(7, 2000)
+        self.wait_text("PFollow: enabled", check_context=True)
+        self.wait_text("PFollow: standoff orbit R 70 m", check_context=True, timeout=20)
+
+        # fly: first contact with the ring, then a settled hold
+        tstart = self.get_sim_time()
+        contact_s = None
+        hold = []
+        last_send_s = -1.0
+        while self.get_sim_time_cached() - tstart < 240:
+            now = self.get_sim_time_cached()
+            if now - last_send_s >= 0.1:
+                send_target()          # 10 Hz of simulated time, whatever the stream rates
+                last_send_s = now
+            m = self.mav.recv_match(blocking=True, timeout=5)
+            if m is None:
+                raise NotAchievedException("no telemetry from the vehicle")
+            if m.get_type() != "GLOBAL_POSITION_INT":
+                continue
+            range_m = self.get_distance(self.mav.location(), target)
+            if contact_s is None:
+                if range_m <= ring_m + 5:
+                    contact_s = now
+                    self.progress("standoff: first contact at %.1f s, range %.1f m" % (now - tstart, range_m))
+            else:
+                if now - contact_s > 20:
+                    hold.append(range_m)
+                if now - contact_s > 80:
+                    break
+        if contact_s is None:
+            raise NotAchievedException("standoff never reached the %d m ring" % ring_m)
+        if len(hold) < 20:
+            raise NotAchievedException("too few hold samples (%d)" % len(hold))
+        mean_m = sum(hold) / len(hold)
+        worst_m = max(abs(r - ring_m) for r in hold)
+        self.progress("standoff: hold mean %.1f m, worst deviation %.1f m over %d samples" %
+                      (mean_m, worst_m, len(hold)))
+        # tolerances stated before the run: the harness holds 70.00 m with a
+        # 1 m residual; SITL flies ArduPlane's heading PID at the carrot
+        if abs(mean_m - ring_m) > 10:
+            raise NotAchievedException("mean range %.1f m is not the %d m ring" % (mean_m, ring_m))
+        if worst_m > 25:
+            raise NotAchievedException("range left the ring by %.1f m during the hold" % worst_m)
+        # the held sense: switches are reported; more than a few means the hold is flipping
+        switches = [t for t in self.context_collection("STATUSTEXT") if "standoff sense" in t.text]
+        if len(switches) > 4:
+            raise NotAchievedException("orbit sense switched %d times" % len(switches))
+
+        self.set_rc(7, 1000)
+        self.wait_text("PFollow: disabled", check_context=True)
+        self.fly_home_land_and_disarm()
+
     def PreflightRebootComponent(self):
         '''Ensure that PREFLIGHT_REBOOT commands sent to components don't reboot Autopilot'''
         self.run_cmd_int(
@@ -9829,6 +9961,19 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
     KANGAROO_FOLLOW_AIRSPEED_TOL_MS = 3.0
     # distance along the initial heading to fly toward while settling onto it
     KANGAROO_FOLLOW_LEAD_IN_M = 3000.0
+    # with a site box: run-in starts this far behind the anchor, and the
+    # window opens when the aircraft is within this radius of it. 2000 m
+    # (1000 m until 2026-10-01, TASK-061), so the lead-in has room to settle
+    # onto the spec line before the anchor
+    KANGAROO_FOLLOW_RUN_IN_M = 2000.0
+    KANGAROO_FOLLOW_ANCHOR_RADIUS_M = 60.0
+    # lead-in re-aim period, s, and the range to the anchor where it stops, m
+    # lead-in line following: re-aim period, s; how far ahead of the
+    # aircraft's projection on the spec line to aim, m; and how far before
+    # the anchor to switch to the far point, m
+    KANGAROO_FOLLOW_REAIM_S = 3.0
+    KANGAROO_FOLLOW_REAIM_LEAD_M = 400.0
+    KANGAROO_FOLLOW_REAIM_STOP_M = 300.0
 
     def _kangaroo_follow_package(self):
         # the campaign package lives beside this file; import late so the
@@ -9863,6 +10008,49 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             texts = []
         return [t for t in texts if t.startswith("SHR")]
 
+    def _kangaroo_follow_set_home(self, plan):
+        """Move SITL to the plan's site (a locations.txt entry) if it is not there."""
+        home = plan.get("home")
+        if not home:
+            return None
+        if "lat_deg" not in home:
+            # a named site: resolve through locations.txt (the plan carries
+            # no coordinates, so nothing under experiments/ does either)
+            import kangaroo_follow.campaign as kf_campaign
+            home = kf_campaign.home_from_locations(home["name"])
+        # upstream carries SITL start locations as vehicle_test_suite.Location
+        # (altitude tagged with its AltFrame, no heading field), so the site's
+        # heading is held beside it for sitl_start_heading()
+        want = Location(home["lat_deg"], home["lng_deg"], home["alt_m"], AltFrame.ABSOLUTE)
+        want_heading = float(home["heading_deg"])
+        have = self.sitl_start_location()
+        if (abs(have.lat - want.lat) < 1e-7 and abs(have.lng - want.lng) < 1e-7
+                and abs(self.sitl_start_heading() - want_heading) < 0.5):
+            return want
+        self.progress("KangarooFollow: moving SITL home to %s" % home["name"])
+        self._kangaroo_follow_home = want
+        self._kangaroo_follow_heading = want_heading
+        self.customise_SITL_commandline([], wipe=False)
+        return want
+
+    def _kangaroo_follow_box_corners(self, home_loc, box):
+        cn, ce = box["centre_offset_ne_m"]
+        hn, he = box["n_m"] / 2.0, box["e_m"] / 2.0
+        return [self.offset_location_ne(home_loc, cn + dn, ce + de)
+                for (dn, de) in ((-hn, -he), (-hn, he), (hn, he), (hn, -he))]
+
+    def _kangaroo_follow_upload_fence(self, plan, home_loc):
+        """Report-only polygon fence on the site box (TASK-046 D7 as recommended)."""
+        box = plan.get("box")
+        if not box:
+            return
+        self.set_parameters(plan["fence_params"])
+        corners = self._kangaroo_follow_box_corners(home_loc, box)
+        self.upload_fences_from_locations([
+            (mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, corners),
+        ])
+        self.delay_sim_time(1, "fence upload")
+
     def _kangaroo_follow_copy_bin(self, dest):
         src = self.current_onboard_log_filepath()
         if not os.path.isabs(src):
@@ -9878,6 +10066,11 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.context_push()
         self.context_collect("STATUSTEXT")
         try:
+            # 0. the site
+            home_loc = self._kangaroo_follow_set_home(plan)
+            if home_loc is None:
+                home_loc = self.sitl_start_location()
+
             # 1. parameters, then reboot so scripting starts with them
             self.progress("KangarooFollow: applying %s" % plan["param_file"])
             self.repeatedly_apply_parameter_filepath(plan["param_file"])
@@ -9896,24 +10089,82 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             if shr:
                 self.set_parameters(shr)
 
-            # 3. take off and establish the start pose (TASK-046 D6)
+            # 3. take off to the window altitude and establish the start
+            #    pose (TASK-046 D6): on the spec's heading at cruise, and,
+            #    with a site box, passing through the anchor point so the
+            #    kangaroo and the box land where the Python counterpart put them
             self.wait_ready_to_arm(timeout=300)
             self.takeoff(alt=plan["alt_m"], mode="TAKEOFF",
                          timeout=plan.get("takeoff_timeout_s", 180))
             self.change_mode("GUIDED")
             heading = float(plan["plane_heading_deg"])
-            here = self.mav.location()
-            ahead = self.offset_location_heading_distance(
-                here, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
-            ahead.alt = plan["alt_m"]
-            self.send_do_reposition(ahead, frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT)
-            self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
-                              timeout=plan.get("pose_timeout_s", 240))
+            anchor_ne = plan.get("anchor_ne_from_home_m")
+            if anchor_ne is not None:
+                anchor = self.offset_location_ne(home_loc, anchor_ne[0], anchor_ne[1])
+                run_in = self.offset_location_heading_distance(
+                    anchor, (heading + 180.0) % 360.0, self.KANGAROO_FOLLOW_RUN_IN_M)
+                run_in.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
+                self.send_do_reposition(run_in)
+                self.wait_distance_to_location(run_in, 0, 150,
+                                               timeout=plan.get("pose_timeout_s", 240))
+                # GUIDED flies straight at its point from wherever the turn
+                # onto it leaves the aircraft, so one aim at a point ahead
+                # passed the anchor 120 to 150 m abeam and the window never
+                # opened, and aiming through the anchor from the run-in
+                # arrived 7 deg off the spec heading. Follow the spec line
+                # instead: every KANGAROO_FOLLOW_REAIM_S re-aim at the point
+                # KANGAROO_FOLLOW_REAIM_LEAD_M ahead of the aircraft's
+                # projection onto it, then at the far point once close.
+                un, ue = math.cos(math.radians(heading)), math.sin(math.radians(heading))
+                t_aim = self.get_sim_time()
+                while True:
+                    here = self.mav.location()
+                    dn = (here.lat - anchor.lat) * 111319.5
+                    de = (here.lng - anchor.lng) * 111319.5 * math.cos(math.radians(here.lat))
+                    along = dn * un + de * ue          # negative before the anchor
+                    if along > -self.KANGAROO_FOLLOW_REAIM_STOP_M:
+                        break
+                    if self.get_sim_time_cached() - t_aim > plan.get("pose_timeout_s", 240):
+                        raise NotAchievedException("lead-in did not reach the spec line")
+                    aim = self.offset_location_heading_distance(
+                        anchor, heading, along + self.KANGAROO_FOLLOW_REAIM_LEAD_M) \
+                        if along + self.KANGAROO_FOLLOW_REAIM_LEAD_M >= 0 else \
+                        self.offset_location_heading_distance(
+                            anchor, (heading + 180.0) % 360.0,
+                            -(along + self.KANGAROO_FOLLOW_REAIM_LEAD_M))
+                    aim.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
+                    self.send_do_reposition(aim)
+                    self.delay_sim_time(self.KANGAROO_FOLLOW_REAIM_S, "lead-in")
+                ahead = self.offset_location_heading_distance(
+                    anchor, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
+                ahead.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
+                self.send_do_reposition(ahead)
+                self.wait_distance_to_location(anchor, 0, self.KANGAROO_FOLLOW_ANCHOR_RADIUS_M,
+                                               timeout=plan.get("pose_timeout_s", 240))
+                self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
+                                  timeout=10)
+                result["anchor_distance_m"] = self.get_distance(anchor, self.mav.location())
+            else:
+                here = self.mav.location()
+                ahead = self.offset_location_heading_distance(
+                    here, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
+                ahead.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
+                self.send_do_reposition(ahead)
+                self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
+                                  timeout=plan.get("pose_timeout_s", 240))
             cruise = float(plan.get("airspeed_ms", 25.0))
             self.wait_airspeed(cruise - self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS,
                                cruise + self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS, timeout=60)
             self.wait_altitude(plan["alt_m"] - 15, plan["alt_m"] + 15, relative=True, timeout=60)
             result["timings"]["posed_s"] = time.time() - t_wall
+
+            # 3b. the site box as a report-only fence, only now: since the
+            #     2026-09 upstream sync ArduPlane refuses a DO_REPOSITION to a
+            #     point outside an enabled fence whatever FENCE_ACTION is
+            #     (GCS_MAVLink_Plane.cpp, check_location_within_fence), and the
+            #     run-in and lead-in points lie outside the box (TASK-061).
+            #     The window, where breaches are measured, starts after it.
+            self._kangaroo_follow_upload_fence(plan, home_loc)
 
             # 4. open the window; the runner anchors the frame at the aircraft
             self.set_parameter("SHR_START", 1)
@@ -9931,7 +10182,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             }
 
             # 5. wait for the runner: SHR_DONE 1 done, 2 refused, 3 load error
-            timeout = float(plan["duration_s"]) + float(plan.get("margin_s", 30.0))
+            timeout = float(plan.get("window_s") or plan["duration_s"]) + float(plan.get("margin_s", 30.0))
             tstart = self.get_sim_time()
             done = 0
             while self.get_sim_time_cached() - tstart < timeout:
@@ -10009,6 +10260,161 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         if errors:
             raise NotAchievedException("; ".join(errors))
 
+    # ---------------------------------------------------------
+    # Live demonstration (TASK-058): kangaroo_demo.lua flies the baseline
+    # against a kangaroo whose mode and speed are KDEM_* parameters, and
+    # broadcasts it as ADSB_VEHICLE. This test walks every harness mode
+    # through the swept speeds so it can be watched with `autotest.py --map`;
+    # the same script is flown by hand under sim_vehicle.py after
+    # `python3 -m kangaroo_follow.demo --stage`. It checks the display and
+    # the mode mapping, not guidance performance (that is the campaign's).
+    # KDEM_MODE codes: 0 point, 1 straight, 2 circle, 3 rectangle, 4 rand.
+    KANGAROO_DEMO_MODES = ((0, "point"), (1, "straight"), (2, "circle"),
+                           (3, "rectangle"), (4, "rand"))
+    # the CAMP-003 speed ratios against the 25 m/s cruise, m/s
+    KANGAROO_DEMO_SPEEDS_MS = (6.25, 12.5, 18.75, 25.0, 37.5)
+    # elastic pace is flown for these modes at this speed (the thesis's
+    # elastic cells run at fast-phase ratio 0.5)
+    KANGAROO_DEMO_ELASTIC_MODES = ((1, "straight"), (2, "circle"), (3, "rectangle"))
+    KANGAROO_DEMO_ELASTIC_SPEED_MS = 12.5
+    # time spent on each step, s of sim time
+    KANGAROO_DEMO_DWELL_S = 30.0
+    # Certification criteria, fixed before any run (TASK-058, 2026-09-24):
+    # C1 the kangaroo is on the map (ADS-B) in every step;
+    # C2 a straight constant-pace kangaroo reports the speed set, within this
+    #    tolerance, m/s (the message carries cm/s);
+    KANGAROO_DEMO_SPEED_TOL_MS = 0.1
+    # C3 a stationary kangaroo is on the 70 m ring at the end of its step,
+    #    range within this band, m (the loiter failure read 200 to 390 m);
+    KANGAROO_DEMO_POINT_RANGE_M = (40.0, 110.0)
+    # C4 in the holdable range (speed at or below this, constant or elastic
+    #    pace) the aircraft reaches the ring in every mode: closest approach
+    #    at or below the band's upper edge. Above it the thesis's dynamic
+    #    limit applies (ratio 0.5 is already at it for a straight kangaroo),
+    #    so those steps are reported, not judged;
+    KANGAROO_DEMO_HOLDABLE_MS = 12.5
+    # C5 no script fault in the whole flight: any of these statustexts fails.
+    KANGAROO_DEMO_FAULT_TEXTS = ("Lua:", "KDEM: load failed", "KDEM: schedule",
+                                 "KDEM: not enough mem", "KDEM: guidance command refused",
+                                 "KDEM: cannot start")
+
+    def _kangaroo_demo_step(self, seen, name, code, pace, speed, failures):
+        """Fly one (mode, pace, speed) step; returns its summary row."""
+        self.set_parameters({"KDEM_MODE": code, "KDEM_PACE": pace, "KDEM_SPD": speed})
+        self.wait_statustext("KDEM: kangaroo %s" % name, timeout=10, check_context=True)
+        label = "%s%s %.2f m/s" % (name, " elastic" if pace else "", speed)
+        del seen[:]
+        ranges = []
+        tstart = self.get_sim_time()
+        while self.get_sim_time_cached() - tstart < self.KANGAROO_DEMO_DWELL_S:
+            self.delay_sim_time(2, "kangaroo %s" % label)
+            if seen:
+                here = self.assert_receive_message("GLOBAL_POSITION_INT")
+                ranges.append(self.get_distance_int(here, seen[-1]))
+        if not seen or not ranges:
+            failures.append("C1 %s: no KANGAROO ADSB_VEHICLE" % label)
+            return (label, None, None, None, "FAIL C1")
+        verdict = "pass"
+        if name == "straight" and not pace:
+            got = seen[-1].hor_velocity * 0.01
+            if abs(got - speed) > self.KANGAROO_DEMO_SPEED_TOL_MS:
+                failures.append("C2 %s: reports %.2f m/s" % (label, got))
+                verdict = "FAIL C2"
+        lo, hi = self.KANGAROO_DEMO_POINT_RANGE_M
+        if name == "point" and not lo <= ranges[-1] <= hi:
+            failures.append("C3 %s: end range %.0f m, want %.0f to %.0f" % (label, ranges[-1], lo, hi))
+            verdict = "FAIL C3"
+        if name != "point" and speed <= self.KANGAROO_DEMO_HOLDABLE_MS:
+            if min(ranges) > hi:
+                failures.append("C4 %s: closest %.0f m, want <= %.0f" % (label, min(ranges), hi))
+                verdict = "FAIL C4"
+        elif name != "point":
+            verdict = "reported"
+        row = (label, min(ranges), sum(ranges) / len(ranges), ranges[-1], verdict)
+        self.progress("KangarooFollowDemo: %-26s range min %4.0f mean %4.0f end %4.0f m  %s" % row)
+        return row
+
+    def KangarooFollowDemo(self):
+        """Baseline vs every kangaroo mode across the swept speeds, visible on the map (TASK-058)."""
+        kf_paths = self._kangaroo_follow_package()
+        import kangaroo_follow.demo as kf_demo
+        import kangaroo_follow.stage_scripts as kf_stage
+        # KANGAROO_DEMO_LOOK_AHEAD_M: the carrot, m (default the cell's 50;
+        # the thesis's short-carrot baseline is 5)
+        look_ahead = os.environ.get("KANGAROO_DEMO_LOOK_AHEAD_M")
+        # KANGAROO_DEMO_ROLL_LIMIT_DEG: the bank limit, deg (default the
+        # parameter file's 45, the flight code's; the harness's is 60)
+        roll_limit = os.environ.get("KANGAROO_DEMO_ROLL_LIMIT_DEG")
+        # KANGAROO_DEMO_CAMPAIGN / KANGAROO_DEMO_CELL: the Python cell whose
+        # spec (arm, estimator, carrot) the demonstration flies (default
+        # CAMP-003 0H-straight-constant-half; TASK-061 flies CAMP-002 A and 0)
+        kf_demo.stage(campaign_dir=os.environ.get("KANGAROO_DEMO_CAMPAIGN", kf_demo.DEFAULT_CAMPAIGN),
+                      cell_id=os.environ.get("KANGAROO_DEMO_CELL", kf_demo.DEFAULT_CELL),
+                      look_ahead_m=float(look_ahead) if look_ahead else None)
+        self.context_push()
+        try:
+            self._kangaroo_follow_set_home({"home": {"name": kf_demo.location_name()}})
+            self.repeatedly_apply_parameter_filepath(kf_paths.PARAM_FILE)
+            self.repeatedly_apply_parameter_filepath(kf_demo.DEMO_PARAM_FILE)
+            speedup = os.environ.get("KANGAROO_DEMO_SPEEDUP")
+            if speedup:
+                self.set_parameter("SIM_SPEEDUP", float(speedup))
+            if roll_limit:
+                self.set_parameter("ROLL_LIMIT_DEG", float(roll_limit))
+            self.context_collect("STATUSTEXT")
+            self.reboot_sitl()
+            self.wait_statustext("KDEM: loaded", timeout=90, check_context=True)
+            self.progress("KangarooFollowDemo: carrot %s m, ROLL_LIMIT_DEG %.0f" % (
+                look_ahead or "cell default", self.get_parameter("ROLL_LIMIT_DEG")))
+            self.wait_ready_to_arm(timeout=300)
+            self.takeoff(alt=60, mode="TAKEOFF", timeout=180)
+            self.change_mode("GUIDED")
+            self.wait_statustext("KDEM: started", timeout=20, check_context=True)
+
+            seen = []
+
+            def hook(mav, m):
+                if m.get_type() == "ADSB_VEHICLE" and m.callsign.startswith("KANGAROO"):
+                    seen.append(m)
+            self.install_message_hook_context(hook)
+
+            summary = []
+            failures = []
+            for code, name in self.KANGAROO_DEMO_MODES:
+                speeds = (0.0,) if name == "point" else self.KANGAROO_DEMO_SPEEDS_MS
+                # each mode starts with the kangaroo placed ahead again
+                self.set_parameter("KDEM_RESET", 1)
+                for speed in speeds:
+                    summary.append(self._kangaroo_demo_step(seen, name, code, 0, speed, failures))
+            for code, name in self.KANGAROO_DEMO_ELASTIC_MODES:
+                self.set_parameter("KDEM_RESET", 1)
+                summary.append(self._kangaroo_demo_step(
+                    seen, name, code, 1, self.KANGAROO_DEMO_ELASTIC_SPEED_MS, failures))
+            faults = [m.text for m in self.context_collection("STATUSTEXT")
+                      if m.text.startswith(self.KANGAROO_DEMO_FAULT_TEXTS)]
+            if faults:
+                failures.append("C5 script faults: %s" % "; ".join(sorted(set(faults))))
+            self.progress("KangarooFollowDemo: %d steps flown, %d criteria failures" % (
+                len(summary), len(failures)))
+            if failures:
+                raise NotAchievedException("; ".join(failures))
+        finally:
+            try:
+                self.disarm_vehicle(force=True)
+            except Exception as exc:
+                self.progress("KangarooFollowDemo: disarm failed: %s" % exc)
+            # revert the KDEM_ parameters while the script that owns them is loaded
+            self.context_pop()
+            kf_stage.restore()
+            if getattr(self, "_kangaroo_follow_home", None) is not None:
+                # put SITL back at the suite's start location, so the
+                # SIM_PLD_* values the site move changed are restored
+                # rather than reported as leaked
+                self._kangaroo_follow_home = None
+                self._kangaroo_follow_heading = None
+                self.customise_SITL_commandline([], wipe=False)
+            else:
+                self.reboot_sitl()
 
     def tests(self):
         '''return list of all tests'''
@@ -10238,6 +10644,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.ScriptedArmingChecksAppletEStop,
             self.ScriptedArmingChecksAppletRally,
             self.PlaneFollowAppletSanity,
+            self.PlaneFollowAppletStandoff,
             self.PreflightRebootComponent,
             self.UTMGlobalPosition,
             self.UTMGlobalPositionWaypoint,
@@ -10249,6 +10656,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.DubinsBestTrial,
             self.KangarooFollowCell,
             self.KangarooFollowCampaign,
+            self.KangarooFollowDemo,
         ]
 
     def UTMGlobalPositionWaypoint(self):
@@ -10484,6 +10892,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "SoaringClimbRate": "very bad sink rate",
             "KangarooFollowCell": "campaign test; run explicitly with KANGAROO_FOLLOW_PLAN set (TASK-052)",
             "KangarooFollowCampaign": "campaign test; run explicitly with KANGAROO_FOLLOW_CAMPAIGN set (TASK-052)",
+            "KangarooFollowDemo": "demonstration (about 12 min at real time); run explicitly, --map to watch (TASK-058)",
         }
         if not self.mavproxy_ftp_module_has_command("crccmp"):
             # added to MAVProxy in 328d7de20 (2026-07-27) and not in any

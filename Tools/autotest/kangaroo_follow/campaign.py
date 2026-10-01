@@ -74,12 +74,19 @@ WIND_DIRECTIONS = (("calm", None), ("N", 0.0), ("E", 90.0), ("S", 180.0),
                    ("W", 270.0))
 #: Start-up plus the window: the cell subprocess is killed past this.
 CELL_OVERHEAD_S = 420.0
-DEFAULT_ALT_M = 100.0
+DEFAULT_ALT_M = 60.0
+#: How sitl_harness_runner.lua commands the guidance point (`SHR_CHAN`).
+#: "heading": a COG course at it, as the demonstration (`TASK-061`,
+#: 2026-10-01). "location": set_target_location, which GUIDED loiters about
+#: at WP_LOITER_RAD, so it does not fly the law (`TASK-058` thesis point 1).
+COMMAND_CHANNELS = {"location": 0, "heading": 1}
+DEFAULT_COMMAND_CHANNEL = "heading"
 
 SITL_COLUMNS = (
     "sitl_python_cell_id", "sitl_repeat", "sitl_wind_label", "sitl_wind_spd_ms",
     "sitl_wind_dir_from_deg", "sitl_wind_turb", "sitl_speedup",
     "sitl_ardupilot_commit", "sitl_record_source", "sitl_heading_source",
+    "sitl_command_channel", "sitl_roll_limit_deg",
     "sitl_start_heading_error_deg", "sitl_tick_mean_s", "sitl_tick_max_s",
     "sitl_wall_clock_s", "sitl_error",
 )
@@ -188,11 +195,93 @@ def cell_id_for(python_cell_id, repeat, wind=None):
     return "%s-wind-%s-r%d" % (python_cell_id, wind["label"], repeat)
 
 
+STATUS_DOES_NOT_FIT = "does_not_fit"
+
+
+def _spec_duration(directory, entry):
+    with open(os.path.join(directory, entry["spec"])) as handle:
+        return json.load(handle)["run"]["duration_s"]
+
+
+def box_from_env(env):
+    """The flight-area box the environment pins, as the planner's dict."""
+    fa = env.get("flight_area")
+    if not fa:
+        return None
+    return {"e_m": float(fa["box_e_m"]), "n_m": float(fa["box_n_m"]),
+            "centre_offset_ne_m": [float(v) for v in fa["centre_offset_ne_m"]],
+            "anchor_offset_ne_m": [float(v) for v in fa["anchor_offset_ne_m"]],
+            "fence_action": int(fa.get("fence_action", 0))}
+
+
+def box_counterpart(python_dir, entry, box, window_s, out_dir):
+    """Re-run one Python cell inside the flight-area box and write it as the
+    SITL cell's Python counterpart (`TASK-052`, site work 2026-09-17).
+
+    The recorded campaigns ran in a 2 km zone (or the 350 m composite box);
+    the site's box is 600 x 800 m and the window 60 s. The SITL cell is still
+    a Python cell's spec and ``legs_flown``, so the counterpart is that cell's
+    spec with the box as its zone, placed where the fence will be relative to
+    the aircraft at the window's start, and the window as its duration. A
+    composite cell is re-fitted to the box's shorter side (its fit is about
+    the origin, so it anchors at the box centre). Returns ``(spec, record,
+    refusal)``; on a refusal the spec and record are ``None``.
+    """
+    directory = os.path.join(paths.REPO_ROOT, entry["python_dir"]) if not os.path.isabs(
+        entry["python_dir"]) else entry["python_dir"]
+    with open(os.path.join(directory, entry["python_spec"])) as handle:
+        spec = json.load(handle)
+    cid = entry["python_cell_id"] if "python_cell_id" in entry else spec["experiment_id"]
+    anchor_n, anchor_e = box["anchor_offset_ne_m"]
+    if spec["kangaroo"].get("composite"):
+        try:
+            spec, _fit = sweep.build_composite_spec(
+                entry["arm"], entry["ratio_name"], entry["speed_ratio"],
+                min(box["e_m"], box["n_m"]), arm_set=entry.get("arm_set") or sweep.DEFAULT_ARM_SET)
+        except ValueError as exc:
+            return None, None, "composite does not fit the %.0f m box: %s" % (
+                min(box["e_m"], box["n_m"]), exc)
+        anchor_n, anchor_e = 0.0, 0.0
+    spec = json.loads(json.dumps(spec))
+    spec["experiment_id"] = cid
+    spec["zone"] = {"side_m": box["e_m"], "height_m": box["n_m"],
+                    "centre_n_m": 0.0 - anchor_n if anchor_n else 0.0,
+                    "centre_e_m": 0.0 - anchor_e if anchor_e else 0.0,
+                    "contain_target": True, "containment_margin_m": None}
+    spec["run"]["duration_s"] = min(float(spec["run"]["duration_s"]), float(window_s))
+    spec["objective"] = (spec.get("objective") or "") + (
+        " | TASK-052 site counterpart: %.0f x %.0f m box centred (%.0f N, %.0f E) "
+        "of the aircraft, %.0f s window" % (box["e_m"], box["n_m"], -anchor_n,
+                                           -anchor_e, spec["run"]["duration_s"]))
+    spec = experiment.validate_spec(spec)
+    session = experiment.run_spec(spec)
+    py_dir = os.path.join(out_dir, "python")
+    os.makedirs(os.path.join(py_dir, "spec"), exist_ok=True)
+    experiment.save_spec(spec, os.path.join(py_dir, "spec", cid + ".json"))
+    experiment.write_bundle(spec, session, verify=True, render=False,
+                            directory=os.path.join(py_dir, cid),
+                            cell={"arm": entry["arm"], "mode_base": entry["mode_base"],
+                                  "mode_pace": entry["mode_pace"],
+                                  "speed_ratio": entry["speed_ratio"], "seed": entry["seed"]},
+                            n_a_max_steps=entry.get("n_a_max_steps"))
+    with open(os.path.join(py_dir, cid, "record.json")) as handle:
+        record = json.load(handle)
+    return spec, record, None
+
+
 def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
          repeats=DEFAULT_REPEATS, wind_speed_ms=DEFAULT_WIND_SPD_MS,
          wind_turb=DEFAULT_WIND_TURB, speedup=1, location=None,
-         heading_source=schedule.DEFAULT_HEADING_SOURCE, alt_m=DEFAULT_ALT_M):
-    """Write the SITL manifest from the Python campaign. Runs nothing."""
+         heading_source=schedule.DEFAULT_HEADING_SOURCE, alt_m=None,
+         box=None, window_s=None, command_channel=DEFAULT_COMMAND_CHANNEL,
+         roll_limit_deg=None, progress=print):
+    """Write the SITL manifest from the Python campaign.
+
+    Runs no SITL. In box mode (the default whenever the environment pins a
+    ``flight_area``; ``box=False`` disables it) every selected Python cell is
+    re-run headlessly inside the site's box as the SITL cell's counterpart,
+    see :func:`box_counterpart`.
+    """
     cells = python_cells(python_dir)
     if not cells:
         raise SystemExit("no complete Python cells under %s" % python_dir)
@@ -208,6 +297,15 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
     flyable, not_ported = lua_flyable()
     env = check_env.load_environment()
     out_dir = sitl_dir(python_dir, sub)
+    fa = env.get("flight_area") or {}
+    if box is None:
+        box = box_from_env(env)
+    elif box is False:
+        box = None
+    if alt_m is None:
+        alt_m = float(fa.get("alt_m", DEFAULT_ALT_M))
+    if window_s is None:
+        window_s = float(fa.get("window_s")) if fa.get("window_s") else None
     manifest = load_manifest(out_dir, sub) or {
         "campaign": "SITL-001-%s" % os.path.basename(os.path.normpath(python_dir)),
         "task": "TASK-052",
@@ -226,6 +324,10 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
         "repeats": repeats,
         "speedup": speedup,
         "heading_source": heading_source,
+        "command_channel": command_channel,
+        # None: kangaroo-follow.parm's ROLL_LIMIT_DEG (45, the flight code's);
+        # a value overrides it per cell, e.g. 60, the harness's (ADR-002)
+        "roll_limit_deg": roll_limit_deg,
         "alt_m": alt_m,
         "location": location or env["location"]["name"],
         "param_file": paths.rel(paths.PARAM_FILE),
@@ -237,11 +339,26 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
                           "(libraries/SITL/SITL.cpp); asserted by wind_frame.py",
         },
         "start_pose_tolerances": {"heading_deg": 5.0, "airspeed_ms": 3.0},
+        "box": box,
+        "window_s": window_s,
         "selected": selected,
     })
     for pid in selected:
         directory, entry = cells[pid]
         algorithm = entry["algorithm"]
+        python_dir_rel = paths.rel(directory)
+        python_spec, python_bundle = entry["spec"], entry["bundle"]
+        refusal = None
+        if box is not None:
+            probe = dict(entry, python_cell_id=pid, python_dir=python_dir_rel,
+                         python_spec=entry["spec"])
+            progress("  python counterpart in the box: %s" % pid)
+            _spec, _record, refusal = box_counterpart(python_dir, probe, box, window_s
+                                                      or float(_spec_duration(directory, entry)),
+                                                      out_dir)
+            python_dir_rel = paths.rel(os.path.join(out_dir, "python"))
+            python_spec = os.path.join("spec", pid + ".json")
+            python_bundle = pid
         for wind in wind_cases(sub, wind_speed_ms, wind_turb):
             for k in range(1, repeats + 1):
                 cid = cell_id_for(pid, k, wind)
@@ -251,9 +368,13 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
                 row = {
                     "status": STATUS_PLANNED,
                     "python_cell_id": pid,
-                    "python_dir": paths.rel(directory),
-                    "python_spec": entry["spec"],
-                    "python_bundle": entry["bundle"],
+                    "python_dir": python_dir_rel,
+                    "python_spec": python_spec,
+                    "python_bundle": python_bundle,
+                    "box": box,
+                    "anchor_offset_ne_m": (None if box is None else
+                                           ([0.0, 0.0] if entry["mode_base"] == "composite"
+                                            else list(box["anchor_offset_ne_m"]))),
                     "sub": entry["sub"], "arm_set": entry.get("arm_set"),
                     "arm": entry["arm"], "algorithm": algorithm,
                     "mode_base": entry["mode_base"], "mode_pace": entry["mode_pace"],
@@ -269,6 +390,9 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
                     row["status"] = STATUS_UNFLYABLE
                     row["error"] = not_ported.get(
                         algorithm, "no Lua entry point for %s" % algorithm)
+                elif refusal is not None:
+                    row["status"] = STATUS_DOES_NOT_FIT
+                    row["error"] = refusal
                 manifest["cells"][cid] = row
     path = save_manifest(manifest, out_dir, sub)
     return manifest, path
@@ -301,6 +425,8 @@ def _provenance(manifest, entry, staging, env_rows, allow_commit, result=None):
         "location": manifest["location"],
         "alt_m": manifest["alt_m"],
         "heading_source": manifest["heading_source"],
+        "command_channel": _command_channel(manifest),
+        "roll_limit_deg": manifest.get("roll_limit_deg"),
         "ardupilot_commit": live_commit,
         "ardupilot_commit_pinned": manifest["ardupilot_commit_pinned"],
         "ardupilot_allow_commit": bool(allow_commit),
@@ -318,8 +444,33 @@ def _provenance(manifest, entry, staging, env_rows, allow_commit, result=None):
     }
 
 
+def home_from_locations(name, path=paths.LOCATIONS_FILE):
+    """``{name, lat_deg, lng_deg, alt_m, heading_deg}`` for a ``locations.txt`` entry."""
+    with open(path) as handle:
+        for line in handle:
+            line = line.split("#")[0].strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == name:
+                lat, lng, alt, hdg = [float(v) for v in value.split(",")]
+                return {"name": name, "lat_deg": lat, "lng_deg": lng,
+                        "alt_m": alt, "heading_deg": hdg}
+    raise KeyError("location %r is not in %s" % (name, paths.rel(path)))
+
+
+def _command_channel(manifest):
+    """The runner's command channel for this manifest. A manifest planned
+    before 2026-10-01 carries none and flew the location channel."""
+    return manifest.get("command_channel", "location")
+
+
 def _cell_params(manifest, entry):
-    params = {"SHR_ALT_M": manifest["alt_m"], "SHR_REPORT": 5}
+    params = {"SHR_ALT_M": manifest["alt_m"], "SHR_REPORT": 5,
+              "SHR_CHAN": COMMAND_CHANNELS[_command_channel(manifest)],
+              "TKOFF_ALT": manifest["alt_m"]}
+    if manifest.get("roll_limit_deg") is not None:
+        params["ROLL_LIMIT_DEG"] = float(manifest["roll_limit_deg"])
     wind = entry.get("wind")
     if wind is not None:
         params.update({"SIM_WIND_SPD": wind["spd_ms"], "SIM_WIND_DIR": wind["dir_from_deg"],
@@ -347,9 +498,30 @@ def run_cell(cid, entry, manifest, out_dir, dry_run=False, allow_commit=False,
         return entry
 
     duration_s = float(spec["run"]["duration_s"])
+    # The site is named, never located, in anything written under
+    # experiments/: the test resolves the name through locations.txt.
+    home_from_locations(manifest["location"])       # fail early if unknown
+    home = {"name": manifest["location"]}
+    box = entry.get("box")
+    anchor_offset = entry.get("anchor_offset_ne_m") or [0.0, 0.0]
+    if box is not None:
+        anchor_ne = [box["centre_offset_ne_m"][0] + anchor_offset[0],
+                     box["centre_offset_ne_m"][1] + anchor_offset[1]]
+    else:
+        anchor_ne = None
     plan_doc = {
         "cell_id": cid,
         "location": manifest["location"],
+        "home": home,
+        # The site box (report-only fence) and where the window opens, both
+        # as North/East metres from home; the driver turns them into
+        # locations. None means "wherever the lead-in leaves the aircraft".
+        "box": box,
+        "anchor_ne_from_home_m": anchor_ne,
+        "fence_params": None if box is None else {
+            "FENCE_ENABLE": 1, "FENCE_TYPE": 4, "FENCE_ACTION": box["fence_action"],
+            "FENCE_AUTOENABLE": 0, "FENCE_MARGIN": 0},
+        "window_s": duration_s,
         "frame": "plane",
         # Paths relative to the repository root (P2): a plan.json under
         # experiments/ must not carry a machine's home directory.
@@ -402,19 +574,50 @@ def run_cell(cid, entry, manifest, out_dir, dry_run=False, allow_commit=False,
         env = dict(os.environ)
         env[paths.PLAN_ENV] = os.path.join(cell_dir, "plan.json")
         progress("  flying %s (timeout %.0f s)" % (cid, timeout))
-        with open(os.path.join(cell_dir, "driver.log"), "w") as log:
+        # Only artefacts this invocation produces may be read back: a stale
+        # result.json or log.bin from an earlier attempt would otherwise be
+        # re-bundled as though the cell had just flown.
+        result_path = os.path.join(paths.REPO_ROOT, plan_doc["result_out"])
+        bin_path = os.path.join(paths.REPO_ROOT, plan_doc["bin_out"])
+        for stale in (result_path, bin_path):
+            if os.path.isfile(stale):
+                os.remove(stale)
+        driver_log_path = os.path.join(cell_dir, "driver.log")
+        t_launch = time.time()
+        with open(driver_log_path, "w") as log:
             try:
-                proc = subprocess.run(cmd, cwd=paths.AUTOTEST_DIR, stdout=log,
+                # From the ArduPilot root, as the README's by-hand command:
+                # SITL reads scripts/ and writes logs/ relative to its working
+                # directory, and stage_scripts stages into, and the driver
+                # copies the log from, the root's scripts/ and logs/. Run from
+                # Tools/autotest (until 2026-10-01) the runner was never
+                # loaded and the driver's error path copied a stale root log
+                # (TASK-061).
+                proc = subprocess.run(cmd, cwd=paths.ARDUPILOT_DIR, stdout=log,
                                       stderr=subprocess.STDOUT, timeout=timeout,
                                       env=env)
                 rc = proc.returncode
             except subprocess.TimeoutExpired:
                 rc = None
-        result_path = os.path.join(paths.REPO_ROOT, plan_doc["result_out"])
-        bin_path = os.path.join(paths.REPO_ROOT, plan_doc["bin_out"])
+        # A cell that never launched because another run holds the AutoTest
+        # lock must say so, not be recorded as a flight that went wrong.
+        if rc not in (0, None):
+            with open(driver_log_path) as handle:
+                if "autotest is locked" in handle.read():
+                    raise RuntimeError(
+                        "autotest is locked by another run; %s was not flown" % cid)
         if os.path.isfile(result_path):
             with open(result_path) as handle:
                 result = json.load(handle)
+        if result is not None and result.get("bin"):
+            got = os.path.join(paths.REPO_ROOT, result["bin"])
+            if os.path.isfile(got) and os.path.getmtime(got) < t_launch:
+                # copy2 keeps the source's time: a log older than this launch
+                # was not written by this flight and must not be bundled
+                result = dict(result, status=STATUS_ERROR, bin=None,
+                              reason="log.bin predates this flight (stale onboard "
+                                     "log copied); not bundled")
+                os.remove(got)
         if result is None:
             result = {"status": STATUS_PARTIAL if rc is None else STATUS_ERROR,
                       "reason": ("killed at the cell timeout" if rc is None
@@ -468,8 +671,8 @@ def run_cells(manifest, out_dir, sub, only=None, resume=False, dry_run=False,
         entry = manifest["cells"][cid]
         if only and cid not in only:
             continue
-        if entry["status"] == STATUS_UNFLYABLE:
-            progress("  %s: unflyable (%s)" % (cid, entry["error"]))
+        if entry["status"] in (STATUS_UNFLYABLE, STATUS_DOES_NOT_FIT):
+            progress("  %s: %s (%s)" % (cid, entry["status"], entry["error"]))
             continue
         if resume and entry["status"] in (STATUS_COMPLETE, STATUS_PARTIAL):
             continue
@@ -515,6 +718,8 @@ def master_row(cid, entry, record):
         "sitl_ardupilot_commit": sitl.get("ardupilot_commit"),
         "sitl_record_source": sitl.get("record_source"),
         "sitl_heading_source": sitl.get("heading_source"),
+        "sitl_command_channel": sitl.get("command_channel"),
+        "sitl_roll_limit_deg": sitl.get("roll_limit_deg"),
         "sitl_start_heading_error_deg": pose.get("heading_error_deg"),
         "sitl_tick_mean_s": tick.get("mean_s"),
         "sitl_tick_max_s": tick.get("max_s"),
@@ -649,9 +854,23 @@ def build_parser():
     parser.add_argument("--wind-turb", type=float, default=DEFAULT_WIND_TURB)
     parser.add_argument("--speedup", type=int, default=1)
     parser.add_argument("--location", default=None)
-    parser.add_argument("--alt-m", type=float, default=DEFAULT_ALT_M)
+    parser.add_argument("--alt-m", type=float, default=None,
+                        help="window altitude above home, m (default: the "
+                             "environment's flight_area.alt_m)")
+    parser.add_argument("--window-s", type=float, default=None,
+                        help="cap every cell's window, s (default: flight_area.window_s)")
+    parser.add_argument("--no-box", action="store_true",
+                        help="plan without the site box (2 km Python cells as they are)")
     parser.add_argument("--heading-source", default=schedule.DEFAULT_HEADING_SOURCE,
                         choices=schedule.HEADING_SOURCES)
+    parser.add_argument("--command-channel", default=DEFAULT_COMMAND_CHANNEL,
+                        choices=sorted(COMMAND_CHANNELS),
+                        help="how the runner commands the guidance point (plan): "
+                             "heading = COG course at it (default); location = "
+                             "set_target_location, which GUIDED loiters about")
+    parser.add_argument("--roll-limit-deg", type=float, default=None,
+                        help="override ROLL_LIMIT_DEG per cell (plan), e.g. 60, the "
+                             "harness's bank limit; default the parameter file's 45")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--allow-commit", action="store_true")
     parser.add_argument("--timeout-s", type=float, default=None)
@@ -668,7 +887,10 @@ def main(argv=None):
                               reference=args.reference, repeats=args.repeats,
                               wind_speed_ms=args.wind_speed_ms, wind_turb=args.wind_turb,
                               speedup=args.speedup, location=args.location,
-                              heading_source=args.heading_source, alt_m=args.alt_m)
+                              heading_source=args.heading_source, alt_m=args.alt_m,
+                              box=False if args.no_box else None, window_s=args.window_s,
+                              command_channel=args.command_channel,
+                              roll_limit_deg=args.roll_limit_deg)
         counts = {}
         for entry in manifest["cells"].values():
             counts[entry["status"]] = counts.get(entry["status"], 0) + 1

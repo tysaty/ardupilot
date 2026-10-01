@@ -9,8 +9,8 @@
 
 # --- Scripting -----------------------------------------------------------
 SCR_ENABLE        1
-SCR_HEAP_SIZE     1048576
-SCR_VM_I_COUNT    200000
+SCR_HEAP_SIZE     2097152
+SCR_VM_I_COUNT    1000000
 
 # --- Aircraft: the harness's V and the flight code's bank limit -----------
 AIRSPEED_CRUISE   25
@@ -24,8 +24,11 @@ WP_LOITER_RAD     80
 NAVL1_PERIOD      15
 NAVL1_DAMPING     0.75
 
+# --- GUIDED heading controller: the runner's heading channel (SHR_CHAN 1) --
+GUIDED_P          15000
+
 # --- Take-off ---------------------------------------------------------------
-TKOFF_ALT         100
+TKOFF_ALT         60
 
 # --- Simulation: calm baseline; the wind sub-campaign overrides per cell ---
 SIM_WIND_SPD      0
@@ -33,5 +36,7 @@ SIM_WIND_DIR      0
 SIM_WIND_TURB     0
 SIM_SPEEDUP       1
 
-# --- Fence: TASK-046 D7 undecided; off until answered -----------------------
+# --- Fence: the site box is uploaded per cell by the test as a report-only
+# polygon (FENCE_TYPE 4, FENCE_ACTION 0); off here so a cell without a box
+# flies unfenced --------------------------------------------------------------
 FENCE_ENABLE      0

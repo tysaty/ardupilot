@@ -1,19 +1,27 @@
 {
   "schema_version": 1,
-  "captured_utc": "2026-09-16",
+  "captured_utc": "2026-09-17",
   "captured_on": {
     "os": "macOS 26.5.2 (Darwin 25.5.0), arm64",
     "note": "The last machine the environment was captured on. check_env.py reports the live OS beside it; a different OS is a warning, not a failure."
   },
   "ardupilot": {
-    "commit": "ef19597660f2edf820ab2982e4880275fbce0219",
-    "describe": "ArduPilot-4.6.0-beta1-7773-gef19597660",
+    "commit": "163bf8b04f6f02e4229a4b4a4ecc37d5e1da1683",
+    "describe": "ArduPilot-4.6.0-beta1-7774-g163bf8b04f",
     "gitlink_in_parent": "3c9b154a1b8ed6d47a44ceea5b6493af0c0ead24",
-    "note": "The checkout at src/ardupilot is pinned to `commit`. The parent repository's recorded gitlink differs (uncommitted submodule move); check_env.py reports both and pins to `commit`."
+    "note": "The checkout at src/ardupilot is pinned to `commit` (the author's fork commit that carries the KangarooFollow tests, 2026-09-17). The parent repository's recorded gitlink may lag it; check_env.py reports both and pins to `commit`."
   },
   "build": {
-    "configure": ["./waf", "configure", "--board", "sitl"],
-    "build": ["./waf", "plane"],
+    "configure": [
+      "./waf",
+      "configure",
+      "--board",
+      "sitl"
+    ],
+    "build": [
+      "./waf",
+      "plane"
+    ],
     "binary": "build/sitl/bin/arduplane",
     "sitl_model": "plane",
     "frame": "plane"
@@ -30,8 +38,8 @@
     "note": "MAVProxy is a hard import of Tools/autotest/vehicle_test_suite.py, so a cell cannot be flown without it; check_env.py fails on its absence except under --dry-run. It was not installed on the capture machine (the dry run was)."
   },
   "location": {
-    "name": "CMAC",
-    "note": "ArduPilot's default SITL site. The local frame is anchored at the aircraft when the window opens (HANC), so the absolute site does not enter any result. A real flight-area location must not be committed (AGENTS.md); supply one through --location if wanted and it is recorded in provenance only."
+    "name": "SpringValley2",
+    "note": "Spring Valley Farm (ANU), the flight site of Chapter 3 (fig:spring-valley-flight-area): the `SpringValley2` entry of Tools/autotest/locations.txt, 15 m from the home recorded in the 2026-07-18 flight log. The local frame is still anchored at the aircraft when the window opens (HANC); the site sets where the box and the take-off are. The SITL runs there at the author's direction (2026-09-17)."
   },
   "params": {
     "file": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/kangaroo-follow.parm",
@@ -42,10 +50,32 @@
     "arms": "src/ardupilot/Tools/autotest/ArduPlane_Tests/KangarooFollow/sitl_arms.lua",
     "modules_dir": "src/ardupilot/scripts/modules",
     "modules": [
-      "harness_geom.lua", "harness_dubins.lua", "harness_orbit.lua",
-      "harness_cs_orbit.lua", "harness_kangaroo.lua", "harness_segments.lua",
-      "harness_estimator.lua", "harness_adaptive_db.lua",
-      "harness_adaptive_horizon.lua", "harness_rh_geometric.lua"
+      "harness_geom.lua",
+      "harness_dubins.lua",
+      "harness_orbit.lua",
+      "harness_cs_orbit.lua",
+      "harness_kangaroo.lua",
+      "harness_segments.lua",
+      "harness_estimator.lua",
+      "harness_adaptive_db.lua",
+      "harness_adaptive_horizon.lua",
+      "harness_rh_geometric.lua"
     ]
+  },
+  "flight_area": {
+    "box_e_m": 600.0,
+    "box_n_m": 800.0,
+    "centre_offset_ne_m": [
+      337.0,
+      183.0
+    ],
+    "anchor_offset_ne_m": [
+      -250.0,
+      0.0
+    ],
+    "alt_m": 60.0,
+    "window_s": 60.0,
+    "fence_action": 0,
+    "note": "The rough flight boundary from the thesis figure: approximately 600 m across (East-West) by 800 m along (North-South), axis-aligned, centred `centre_offset_ne_m` North/East of home (the centroid of the 2026-07-18 log's GUIDED segment). Grid cells open the window with the aircraft `anchor_offset_ne_m` from the box centre (250 m South, so the kangaroo, 300 m North of the aircraft, starts 50 m North of centre with 280 m to the box edge); composite cells anchor at the centre (their fit is about the origin). Take-off and the window are flown at `alt_m` above home (the 2026-07-18 flight held 60 to 70 m in GUIDED); every cell's window is `window_s`. `fence_action` 0 is report only: a breach is logged, never acted on (TASK-046 D7 recommendation), and the Python zone is the same box in the anchor frame so breaches are measured identically on both sides."
   }
 }

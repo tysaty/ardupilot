@@ -204,6 +204,9 @@ class RecordedSession:
         # there are no containment events. The aircraft's breaches are still
         # measured against the Python zone.
         self.containment_events = []
+        # Operator markers exist only in an interactive Python session
+        # (experiment.marker_times falls back to the schedule's changes).
+        self.markers = []
         zone_spec = spec.get("zone") or {}
         self.zone = (None if zone_spec.get("side_m") is None
                      else zone_mod.InclusionZone(side_m=zone_spec["side_m"]))

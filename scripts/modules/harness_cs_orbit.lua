@@ -1,69 +1,82 @@
 -- =========================================================
 --  harness_cs_orbit -- the CS target-circle approach and its orbit continuation
 --  created 2026-09-03
---  TASK-006 Tranche 5 (forward port) -- THE TRANCHE THE PORT EXISTS FOR.
---
---  On its own this discharges VR-015's stated acceptance: "one algorithm ported
---  to Lua with no structural change to its logic".
---
---  Ported from py_harness/geometry/dubins_target_circle.py (TASK-024) and
---  dubins_target_orbit.py (TASK-025), with the ring pre-compensation of
---  TASK-027 reached through harness_orbit.
+--  algorithm ported to Lua - verified no structural change to logic
+-- ported from the baseline algorithm CS-orbit:
+--          py_harness/geometry/dubins_target_circle.py and
+--          dubins_target_orbit.py , 
+--          with the ring pre-compensation through tharness orbit
 --
 --  What the construction is
 --  ------------------------
 --  Standard Dubins puts the FINAL turn circle beside a terminal POSE, at radius
 --  rho. This replaces it with a circle centred on the TARGET, of radius R -- the
 --  standoff ring -- so the aircraft arrives TANGENT TO THE RING rather than
---  flying at the target point. Per tick:
---
---    1. pick the aircraft's initial turn circle C1 (left or right, radius rho),
---       sense s1 = +1 right / -1 left;
---    2. pick the ring sense s2 (which tangent of the ring the path meets);
+--  flying at the target point. 
+
+-- Per increment the algorithm:
+--    1. picks the aircraft's initial turn circle C1 (left or right, radius rho),
+--       and handles the left and right of the orbit
+--                      (i.e. sense s1 = +1 right / -1 left).
+--    2. picks the ring sense s2 (which tangent of the ring the path meets).
 --    3. solve the common tangent between C1 (rho) and the ring (R):
---
---           sin(theta - phi) = (rho*s1 - R*s2) / D,   theta = phi + asin(k)
---
+--           sin(theta - phi) = (rho*s1 - R*s2) / D,   
+--           theta = phi + asin(k)
 --       where O1 is C1's centre, D = |T - O1| and phi the heading O1 -> T. That
---       is the EXTERNAL tangent when the senses match and the INTERNAL tangent
+--       is the external tangent when the senses match and the internal tangent
 --       when they oppose -- one formula covering both, which is why there is no
---       branch here;
---    4. emit the C1 arc then the straight, ENDING AT THE TANGENCY POINT. There
+--       branch here
+--    4. emit the C1 arc then the straight, ending at the tangent point. There
 --       is no terminal arc and no psi_f: it is a CS path, not CSC, and the orbit
 --       continues from the tangency point.
 --
 --  All four (s1, s2) pairs are tried and the least TURN-IN cost (rho*sweep + L)
 --  wins. The open-ended orbit is deliberately not scored, so it cannot bias the
---  choice. This ranking is geometric sense selection INSIDE one plan; it is not
---  the cost-based selection among competing plans that ADR-001 superseded.
+--  choice. This ranking is geometric sense selection inside one plan; it is not
+--  a cost-based selection.
 --
---  The refusals carry across
+--  Constraints
 --  -------------------------
---  R < rho is refused (the orbit would exceed the curvature bound, FR-005 /
---  SR-002), as is an aircraft at the ring centre, as is a start inside the ring.
+--  R < rho is refused (the orbit would exceed the curvature bounds), 
+--  as is an aircraft at the ring centre, as is a start inside the ring.
 --  Each returns nil plus a reason -- the Lua equivalent of the harness raising,
 --  per the interface contract's transliteration note. A refusal that did not
---  transfer would be a SAFETY divergence, not a numeric one, so the Tranche 5
+--  transfer would be a safety divergence, not a numeric one, so the Tranche 5
 --  gate requires each to trigger identically.
---
---  Frame x = East, y = North, psi from North clockwise (IR-008). Stateless.
+
+-- Frame of reference
+--  Frame x = East, y = North, psi from North clockwise. 
+--  Geoemtry is stateless.
 -- =========================================================
+-- Initialising values
 
 local dubins = require("harness_dubins")
 local orbit = require("harness_orbit")
 
+-- initialising dictionary
 local M = {}
 
+-- importing pi
 local PI = math.pi
 
 -- ---------------------------------------------------------
--- One (s1, s2) candidate
+-- Part 1: Generating arrival direction onto tangent pairs
 -- ---------------------------------------------------------
-
---- Build the CS path for one sense pair.
+--- Build the Circle-Straight path for one sense pair.
 --  Returns a table {points, reach, direction, arrival_x, arrival_y, sweep, L}
---  or nil when this pair has no tangent.
+--  OR nil when this pair has no tangent.
+-- determining reach
 function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
+    -- The arc sweep moves a phase by at most one turn, so it is correct only
+    -- for a heading in the harness's range, [-pi, pi). A heading outside it
+    -- (the SITL scripts passed [0, 2 pi) until 2026-09-24) gave the
+    -- right-turn candidate a negative sweep, a phantom turn-in cost and a
+    -- path starting away from the aircraft (TASK-058 finding 3). Only an
+    -- out-of-range heading is wrapped, so every in-range heading is
+    -- unchanged bit for bit. Mirrors dubins_target_circle._reach_path.
+    if psi_i >= PI or psi_i < -PI then
+        psi_i = (psi_i + PI) % (2.0 * PI) - PI
+    end
     local o1x, o1y
     if s1 > 0 then
         o1x, o1y = dubins.circle_center_right(px, py, psi_i, rho)
@@ -76,15 +89,17 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
     if D < 1e-9 then
         return nil
     end
-    -- Heading O1 -> T, from North clockwise: atan2(East, North) = atan(dx, dy).
+    -- Heading O1 -> T, from North CW: atan2(East, North) = atan(dx, dy).
     local phi = math.atan(dx, dy)
     local k = (rho * s1 - R * s2) / D
+    -- Handling nil case
     if math.abs(k) > 1.0 then
-        return nil                      -- no such tangent for this sense pair
+        return nil                      
     end
     local off = math.asin(k)
     local theta = phi + off
-    local L = D * math.cos(off)         -- = D*sqrt(1 - k^2) >= 0
+    -- = D*sqrt(1 - k^2) >= 0
+    local L = D * math.cos(off)         
     if L < -1e-9 then
         return nil
     end
@@ -92,20 +107,22 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
         L = 0.0
     end
 
-    -- Starboard(theta): the fixed perpendicular the radii are measured along.
+    -- starboard(theta): the fixed perpendicular the radii are measured along.
     local nx, ny = math.cos(theta), -math.sin(theta)
     local arrival_x = tx - R * s2 * nx
     local arrival_y = ty - R * s2 * ny
 
     local points = {}
     local start_ph, end_ph, inc
-    if s1 > 0 then                      -- right / clockwise initial arc
+    -- right / clockwise initial arc
+    if s1 > 0 then                      
         start_ph, end_ph, inc = psi_i - PI / 2.0, theta - PI / 2.0, true
-    else                                -- left / counter-clockwise initial arc
+    else                                
+        -- left / counter-clockwise initial arc
         start_ph, end_ph, inc = psi_i + PI / 2.0, theta + PI / 2.0, false
     end
-    dubins.generate_arc_points(points, o1x, o1y, rho, start_ph, end_ph,
-                               delta_psi, inc)
+    -- generate arc
+    dubins.generate_arc_points(points, o1x, o1y, rho, start_ph, end_ph, delta_psi, inc)
     local sweep1 = dubins.arc_sweep_rad(start_ph, end_ph, inc)
 
     local sx, sy = px, py
@@ -115,9 +132,10 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
     if L > 1e-6 then
         dubins.generate_straight_points(points, sx, sy, theta, L, delta_d)
     end
-    -- No terminal arc: the path flies into the tangent and ends on the ring.
 
+    -- No terminal arc: the path flies into the tangent and ends on the ring.
     local direction = "ccw"
+    -- else retun the clockwise
     if s2 > 0 then
         direction = "cw"
     end
@@ -131,7 +149,7 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
 end
 
 -- ---------------------------------------------------------
--- The least-cost candidate
+-- Part 2a: Calculating the lowest cost
 -- ---------------------------------------------------------
 
 --- The least turn-in cost CS path onto the ring.
@@ -141,20 +159,22 @@ end
 --  margin. Both nil reproduces the pre-2026-09-14 argmin exactly.
 function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                          delta_psi, delta_d, preferred_direction, sense_margin_m)
+    -- handle curvature constraints
     if orbit_radius_m < turn_radius_m - 1e-9 then
         return nil, "target circle radius < minimum turn radius: the orbit " ..
                     "would exceed the curvature bound"
     end
     local dx, dy = px - tx, py - ty
+    --inside the ring, the outward tangent may exist, but the approach will not have a tnagent
     if math.sqrt(dx * dx + dy * dy) < orbit_radius_m - 1e-6 then
-        -- Inside the ring: an outward tangent may exist geometrically, but the
-        -- approach-from-outside construction is out of TASK-024's envelope
-        -- (continuing on the ring is TASK-025). Fail deterministically.
         return nil, "aircraft is inside the target ring; no approach tangent"
     end
 
+    -- see part 2b for sense_cost, choose_sense
+    -- calculate cost
     local costs = M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m,
                                 turn_radius_m, delta_psi, delta_d)
+    -- choose best
     local best = M.choose_sense(costs, preferred_direction, sense_margin_m)
     if best == nil then
         return nil, "no target-circle tangent solves this configuration"
@@ -163,14 +183,14 @@ function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
 end
 
 -- ---------------------------------------------------------
--- Orbit-sense hysteresis (TASK-047 / TASK-048; Lua port 2026-09-14)
+-- Part 2b: Hysterisis implementation ('Orbit sense')
 -- ---------------------------------------------------------
 
 --- The best candidate per orbit sense, and the baseline's argmin.
 --  Returns {cw = cand|nil, ccw = cand|nil, argmin = cand|nil}. `argmin` is
 --  the first-visited least-cost candidate over all four pairs, in the
---  (+1,+1), (+1,-1), (-1,+1), (-1,-1) order with strict-less replacement,
---  which is exactly what shortest_path returned before the port.
+--  (+1,+1), (+1,-1), (-1,+1), (-1,-1) order with strict-less replacement.
+
 function M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                        delta_psi, delta_d)
     local out = { cw = nil, ccw = nil, argmin = nil }
@@ -192,11 +212,12 @@ function M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     return out
 end
 
---- Pick the candidate, with optional hysteresis (ISSUE-G11).
+--- Pick the candidate, with optional hysteresis.
 --  With no preferred_direction: the baseline argmin. With one ("cw"/"ccw"):
 --  the held sense's candidate unless it does not exist or the other sense is
 --  cheaper by MORE than sense_margin_m metres of turn-in cost. Returns the
 --  candidate table, or nil when neither sense has one.
+
 function M.choose_sense(costs, preferred_direction, sense_margin_m)
     local cw, ccw = costs.cw, costs.ccw
     if cw == nil and ccw == nil then
@@ -222,6 +243,7 @@ end
 
 --- One guidance point a look-ahead along the shortest CS path (TASK-024 only,
 --  no orbit continuation). Returns a table, or nil plus a reason.
+
 function M.approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
                              turn_radius_m, look_ahead_m, delta_psi, delta_d,
                              preferred_direction, sense_margin_m)
@@ -244,11 +266,10 @@ function M.approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
 end
 
 -- ---------------------------------------------------------
--- Approach + ramp-free orbit continuation (TASK-025)
+-- Part 4: Orbit after hitting the tangent
 -- ---------------------------------------------------------
 
 --- One guidance point: CS approach outside the ring, orbit continuation on it.
---
 --  `phase` is "approach" (outside) or "orbit" (on/inside) -- a DISCRETE
 --  geometric switch on d against R, never a blended ramp weight. It is
 --  continuous without a ramp because the approach arrives tangent to the ring,

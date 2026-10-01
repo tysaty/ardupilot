@@ -61,6 +61,15 @@ def _reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d):
     ``direction`` is ``"cw"``/``"ccw"`` and ``arrival`` is the tangency point
     ``(ex, en)`` on the ring.
     """
+    # The arc sweep below moves a phase by at most one turn, so it is correct
+    # only for a heading in the harness's range, [-pi, pi) (state.wrap_pi).
+    # A heading outside it (the SITL scripts passed [0, 2*pi) until
+    # 2026-09-24) gave the right-turn candidate a negative sweep, a phantom
+    # turn-in cost and a path starting away from the aircraft (TASK-058
+    # finding 3). Only an out-of-range heading is wrapped, so every in-range
+    # heading, and every earlier result, is unchanged bit for bit.
+    if psi_i >= PI or psi_i < -PI:
+        psi_i = (psi_i + PI) % (2.0 * PI) - PI
     if s1 > 0:
         o1x, o1y = dub.circle_center_right(px, py, psi_i, rho)
     else:
