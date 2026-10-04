@@ -70,69 +70,156 @@ local state = {
     run_id = 0,
 }
 
--- Parameter table
+-- SHARED CONFIGURATION: spec.json, read as `cfg` (ADR-011)
 -- ============================================================
+-- The same file, in the same format, the SITL campaign runner and the live
+-- demonstration read: generated from a campaign cell's spec by
+-- kangaroo_follow (demo.py --stage --cell <cell> [--look-ahead-m 30];
+-- schedule.spec_cfg), never typed. One flat table: the HarnessConfig every
+-- arm reads and the run fields at the same level, so it goes to the arm
+-- unchanged, entry(snapshot, cfg). Copy scripts/spec.json and
+-- scripts/modules/sitl_spec.lua to the SD card with this script.
+--
+--   cfg.algorithm, cfg.estimate, cfg.lookahead_steps, cfg.estimator
+--                               the staged arm and its estimator settings
+--   cfg.orbit_radius_m          ring radius R, m          (was HVAL_SO_RADIUS)
+--   cfg.look_ahead_m            carrot L, m               (was HVAL_SO_LKAHD)
+--   cfg.turn_radius_m           planning turn radius, m   (was HVAL_SO_RHO, HVAL_RHO_M)
+--   cfg.cs_sense_margin_m       orbit-sense margin, m     (was HVAL_SO_MARGIN)
+--   cfg.orbit_precompensate     R / cos(L / R) carrot ring (was HVAL_SO_PRECOMP)
+--   cfg.airspeed_ms             the airspeed the geometry assumes (was HVAL_SO_ASPD)
+--   cfg.dt_s                    nominal update interval, s (0.1)
+--   cfg.bank_limit_deg          the bank the configuration was built for
+--   cfg.roll_limit_deg          the ROLL_LIMIT_DEG it must be flown at (60)
+--
+-- Bank limit (ADR-011): this script never sets ROLL_LIMIT_DEG (SR-004). It
+-- refuses to engage unless the live ROLL_LIMIT_DEG equals
+-- cfg.roll_limit_deg, so the aircraft only ever flies the configuration
+-- that SITL and the demonstration flew. Approving 60 deg on the aircraft is
+-- the approver's decision, not this file's.
+local spec_ok, spec_mod = pcall(require, "sitl_spec")
+local cfg, cfg_where = nil, nil
+if spec_ok then
+    cfg, cfg_where = spec_mod.load()
+else
+    cfg_where = "require('sitl_spec'): " .. tostring(spec_mod)
+end
+if cfg == nil then
+    -- start disabled and say why; never fall back to typed defaults
+    state.fault_latched = true
+    gcs:send_text(3, "HVAL: no configuration: " .. tostring(cfg_where))
+end
+
+--- ADR-011 gate for section 5: true only when the live ROLL_LIMIT_DEG is the
+--  bank limit spec.json was generated for.
+local function roll_limit_ok()
+    if cfg == nil then return false, "no spec.json" end
+    local ok, _live, msg = spec_mod.roll_limit_check(cfg)
+    return ok, msg
+end
+
+-- PARAM table
+-- ============================================================
+-- Live settings only: everything that shapes the guidance is in cfg above.
+-- The key must be used by only one script on the flight controller: 87 is
+-- taken by an upstream applet, 141 by none; the SITL runner and demo scan
+-- upward from 40 for a free key. Full names must fit in 16 characters.
+local PARAM_TABLE_KEY = 141
+local PARAM_TABLE_PREFIX = "HVAL_"
+assert(param:add_table(PARAM_TABLE_KEY, PARAM_TABLE_PREFIX, 16), "HVAL: could not add param table")
+
+local function bind(name, idx, default)
+    assert(param:add_param(PARAM_TABLE_KEY, idx, name, default), "HVAL: could not add " .. name)
+    local p = Parameter()
+    assert(p:init(PARAM_TABLE_PREFIX .. name), "HVAL: could not bind " .. name)
+    return p
+end
 
 --[[
     // @Param: HVAL_ENABLE
-    // @DisplayName: Plane Follow standoff orbit enable
-    // @Description: When 1, lateral guidance is the standoff-orbit behaviour: a circle-straight approach onto a ring of HVAL_RADIUS about the target, arriving tangent to it, then an orbit on the ring with a pre-compensated carrot, steered by a course command at the carrot. Needs the standoff_orbit module, SCR_VM_I_COUNT of 200000 and SCR_HEAP_SIZE of 1048576. When 0 the applet behaves exactly as before.
+    // @DisplayName: Hardware validation enable
+    // @Description: Master enable for experimental guidance. 0 (default): nothing is computed or commanded. 1: the script may engage when every gate in section 5 passes, including the HVAL_ACT_FN switch and the ROLL_LIMIT_DEG check against spec.json; both this and the switch are required.
     // @Values: 0:Disabled,1:Enabled
 --]]
-HVAL_ENABLE = bind_add_param("SO_ENABLE", 26, 0)
+local HVAL_ENABLE = bind("ENABLE", 1, 0)
 
 --[[
-    // @Param: HVAL_RADIUS
-    // @DisplayName: Plane Follow standoff ring radius
-    // @Description: Radius of the standoff ring about the target that the standoff-orbit behaviour approaches and orbits. Must be at least the turn radius in use (HVAL_RHO or the derived floor).
-    // @Range: 20 500
+    // @Param: HVAL_ARM
+    // @DisplayName: Hardware validation arm
+    // @Description: Guidance law, resolved by name through sitl_arms (ARM_NAMES below). Must name the arm spec.json was staged for (cfg.algorithm): each arm's spec carries its own estimate and lookahead_steps. Read only while disengaged.
+    // @Values: 0:Baseline (dubins_target_orbit),1:Arm A (adaptive_db_circle),2:Arm F (carrot_shift_cs)
+--]]
+local HVAL_ARM = bind("ARM", 2, 0)
+
+--[[
+    // @Param: HVAL_OUT
+    // @DisplayName: Hardware validation output
+    // @Description: 0 (default) shadow: compute and log the guidance point but send no command. 1 active: send the validated course command (section 8).
+    // @Values: 0:Shadow,1:Active
+--]]
+local HVAL_OUT = bind("OUT", 3, 0)
+
+--[[
+    // @Param: HVAL_TGT
+    // @DisplayName: Hardware validation target source
+    // @Description: 0 virtual stationary point and 1 virtual moving target (harness_segments, as the demo), placed relative to the anchor at engagement; 2 live target from AP_Follow (FOLL_SYSID).
+    // @Values: 0:Virtual point,1:Virtual moving,2:Live
+--]]
+local HVAL_TGT = bind("TGT", 4, 0)
+
+--[[
+    // @Param: HVAL_ALT_M
+    // @DisplayName: Hardware validation altitude
+    // @Description: Altitude commanded while engaged, metres above home (MAV_FRAME_GLOBAL_RELATIVE_ALT, as the runner's GUIDED_CHANGE_ALTITUDE). Also written as AltCmd in HANC. Default from spec.json (cfg.alt_m) when it carries one.
+    // @Range: 30 400
     // @Units: m
 --]]
-HVAL_RADIUS = bind_add_param("SO_RADIUS", 27, 70)
+local HVAL_ALT_M = bind("ALT_M", 5, (cfg and cfg.alt_m) or 60)
 
 --[[
-    // @Param: HVAL_LKAHD
-    // @DisplayName: Plane Follow standoff carrot look-ahead
-    // @Description: Distance along the planned path at which the standoff-orbit guidance point (the carrot) is placed. Distinct from FOLLP_LKAHD, which is seconds of along-track projection for the speed law. Must be below 80 degrees of arc around the ring (1.4 x HVAL_RADIUS).
-    // @Range: 1 200
+    // @Param: HVAL_ACT_FN
+    // @DisplayName: Hardware validation activation switch
+    // @Description: RCx_OPTION scripting function whose switch engages the experimental guidance (high) and disengages it (low), as FOLLP_ACT_FN in plane_follow.lua. 300 to 307 are the Scripting1 to Scripting8 aux functions.
+    // @Range: 300 307
+--]]
+local HVAL_ACT_FN = bind("ACT_FN", 6, 303)
+
+--[[
+    // @Param: HVAL_BOUND_M
+    // @DisplayName: Hardware validation boundary
+    // @Description: Half-side of the square test box centred on the anchor, metres. A guidance point or a virtual target outside it is a fault (section 7). Must fit inside the approved test area.
+    // @Range: 100 2000
     // @Units: m
 --]]
-HVAL_LKAHD = bind_add_param("SO_LKAHD", 28, 50)
+local HVAL_BOUND_M = bind("BOUND_M", 7, 400)
 
 --[[
-    // @Param: HVAL_RHO
-    // @DisplayName: Plane Follow standoff turn radius
-    // @Description: Minimum turn radius used to build the standoff-orbit approach. 0 derives it each tick from the bank limit in force (the smaller of ROLL_LIMIT_DEG and the heading command's acceleration limit) and the current airspeed. A value below that floor is reported once and the floor is used instead.
-    // @Range: 0 500
-    // @Units: m
+    // @Param: HVAL_TGT_TMO
+    // @DisplayName: Hardware validation target timeout
+    // @Description: A live target sample older than this is stale: the script disengages (or refuses to engage) and latches a fault. Measured from follow:get_last_update_ms().
+    // @Range: 0.2 10
+    // @Units: s
 --]]
-HVAL_RHO = bind_add_param("SO_RHO", 29, 0)
+local HVAL_TGT_TMO = bind("TGT_TMO", 8, 2)
 
 --[[
-    // @Param: HVAL_MARGIN
-    // @DisplayName: Plane Follow standoff sense margin
-    // @Description: Hysteresis margin, in metres of turn-in path length, by which the opposite orbit sense must be cheaper before the standoff-orbit approach switches sense. 0 re-selects the sense every tick.
-    // @Range: 0 100
-    // @Units: m
+    // @Param: HVAL_FAIL_MODE
+    // @DisplayName: Hardware validation recovery mode
+    // @Description: Flight mode requested once when a fault is detected while this script owns guidance (section 9). Not requested if the pilot or a failsafe has already changed mode.
+    // @Values: 11:RTL,12:Loiter
 --]]
-HVAL_MARGIN = bind_add_param("SO_MARGIN", 30, 10)
+local HVAL_FAIL_MODE = bind("FAIL_MODE", 9, 12)
 
---[[
-    // @Param: HVAL_PRECOMP
-    // @DisplayName: Plane Follow standoff ring pre-compensation
-    // @Description: When 1 the orbit carrot is placed on a larger virtual ring, R / cos(L / R), so the circle actually flown is HVAL_RADIUS. When 0 the carrot is placed on the ring itself and the flown circle settles inside it at R cos(L / R).
-    // @Values: 0:Off,1:On
---]]
-HVAL_PRECOMP = bind_add_param("SO_PRECOMP", 18, 1)
+-- Algorithm IDs/names: HVAL_ARM -> the name sitl_arms.resolve() takes. It
+-- must equal cfg.algorithm (or its _hyst form) for the staged spec.
+local ARM_NAMES = {
+    [0] = "dubins_target_orbit",
+    [1] = "adaptive_db_circle",
+    [2] = "carrot_shift_cs",
+}
 
---[[
-    // @Param: HVAL_ASPD
-    // @DisplayName: Plane Follow standoff airspeed
-    // @Description: Airspeed to command while the standoff-orbit behaviour is selected. 0 leaves the applet's speed law in charge, which steers airspeed toward the target's and is not what a slow ground target wants. The standoff geometry assumes one airspeed.
-    // @Range: 0 100
-    // @Units: m/s
---]]
-HVAL_ASPD = bind_add_param("SO_ASPD", 19, 0)
+-- Nominal update interval: cfg.dt_s (0.1 s), not a parameter: the
+-- estimator and arm A's horizon count in ticks of it.
 
 -- ============================================================
 -- 2. INPUTS AND AIRCRAFT STATE
@@ -151,9 +238,30 @@ HVAL_ASPD = bind_add_param("SO_ASPD", 19, 0)
 local AIRSPEED_MIN = Parameter('AIRSPEED_MIN')
 local ROLL_LIMIT_DEG = Parameter('ROLL_LIMIT_DEG')
 local GRAVITY_MSS = 9.80665
--- 0 = derive the floor; >0 = requested radius, m
-local HVAL_RHO_M = bind("RHO_M", 9, 0)
+-- The requested turn radius is cfg.turn_radius_m from spec.json (ADR-011),
+-- no longer a parameter (was HVAL_RHO_M).
 
+
+local pos = ahrs:get_location()
+local vel = ahrs:get_velocity_NED()
+local mode = vehicle:get_mode()
+local armed = arming:is_armed()
+local airspeed_ms = ahrs:airspeed_estimate()
+
+if pos == nil or vel == nil then
+    -- Pass this failure to your engagement/fault handling.
+    return
+end
+
+local hdg = heading_from(vel)
+
+-- Only after anchor() has established origin:
+if origin == nil then
+    return
+end
+
+local ne = origin:get_distance_NE(pos)
+local pn, pe = ne:x(), ne:y()
 
 -- When the aircraft is not moving - the standoff course needs to be the 
 -- ground course from the NED velocity (the direction of motion), or the yaw
@@ -168,8 +276,6 @@ function standoff.course(vel)
    return ahrs:get_yaw_rad()
 end
 
-
-
 -- ============================================================
 -- 3. TARGET ACQUISITION AND ESTIMATION
 -- ============================================================
@@ -180,11 +286,9 @@ end
 --     follow:get_last_update_ms() (the AP_Follow plumbing in plane_follow.lua
 --     and the standoff code moved below), converted to the anchor frame.
 
-
 -- PLAN: harness_estimator.new / update / predict in the runner's order. Call
 -- update only on a new sample, with the measured dt since the last one. A gets
 -- target_est (projected) only; F gets target_est_raw only (no double lead).
-
 
 -- PLAN: with a live target the baseline has no "truth": decide whether it
 -- steers on the measurement or the raw estimate, and record it.
@@ -194,11 +298,50 @@ end
 -- Update estimator only when an accepted measurement arrives.
 -- Predict to the required horizon using measured elapsed time.
 
+-- Once at test start, using the demo's existing helpers:
+local s = settings()
 
+if not rebuild(0.0, kn, ke, legs_for(s), s, 0) then
+    return false, "could not build virtual target"
+end
+
+-- Each callback:
+local t = (now_ms - t0_ms) * 0.001
+
+local kn, ke, kvn, kve = segs.state_at(segments, t)
+
+if kn == nil then
+    -- state_at returns its failure reason in the second value.
+    return nil, ke
+end
+
+local sample_ms = now_ms
 
 -- ============================================================
 -- 4. PATH RESET AND ALGORITHM SWITCHING
 -- ============================================================
+
+
+
+-- Debounce selection inputs.
+-- Initially accept algorithm changes only while disabled.
+-- On accepted change: reset path, initialise algorithm, log event.
+-- Later permit airborne switching only after transition testing.
+
+-- algorithms selection
+local algorithm_state = {}
+local active_arm = nil
+local entry = nil
+
+-- arm settings
+local ARM_NAMES = {
+    [0] = "dubins_target_orbit",
+    [1] = "adaptive_db_circle",
+    [2] = "carrot_shift_cs",
+}
+
+
+
 -- PLAN: reset = algorithm_state = {} plus estimator re-init, all the demo's
 -- anchor() does; the arms carry no other state.
 local function reset_path()
@@ -208,10 +351,36 @@ local function reset_path()
     -- Reset estimator only when required by the test protocol.
 end
 
--- Debounce selection inputs.
--- Initially accept algorithm changes only while disabled.
--- On accepted change: reset path, initialise algorithm, log event.
--- Later permit airborne switching only after transition testing.
+-- select the algorithm
+local function select_algorithm()
+    local requested = HVAL_ARM:get()
+
+    if requested == active_arm then
+        return true
+    end
+
+    -- Initially allow changes only while disabled.
+    if HVAL_ENABLE:get() ~= 0 then
+        return false, "disable before changing algorithm"
+    end
+
+    local name = ARM_NAMES[requested]
+    if name == nil then
+        return false, "unknown algorithm ID"
+    end
+
+    local resolved, reason = arms.resolve(name)
+    if resolved == nil then
+        return false, reason
+    end
+
+    entry = resolved
+    active_arm = requested
+    reset_path()
+
+    gcs:send_text(6, "HVAL: selected " .. name)
+    return true
+end
 
 -- ============================================================
 -- 5. AUTHORITY AND ENGAGEMENT GATES
@@ -219,7 +388,6 @@ end
 -- PLAN: the runner's start conditions (arming:is_armed(), vehicle:get_mode()
 -- == GUIDED) plus a fresh target and rc:get_aux_cached(HVAL_ACT_FN), the
 -- FOLLP_ACT_FN pattern. On leaving GUIDED call the runner's release().
-
 
 -- Experimental commands require:
 --   explicit enable + eligible flight mode + established flight
@@ -230,28 +398,102 @@ end
 --   and require deliberate re-engagement.
 -- Never force GUIDED repeatedly or override a failsafe mode.
 
+local MODE_GUIDED = 15
+
+local function can_engage(aircraft_valid, flight_ready, target_fresh)
+    if HVAL_ENABLE:get() ~= 1 then
+        return false, "disabled"
+    end
+
+    local act_fn = HVAL_ACT_FN:get()
+    if act_fn == nil or act_fn <= 0 then
+        return false, "activation switch not configured"
+    end
+
+    if not rc:has_valid_input()
+        or rc:get_aux_cached(act_fn) ~= 2 then
+        return false, "pilot activation unavailable/off"
+    end
+
+    if not arming:is_armed() then
+        return false, "not armed"
+    end
+
+    if vehicle:get_mode() ~= MODE_GUIDED then
+        return false, "not GUIDED"
+    end
+
+    if not flight_ready then
+        return false, "flight not established"
+    end
+
+    if not aircraft_valid then
+        return false, "invalid aircraft state"
+    end
+
+    if not target_fresh then
+        return false, "target unavailable/stale"
+    end
+
+    if state.fault_latched then
+        return false, "fault latched"
+    end
+
+    if entry == nil or HVAL_ARM:get() ~= active_arm then
+        return false, "algorithm not ready"
+    end
+
+    return true
+end
+
+
 -- ============================================================
 -- 6. GUIDANCE DISPATCH
 -- ============================================================
 -- PLAN: use the existing snapshot contract instead of a new :step() interface:
---   local snapshot = { t_s = t, plane_n_m = pn, plane_e_m = pe, plane_hdg_rad = hdg,
---     target_n_m = kn, target_e_m = ke, target_vn_ms = kvn, target_ve_ms = kve,
---     algorithm_state = algorithm_state, target_est = est_proj, target_est_raw = est_raw }
---   local result, reason = entry(snapshot, cfg)  -- entry = arms.resolve(ARM_NAMES[HVAL_ARM])
--- Give every algorithm the same input/output interface:
---
--- result = algorithms[selected]:step({
---     aircraft = aircraft,
---     target = estimated_target,
---     dt = actual_elapsed_seconds,
---     config = config,
--- })
---
 -- result should contain:
 --   valid, guidance_point, path metadata, diagnostic/fault reason.
 --
 -- Keep servo, throttle and vehicle-mode commands out of algorithms.
 
+   local snapshot = { t_s = t, plane_n_m = pn, plane_e_m = pe, plane_hdg_rad = hdg,
+    target_n_m = kn, target_e_m = ke, target_vn_ms = kvn, target_ve_ms = kve,
+     algorithm_state = algorithm_state, target_est = est_proj, target_est_raw = est_raw }
+   
+     -- entry = arms.resolve(ARM_NAMES[HVAL_ARM])
+   local result, reason = entry(snapshot, cfg)
+-- Give every algorithm the same input/output interface:
+   result = algorithms[selected]:step({
+      aircraft = aircraft,
+      target = estimated_target,
+      dt = actual_elapsed_seconds,
+      config = config,
+   })
+--
+
+local function compute_guidance(
+    t, pn, pe, hdg, kn, ke, kvn, kve, est_proj, est_raw)
+
+    if entry == nil then
+        return nil, "no algorithm selected"
+    end
+
+    return entry({
+        t_s = t,
+        plane_n_m = pn,
+        plane_e_m = pe,
+        plane_hdg_rad = hdg,
+
+        target_n_m = kn,
+        target_e_m = ke,
+        target_vn_ms = kvn,
+        target_ve_ms = kve,
+
+        algorithm_state = algorithm_state,
+        target_est = est_proj,
+        target_est_raw = est_raw,
+    }, cfg)
+end
 -- ============================================================
 -- 7. OUTPUT VALIDATION
 -- ============================================================
@@ -267,13 +509,80 @@ end
 -- Check measured aircraft envelope and stale calculations.
 -- Reject invalid results; do not silently clip bad geometry.
 
+local function finite(value)
+    return type(value) == "number"
+        and value == value
+        and value > -math.huge
+        and value < math.huge
+end
 
--- derived turn radius
+local function validate_guidance(result, pn, pe, airspeed_ms, bound_m)
+    if type(result) ~= "table" then
+        return false, "no guidance result"
+    end
+
+    local gn = result.guidance_n_m
+    local ge = result.guidance_e_m
+
+    if not finite(gn) or not finite(ge) then
+        return false, "invalid guidance coordinates"
+    end
+
+    if not finite(pn) or not finite(pe) then
+        return false, "invalid aircraft coordinates"
+    end
+
+    -- Circular test boundary centred on the fixed origin.
+    if not finite(bound_m) or bound_m <= 0 then
+        return false, "invalid test boundary"
+    end
+
+    if pn * pn + pe * pe > bound_m * bound_m then
+        return false, "aircraft outside test boundary"
+    end
+
+    if gn * gn + ge * ge > bound_m * bound_m then
+        return false, "guidance point outside test boundary"
+    end
+
+    -- Require a usable speed; do not substitute AIRSPEED_MIN.
+    -- Supply true airspeed here for the physical radius calculation.
+    if not finite(airspeed_ms) or airspeed_ms <= 0 then
+        return false, "invalid true airspeed"
+    end
+
+    local bank_deg = ROLL_LIMIT_DEG:get()
+    if not finite(bank_deg) or bank_deg <= 0 or bank_deg >= 89 then
+        return false, "invalid bank limit"
+    end
+
+    local radius_floor =
+        airspeed_ms * airspeed_ms
+        / (GRAVITY_MSS * math.tan(math.rad(bank_deg)))
+
+    local requested_radius = cfg.turn_radius_m
+
+    if not finite(requested_radius) or requested_radius <= 0 then
+        return false, "invalid configured turn radius"
+    end
+
+    if requested_radius < radius_floor then
+        return false, "configured turn radius below physical floor"
+    end
+
+    return true
+end
+
+-- Derived Turn Raidus Floor
 -- section 7: the smallest turn radius the bank limit allows at this airspeed.
 -- The heading command is sent with acceleration g*tan(ROLL_LIMIT_DEG) (runner's
 -- command()), so ROLL_LIMIT_DEG is the only bank limit; no fixed 10 m/s/s cap.
+
 local warned_rho = false
+
+-- turn radius implementation - check
 local function turn_radius(airspeed)
+   -- get the rool limit
     local bank_deg = ROLL_LIMIT_DEG:get()
     if bank_deg == nil or bank_deg <= 0 or bank_deg >= 89 then
         return nil, "ROLL_LIMIT_DEG unreadable or out of range"
@@ -286,11 +595,14 @@ local function turn_radius(airspeed)
     if v == nil or v <= 0 then
         return nil, "no usable airspeed"
     end
+    -- implementing the floor as V^2/(g*bank angle)
     local floor = (v * v) / (GRAVITY_MSS * math.tan(math.rad(bank_deg)))
-    local rho = HVAL_RHO_M:get()
+    local rho = cfg and cfg.turn_radius_m
+    -- if rho is invalid
     if rho == nil or rho <= 0 then
         return floor
     end
+    -- handling floor case
     if rho < floor then
         if not warned_rho then
             gcs:send_text(4, string.format(
@@ -300,43 +612,9 @@ local function turn_radius(airspeed)
         end
         return floor
     end
+    -- else rturn rho
     return rho
 end
-
-
--- the turn radius the approach is built with: HVAL_RHO, or the floor the
--- bank limit in force allows at this airspeed. A requested radius below the
--- floor cannot be flown; it is reported once and the floor is used.
-function standoff.turn_radius(airspeed)
-   local bank_deg = math.deg(math.atan(STANDOFF_HEADING_ACCEL / GRAVITY_MSS))
-   local roll_limit = ROLL_LIMIT_DEG:get()
-   if roll_limit ~= nil and roll_limit > 0 and roll_limit < bank_deg then
-      bank_deg = roll_limit
-   end
-   local v = airspeed
-   if v == nil or v < airspeed_min then
-      v = airspeed_min
-   end
-   local floor = (v * v) / (GRAVITY_MSS * math.tan(math.rad(bank_deg)))
-   local rho = HVAL_RHO:get()
-   if rho == nil or rho <= 0 then
-      return floor
-   end
-   if rho < floor then
-      if not standoff.warned_rho then
-         gcs:send_text(MAV_SEVERITY.WARNING, SCRIPT_NAME_SHORT .. string.format(
-            ": HVAL_RHO %.0f m is below the %.0f m floor at %.0f deg and %.0f m/s; using the floor",
-            rho, floor, bank_deg, v))
-         standoff.warned_rho = true
-      end
-      return floor
-   end
-   return rho
-end
-
-
-
-
 
 -- ============================================================
 -- 8. COMMAND OUTPUT / SHADOW MODE
@@ -352,6 +630,118 @@ end
 -- Check command return status and record rejected commands.
 -- Recheck authority immediately before sending the command.
 
+local MAV_CMD_GUIDED_CHANGE_ALTITUDE = 43001
+local MAV_CMD_GUIDED_CHANGE_HEADING = 43002
+
+local MAV_FRAME_GLOBAL = 0
+local MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
+local HEADING_TYPE_COG = 0
+
+-- Cache the last accepted altitude command.
+-- Clear this cache on release or a new engagement.
+local sent_alt_m = nil
+
+-- Track whether experimental commands may be controlling the aircraft.
+state.owns_guidance = false
+
+local function send_guidance(
+    result, pn, pe, aircraft_valid, flight_ready, target_fresh)
+
+    local output_mode = HVAL_OUT:get()
+
+    -- SHADOW: the update loop still computes, validates and logs.
+    -- This function sends no flight commands in shadow mode.
+    if output_mode == 0 then
+        -- Changing the parameter alone does not release an old command.
+        -- Return a failure so the caller performs disengagement/recovery.
+        if state.owns_guidance then
+            return false, "active-to-shadow transition needs disengagement"
+        end
+        return true, "shadow"
+    end
+
+    if output_mode ~= 1 then
+        return false, "invalid output mode"
+    end
+
+    -- ACTIVE: result must already have passed section 7.
+    -- Recheck pilot authority and engagement gates before commands.
+    local allowed, reason =
+        can_engage(aircraft_valid, flight_ready, target_fresh)
+
+    if not allowed then
+        return false, reason
+    end
+
+    local alt_m = HVAL_ALT_M:get()
+    local bank_deg = ROLL_LIMIT_DEG:get()
+
+    if not finite(alt_m) or alt_m <= 0 then
+        return false, "invalid test altitude"
+    end
+
+    if not finite(bank_deg) or bank_deg <= 0 or bank_deg >= 89 then
+        return false, "invalid bank limit"
+    end
+
+    -- Direction from aircraft to the validated guidance point.
+    -- North/East coordinates give course clockwise from North.
+    local dn = result.guidance_n_m - pn
+    local de = result.guidance_e_m - pe
+
+    if dn * dn + de * de < 0.01 then
+        return false, "guidance point too close for course command"
+    end
+
+    local course_deg = math.deg(math.atan(de, dn)) % 360
+
+    -- PLAN: heading acceleration = g * tan(ROLL_LIMIT_DEG).
+    -- This avoids introducing the demo's fixed acceleration fallback.
+    local acceleration = GRAVITY_MSS * math.tan(math.rad(bank_deg))
+
+    -- Mark ownership before any command may have taken effect.
+    -- If altitude succeeds but heading fails, recovery is still needed.
+    state.owns_guidance = true
+
+    -- PLAN: GUIDED_CHANGE_ALTITUDE once per engagement.
+    -- Resend only if the requested altitude changes.
+    if sent_alt_m ~= alt_m then
+        local accepted =
+            gcs:run_command_int(MAV_CMD_GUIDED_CHANGE_ALTITUDE, {
+                frame = MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                p3 = 1000.0, -- Demo's rate cap; review for the aircraft.
+                z = alt_m,
+            })
+
+        -- Check acceptance; caller logs rejection and handles the fault.
+        if not accepted then
+            return false, "altitude command refused"
+        end
+
+        sent_alt_m = alt_m
+    end
+
+    -- TODO: repeat can_engage() here immediately before heading output.
+    -- The current check precedes the whole altitude/heading sequence.
+
+    -- PLAN: GUIDED_CHANGE_HEADING as course over ground (COG).
+    -- Send the current guidance course each active callback.
+    local accepted =
+        gcs:run_command_int(MAV_CMD_GUIDED_CHANGE_HEADING, {
+            frame = MAV_FRAME_GLOBAL,
+            p1 = HEADING_TYPE_COG,
+            p2 = course_deg,
+            p3 = acceleration,
+        })
+
+    -- Return rejection to section 9.
+    -- Section 10 must record the reason before the callback exits.
+    if not accepted then
+        return false, "heading command refused"
+    end
+
+    return true, "active"
+end
 
 
 -- ============================================================
@@ -369,7 +759,52 @@ end
 -- A crashed script cannot execute its own recovery logic.
 -- Validate that case separately; this handler covers detected faults.
 
+-- Deliberately unset here: recovery depends on your test procedure.
+local RECOVERY_MODE = nil
 
+local function handle_fault(reason)
+    -- Report and attempt recovery once per latched fault.
+    if state.fault_latched then
+        return
+    end
+
+    local owned_guidance = state.owns_guidance
+
+    state.fault_latched = true
+    state.enabled = false
+    state.fault_reason = tostring(reason)
+    sent_alt_m = nil
+
+    gcs:send_text(3, "HVAL: fault: " .. state.fault_reason)
+
+    -- Shadow faults need no flight-mode change.
+    if not owned_guidance then
+        return
+    end
+
+    -- Pilot/failsafe has already changed mode: yield.
+    if vehicle:get_mode() ~= MODE_GUIDED then
+        state.owns_guidance = false
+        return
+    end
+
+    if RECOVERY_MODE == nil or RECOVERY_MODE == MODE_GUIDED then
+        gcs:send_text(3, "HVAL: recovery mode not configured")
+        -- Previous commands may remain effective in GUIDED.
+        return
+    end
+
+    local accepted = vehicle:set_mode(RECOVERY_MODE)
+
+    if not accepted or vehicle:get_mode() ~= RECOVERY_MODE then
+        gcs:send_text(3, "HVAL: recovery mode change failed")
+        -- Retain ownership flag: release has not been confirmed.
+        return
+    end
+
+    state.owns_guidance = false
+    gcs:send_text(4, "HVAL: recovery mode entered")
+end
 
 -- ============================================================
 -- 10. LOGGING
@@ -386,7 +821,12 @@ end
 -- Log all switching, engagement, disengagement and fault events.
 -- Rate-limit ground-station text; retain detailed onboard logs.
 
-
+-- section 10, written once (where anchor() runs)
+logger:write('HANC', 't0ms,Lat,Lng,Alt,Hdg,Yaw,AltCmd', 'Iiiffff',
+             now_ms, origin:lat(), origin:lng(),
+             origin:alt() * 0.01,        -- actual altitude of the anchor, m (absolute)
+             hdg, yaw,
+             HVAL_ALT_M:get())           -- commanded altitude, m above home
 
 
 -- ============================================================
@@ -395,19 +835,104 @@ end
 -- PLAN: this order already matches the runner's step().
 local function update()
     -- 1. Read time, controls and aircraft state.
+    local now_ms = millis():tofloat()
+    local mode = vehicle:get_mode()
+    local armed = arming:is_armed()
+
     -- 2. Yield immediately if pilot/failsafe has taken authority.
+    if mode ~= MODE_GUIDED or not armed then
+        if state.owns_guidance then
+            handle_fault("left GUIDED or disarmed")
+        end
+
+        -- Your re-engagement latch must require an OFF/ON cycle.
+        return update, 100
+    end
+
     -- 3. Process disengagement and permitted algorithm selection.
+    if HVAL_ENABLE:get() == 0 then
+        if state.owns_guidance then
+            handle_fault("experimental guidance disabled")
+        end
+
+        local selected, selection_reason = select_algorithm()
+
+        -- Section 10: record selection refusal if not selected.
+        -- Do not clear a latched fault automatically.
+        return update, 100
+    end
+
     -- 4. Acquire target and update estimator.
-    -- 5. Check engagement gates.
-    -- 6. Compute guidance using actual elapsed time.
+    -- Insert your section 2–3 code here, defining:
+    --   t, pn, pe, hdg
+    --   kn, ke, kvn, kve
+    --   est_proj, est_raw, true_airspeed_ms
+    --   aircraft_valid, flight_ready, target_fresh
+    --
+    -- Anchor once per run before converting local positions.
+    -- Update the estimator only on a new accepted target sample.
+
+
+    -- 5. Compute guidance.
+    local result, reason = compute_guidance(
+        t, pn, pe, hdg, kn, ke, kvn, kve, est_proj, est_raw
+    )
+
+    if result == nil then
+        -- Section 9: handle failure using reason.
+        return update, 100
+    end
+
+    -- 6. Validate guidance.
+    local valid, why = validate_guidance(
+        result, pn, pe, true_airspeed_ms, HVAL_BOUND_M:get()
+    )
+
+    if not valid then
+        -- Section 9: handle failure using why.
+        return update, 100
+    end
+
+    algorithm_state = result.algorithm_state or {}
+
+    local result, reason = compute_guidance(
+        t, pn, pe, hdg,
+        kn, ke, kvn, kve,
+        est_proj, est_raw
+    )
+
+    if result == nil then
+        handle_fault(reason)
+        return update, 100
+    end
+
     -- 7. Validate output and aircraft envelope.
+   local valid, why = validate_guidance(
+        result, pn, pe,
+        true_airspeed_ms, HVAL_BOUND_M:get()
+    )
+
+    if not valid then
+        handle_fault(why)
+        return update, 100
+    end
+
+    algorithm_state = result.algorithm_state or {}
+    
     -- 8. Log; command only if ACTIVE and still authorised.
+    local accepted, output_status = send_guidance(
+        result, pn, pe,
+        aircraft_valid, flight_ready, target_fresh
+    )
+
     -- 9. Handle detected faults and verify recovery.
+    if not accepted then
+        handle_fault(output_status)
+        return update, 100
+    end
 
     return update, 100 -- nominal callback delay in milliseconds
 end
-
-
 
 -- ============================================================
 -- 12. STARTUP
@@ -417,375 +942,77 @@ end
 -- Validate configuration and required inputs/bindings.
 -- Announce script version and selected test configuration.
 -- Start disabled; do not arm or change flight mode on startup.
+local arms, est_mod, demo, cfg
 
+local arms = load("sitl_arms")
+local est_mod = load("harness_estimator")
+local ARM_NAMES = { [0] = "dubins_target_orbit", [1] = "adaptive_db_circle", [2] = "carrot_shift_cs" }
 
-function standoff.load()
-   if standoff.module ~= nil then
-      return standoff.module
+-- Require module loading
+local loaded, load_failed = {}, {}
+-- load the name of th efunction
+local function load(name)
+   -- return loaded name
+    if loaded[name] ~= nil then 
+      return loaded[name] 
    end
-   if standoff.load_failed then
-      return nil
-   end
-   local ok, mod = pcall(require, "standoff_orbit")
-   if not ok or mod == nil then
-      standoff.load_failed = true
-      gcs:send_text(MAV_SEVERITY.ERROR, SCRIPT_NAME_SHORT .. ": standoff_orbit module not found; HVAL_ENABLE ignored")
-      return nil
-   end
-   standoff.module = mod
-   return mod
+    -- if failed to report
+    if load_failed[name] then 
+      return nil 
+    end
+    -- handle messaging and error handling
+    local ok, mod = pcall(require, name)
+    if not ok or mod == nil then
+        load_failed[name] = true
+        gcs:send_text(3, "HVAL: module " .. name .. " not found: " .. tostring(mod))
+        
+        return nil
+    end
+    -- load name
+    loaded[name] = mod
+    return mod
 end
 
+
+-- Assign the shared variables declared near the top.
+arms = load("sitl_arms")
+est_mod = load("harness_estimator")
+demo = load("kangaroo_demo_cfg")
+
+-- Stop startup if a required module failed to load.
+if arms == nil or est_mod == nil or demo == nil then
+    return
+end
+
+cfg = demo.cfg
+
+if type(cfg) ~= "table" then
+    gcs:send_text(3, "HVAL: missing configuration table")
+    return
+end
+
+-- Start disabled; do not arm or change flight mode.
+HVAL_ENABLE:set(0)
+state.enabled = false
+state.owns_guidance = false
+state.fault_latched = false
+
+-- Section 4 resolves the initial algorithm while disabled.
+local selected, reason = select_algorithm()
+
+if not selected then
+    gcs:send_text(
+        3, "HVAL: initial algorithm unavailable: " .. tostring(reason)
+    )
+    return
+end
+
+-- Announce the selected algorithm and configuration source.
+gcs:send_text(
+    6, "HVAL: loaded disabled; algorithm "
+        .. tostring(ARM_NAMES[active_arm])
+        .. "; config kangaroo_demo_cfg"
+)
+
+-- Begin scheduled callbacks.
 return update, 100
-
-
-
---- add the plane_follow.lua scipt changes here
---[==[
-Moved 2026-10-03 from libraries/AP_Scripting/applets/plane_follow.lua, which
-was restored to the upstream original (identical to upstream/master at
-8a0f0c1e4c). This is the standoff-orbit behaviour added to the applet for
-TASK-055 (HVAL_ENABLE): every line the session added, in order, with
-where it sat and any original line it replaced. Kept inside this comment
-because it runs inside plane_follow.lua (it uses the applet's bind_add_param,
-MAV_SEVERITY, now_ms, wrap_360, airspeed_min, set_vehicle_heading, follow_mode
-and Update()) and because statements may not follow the return above.
-
--- ---- [1] plane_follow.lua, hunk near original line 23
--- ---- placed after the original line: FOLLP_TURN_DEG - if the target is more than this many degrees left or right, assume it's turning
-   FOLLP_SO_* - optional standoff-orbit behaviour (FOLLP_SO_ENABLE = 1): a circle-straight
-   approach onto a ring about the target and an orbit on it, from the standoff_orbit module.
-   With FOLLP_SO_ENABLE = 0 (the default) the applet is unchanged.
-
--- ---- [2] plane_follow.lua, hunk near original line 23
--- ---- placed after the original line: 
--- ---- REPLACED these original line(s):
---      SCRIPT_VERSION = "4.7.0-075"
--- ---- with:
-SCRIPT_VERSION = "4.7.0-076"
-
--- ---- [3] plane_follow.lua, hunk near original line 276 (in: FOLLP_XT_I_MAX = bind_add_param("XT_I_MAX", 24, 100))
--- ---- placed after the original line: 
-
-
-
--- ---- [4] plane_follow.lua, hunk near original line 295 (in: AIRSPEED_MIN = Parameter('AIRSPEED_MIN'))
--- ---- placed after the original line: WINDSPEED_MAX = Parameter('AHRS_WIND_MAX')
-ROLL_LIMIT_DEG = Parameter('ROLL_LIMIT_DEG')
-
--- ---- [5] plane_follow.lua, hunk near original line 537 (in: local simulate_failure = {)
--- ---- placed after the original line: 
--------------------------------------------------------------------------------
---- Standoff orbit behaviour (FOLLP_SO_ENABLE = 1)
--------------------------------------------------------------------------------
---[[
-   Lateral guidance from the standoff_orbit module: one guidance point (the
-   carrot) per tick from the aircraft pose and the target position, on a
-   circle-straight approach onto the ring of FOLLP_SO_RADIUS about the target
-   and then around the ring. The bearing to the carrot is sent through the
-   applet's existing heading command as a course-over-ground command, so the
-   aircraft flies AT the carrot; the cross-track PID and the heading
-   heuristics do not apply while it is selected. Everything else in the
-   applet (activation, target loss, exit and fail modes, altitude, the speed
-   law unless FOLLP_SO_ASPD is set) is unchanged.
-
-   The local frame is the aircraft's own position each tick (East, North
-   metres); the only state carried is the previous orbit sense.
---]]
-local STANDOFF_DELTA_PSI_RAD = math.rad(5.0)   -- arc sampling step of the approach path
-local STANDOFF_DELTA_D_M = 0.5                 -- straight sampling step, metres
-local STANDOFF_HEADING_ACCEL = 10.0            -- the acceleration set_vehicle_heading() sends, m/s/s
-local STANDOFF_MIN_COURSE_SPEED = 1.0          -- below this ground speed the course is the yaw, m/s
-local STANDOFF_MSG_INTERVAL_MS = 5000
-local GRAVITY_MSS = 9.80665
-local STANDOFF_PHASE_CODE = { approach = 0, orbit = 1 }
-local STANDOFF_DIR_CODE = { cw = 1, ccw = -1 }
-
-local standoff = {
-   module = nil,
-   load_failed = false,
-   sense = nil,          -- "cw" / "ccw" from the previous tick, nil at activation
-   t0_ms = nil,
-   anchor = nil,         -- Location at activation; the frame the log rows are written in
-   warned_rho = false,
-   last_refusal_ms = nil,
-}
-
-local function standoff_num(v)
-   if v == nil then return 0.0 end
-   if v == true then return 1.0 end
-   if v == false then return 0.0 end
-   return v
-end
-
-function standoff.reset()
-   standoff.sense = nil
-   standoff.t0_ms = nil
-   standoff.anchor = nil
-   standoff.warned_rho = false
-   standoff.last_refusal_ms = nil
-end
-
-
-
-
-
-
-
--- one tick: the carrot and the course to it. Returns nil when the module is
--- missing or the geometry refuses, and the applet's own heading law applies.
-function standoff.compute(current_location, target_location, target_velocity, airspeed)
-   local mod = standoff.load()
-   if mod == nil then
-      return nil
-   end
-   local vel = ahrs:get_velocity_NED()
-   local psi = standoff.course(vel)
-   local yaw = ahrs:get_yaw_rad()
-   if standoff.t0_ms == nil then
-      standoff.t0_ms = now_ms
-      standoff.anchor = current_location:copy()
-      logger:write('HANC', 't0ms,Lat,Lng,Alt,Hdg,Yaw,AltCmd', 'Iiiffff',
-                   now_ms, current_location:lat(), current_location:lng(),
-                   current_location:alt() * 0.01, psi, yaw, current_location:alt() * 0.01)
-      gcs:send_text(MAV_SEVERITY.INFO, SCRIPT_NAME_SHORT .. string.format(
-         ": standoff orbit R %.0f m L %.0f m", FOLLP_SO_RADIUS:get(), FOLLP_SO_LKAHD:get()))
-   end
-   -- the frame: aircraft at the origin, x East, y North
-   local ofs = current_location:get_distance_NED(target_location)
-   local tx, ty = ofs:y(), ofs:x()
-   local R = FOLLP_SO_RADIUS:get()
-   local L = FOLLP_SO_LKAHD:get()
-   local rho = standoff.turn_radius(airspeed)
-   local margin = FOLLP_SO_MARGIN:get()
-   local precomp = (FOLLP_SO_PRECOMP:get() ~= 0)
-   local g, reason = mod.guidance(0.0, 0.0, psi, tx, ty, R, rho, L,
-                                  STANDOFF_DELTA_PSI_RAD, STANDOFF_DELTA_D_M,
-                                  precomp, standoff.sense, margin)
-   if g == nil then
-      if standoff.last_refusal_ms == nil or (now_ms - standoff.last_refusal_ms) > STANDOFF_MSG_INTERVAL_MS then
-         gcs:send_text(MAV_SEVERITY.WARNING, SCRIPT_NAME_SHORT .. ": standoff refused: " .. tostring(reason))
-         standoff.last_refusal_ms = now_ms
-      end
-      return nil
-   end
-   local previous = standoff.sense
-   if previous ~= nil and g.direction ~= previous then
-      gcs:send_text(MAV_SEVERITY.INFO, SCRIPT_NAME_SHORT .. ": standoff sense " .. previous .. " to " .. g.direction)
-   end
-   standoff.sense = g.direction
-   return {
-      heading_deg = wrap_360(math.deg(math.atan(g.gx, g.gy))),
-      g = g,
-      previous = previous,
-      t_s = (now_ms - standoff.t0_ms):tofloat() * 0.001,
-      tx = tx, ty = ty, psi = psi, yaw = yaw, vel = vel, rho = rho,
-      target_velocity = target_velocity,
-   }
-end
-
--- the harness record, in the frame anchored at activation, so the same
--- extractor and metrics that read the research SITL runs read this log
-function standoff.log(current_location, r)
-   local rel = standoff.anchor:get_distance_NED(current_location)
-   local pn, pe = rel:x(), rel:y()
-   local tvn, tve = 0.0, 0.0
-   if r.target_velocity ~= nil then
-      tvn, tve = r.target_velocity:x(), r.target_velocity:y()
-   end
-   logger:write('HREC', 't,PN,PE,PHdg,TN,TE,TVN,TVE,GN,GE', 'ffffffffff',
-                r.t_s, pn, pe, r.psi, pn + r.ty, pe + r.tx, tvn, tve,
-                pn + r.g.gy, pe + r.g.gx)
-   local held = (r.previous ~= nil) and (r.g.direction == r.previous)
-   local switched = (r.previous ~= nil) and (r.g.direction ~= r.previous)
-   logger:write('HALG', 't,Ph,Dir,Cur,Rep,Tsr,Held,Sw,K,Ring', 'ffffffffff',
-                r.t_s, standoff_num(STANDOFF_PHASE_CODE[r.g.phase]),
-                standoff_num(STANDOFF_DIR_CODE[r.g.direction]),
-                standoff_num(r.g.curvature), 0.0, 0.0,
-                standoff_num(held), standoff_num(switched), 0.0,
-                standoff_num(r.g.ring_angle_rad))
-   local wind = ahrs:get_wind()
-   local aspd = ahrs:airspeed_estimate() or 0.0
-   local gvn, gve = 0.0, 0.0
-   if r.vel ~= nil then gvn, gve = r.vel:x(), r.vel:y() end
-   local wn, we = 0.0, 0.0
-   if wind ~= nil then wn, we = wind:x(), wind:y() end
-   logger:write('HAIR', 't,AS,GVN,GVE,WN,WE,Yaw,Roll,Crs', 'fffffffff',
-                r.t_s, aspd, gvn, gve, wn, we, r.yaw, ahrs:get_roll_rad(), r.psi)
-end
-
-
--- ---- [6] plane_follow.lua, hunk near original line 590 (in: local follow_mode = {)
--- ---- placed after the original line: xt_pid.reset()
-      standoff.reset()
-
--- ---- [7] plane_follow.lua, hunk near original line 908 (in: function Update())
--- ---- placed after the original line: 
-   -- standoff orbit (FOLLP_SO_ENABLE = 1): the course to the carrot replaces the heading heuristics below
-   local standoff_result = nil
-   if FOLLP_SO_ENABLE:get() == 1 then
-      standoff_result = standoff.compute(current_location, target_location, target_velocity, vehicle_airspeed)
-   end
-
-
--- ---- [8] plane_follow.lua, hunk near original line 908 (in: function Update())
--- ---- placed after the original line: -- target_heading - vehicle_heading catches the circumstance where the target vehicle is heading in completely the opposite direction
--- ---- REPLACED these original line(s):
---         if (math.abs(along_track_distance) < airspeed_max * 0.75 or (math.abs(cross_track_distance) < airspeed_max * 0.25)) or
--- ---- with:
-   if standoff_result ~= nil then
-      desired_heading = standoff_result.heading_deg
-      mechanism = 3 -- standoff carrot - for logging
-   elseif (math.abs(along_track_distance) < airspeed_max * 0.75 or (math.abs(cross_track_distance) < airspeed_max * 0.25)) or
-
--- ---- [9] plane_follow.lua, hunk near original line 922 (in: function Update())
--- ---- placed after the original line: -- The desired heading needs a PID controller for crosstrack, but only when it gets close.
--- ---- REPLACED these original line(s):
---         if close or too_close_follow_up > 0 then
--- ---- with:
-   if (close or too_close_follow_up > 0) and standoff_result == nil then
-
--- ---- [10] plane_follow.lua, hunk near original line 944 (in: function Update())
--- ---- placed after the original line: 
-   -- standoff orbit: hold one airspeed when asked to, since the ring geometry assumes one
-   if standoff_result ~= nil and FOLLP_SO_ASPD:get() > 0 then
-      airspeed_new = FOLLP_SO_ASPD:get()
-   end
-
-
--- ---- [11] plane_follow.lua, hunk near original line 944 (in: function Update())
--- ---- placed after the original line: -- Finally after all the calculations - send the target heading, altitude and airspeed to AP
--- ---- REPLACED these original line(s):
---         set_vehicle_heading({heading = desired_heading})
--- ---- with:
-   if standoff_result ~= nil then
-      -- course over ground at the carrot: the aircraft flies AT the point, as the standoff geometry assumes
-      set_vehicle_heading({heading = desired_heading, type = MAV_HEADING_TYPE.COG})
-   else
-      set_vehicle_heading({heading = desired_heading})
-   end
-
--- ---- [12] plane_follow.lua, hunk near original line 986 (in: function Update())
--- ---- placed after the original line: )
-   if standoff_result ~= nil then
-      standoff.log(current_location, standoff_result)
-   end
-
-]==]
-
-
---- drop MD additional content here
---[==[
-Moved 2026-10-03 from libraries/AP_Scripting/applets/plane_follow.md (restored
-to the upstream original): the standoff-orbit documentation, Markdown.
-
-<!-- ---- [1] plane_follow.md, hunk near original line 99 (in: as the error. This is the D gain for the "V" PID controller.) -->
-<!-- ---- placed after the original line:  -->
-## FOLLP_SO_ENABLE
-
-Selects the optional standoff-orbit behaviour (see "Standoff orbit behaviour"
-below). 0, the default, leaves the applet exactly as it was. 1 replaces the
-lateral guidance with a circle-straight approach onto a ring about the target
-and an orbit on that ring.
-
-## FOLLP_SO_RADIUS
-
-Radius of the standoff ring about the target, metres (default 70). It must be
-at least the turn radius in use.
-
-## FOLLP_SO_LKAHD
-
-The standoff carrot: the distance along the planned path at which the guidance
-point is placed, metres (default 50). This is a distance, not the seconds of
-FOLLP_LKAHD, which keeps its meaning for the speed law. It must stay below 80
-degrees of arc around the ring (about 1.4 x FOLLP_SO_RADIUS).
-
-## FOLLP_SO_RHO
-
-Minimum turn radius used to build the approach, metres. 0 (default) derives it
-each tick from the bank limit in force (the smaller of ROLL_LIMIT_DEG and the
-45.6 degrees implied by the heading command's acceleration) and the current
-airspeed: 63.7 m at 25 m/s and 45 degrees. A value below that floor is reported
-once on the GCS and the floor is used instead.
-
-## FOLLP_SO_MARGIN
-
-Hysteresis margin for the orbit sense, metres of turn-in path length (default
-10). Once a sense (clockwise or counter-clockwise) is chosen it is kept unless
-the other sense's approach is cheaper by more than this. 0 re-selects every
-tick, which on the line of sight to the target makes the sense alternate.
-
-## FOLLP_SO_PRECOMP
-
-1 (default) places the orbit carrot on a virtual ring of radius
-R / cos(L / R) so that the circle actually flown is FOLLP_SO_RADIUS. 0 places
-it on the ring itself; the aircraft then flies the chord to it and settles on
-a smaller circle of radius R cos(L / R) (52.9 m for the defaults).
-
-## FOLLP_SO_ASPD
-
-Airspeed to command while the standoff is selected, m/s. 0 (default) leaves
-the applet's speed law in charge; that law steers airspeed toward the target's,
-which for a slow ground target means AIRSPEED_MIN. The standoff geometry
-assumes one airspeed, so set this to the cruise speed the turn radius was
-chosen for.
-
-
-<!-- ---- [2] plane_follow.md, hunk near original line 108 (in: controller's microSD card on the FOLLOW plane. s) -->
-<!-- ---- placed after the original line: in the `APM/scripts/modules` directory on the SD card on the FOLLOW plane. -->
-If FOLLP_SO_ENABLE will be used, also install standoff_orbit.lua there and set
-SCR_VM_I_COUNT = 200000 and SCR_HEAP_SIZE = 1048576 (or the largest the board
-allows); the approach geometry samples four candidate paths per update. Set
-GUIDED_P to about 15000 as well: the standoff steers by course commands, and
-Plane's GUIDED heading controller is proportional, so at the default gain of
-5000 a 30 degree course error gives only 27 degrees of bank, which cannot fly
-the planned turn.
-
-<!-- ---- [3] plane_follow.md, hunk near original line 145 (in: MAV1_POSITION = 10) -->
-<!-- ---- placed after the original line: Ideally the connection is direct plane-to-plane and not routed via a Ground Control Station. This has been tested with 2x HolyBro SiK telemetry radios, one in each plane. RFD900 radios might work and LTE or other IP radio based connections will probably work well, but haven't been tested. Some users have reported using ESP32 WiFi modules configured with one of the radios set to be in station mode. Fast telemetry updates from the target to the following plane will give the best results. -->
-
-## Standoff orbit behaviour
-
-With FOLLP_SO_ENABLE = 1 the applet follows a slow or stationary ground target
-the way a fixed-wing aircraft can: it does not try to sit on the target's
-heading and speed, it approaches a ring of FOLLP_SO_RADIUS about the target
-and circles it. The behaviour comes from the standoff_orbit module, which was
-developed and measured as the baseline guidance law of a research programme on
-fixed-wing following of wildlife (a Python geometric harness, differential
-tests between the Python and the Lua, and the ArduPilot SITL campaign that
-repeats the harness runs). Its defaults are that harness's; they are not
-flight limits.
-
-Each update the module takes the aircraft's position and ground course and the
-target's position from AP_Follow, and returns one guidance point:
-
-- outside the ring, the point 50 m (FOLLP_SO_LKAHD) along a circle-straight
-  path: an initial turn of the turn radius followed by a straight that meets
-  the ring tangentially, the cheapest of the four turn-direction and
-  orbit-sense combinations, with the orbit sense held against FOLLP_SO_MARGIN
-  so it does not flip while the aircraft is on the line of sight;
-- on or inside the ring, a point ahead around the ring in the sense the
-  aircraft arrived with, placed on the pre-compensated ring
-  (FOLLP_SO_PRECOMP) so the circle actually flown is FOLLP_SO_RADIUS.
-
-The applet sends the bearing to that point as a course-over-ground heading
-command, so the aircraft flies at the point rather than loitering about it;
-the cross-track PID and the overshoot and turning heuristics do not apply
-while the standoff is selected. Activation, target loss, FOLLP_TIMEOUT,
-FOLLP_FAIL_MODE, FOLLP_EXIT_MODE, altitude (FOLL_ALT_TYPE, FOLLP_ALT_OVR) and
-the speed law are unchanged; FOLLP_SO_ASPD can hold one airspeed instead.
-FOLL_OFS_X/Y/Z are ignored by the standoff, which rings the target itself.
-
-If the module is not installed the applet reports it once and behaves as if
-FOLLP_SO_ENABLE were 0. If the geometry has no solution for an update (the
-ring is smaller than the turn radius, or the aircraft is at the target) the
-applet reports it and uses its ordinary heading law for that update.
-
-The standoff writes its own log messages beside PF1 and PF2: HANC once at
-activation (the anchor of the local frame), and HREC, HALG and HAIR each
-update (aircraft, target and guidance point in metres from the anchor; the
-phase, orbit sense and curvature; airspeed, ground velocity, wind, yaw, roll
-and course), so the run can be compared with the research harness's records.
-
-]==]
-
