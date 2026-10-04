@@ -265,6 +265,12 @@ def build_parser():
         "ring error; sweeping it is how TASK-043 R2 is settled.",
     )
     parser.add_argument(
+        "--af-step-ticks", type=int, default=None,
+        help="carrot_shift_cs (arm F): control ticks the baseline's carrot is "
+        "led on the RAW estimated velocity. Default 1, the arm as specified "
+        "(TASK-060); configurable so a longer carrot lead can be swept.",
+    )
+    parser.add_argument(
         "--no-orbit-precomp",
         action="store_true",
         help="Disable the TASK-027 orbit guidance-ring pre-compensation and fly "
@@ -439,7 +445,9 @@ def build_config(args, weave_eta=None):
                  "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
                  "rh_candidates_2", "rh_command_steps",
                  # TASK-043 arm D.
-                 "vd_step_ticks"):
+                 "vd_step_ticks",
+                 # TASK-060 arm F.
+                 "af_step_ticks"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value
@@ -471,7 +479,8 @@ def main(argv=None):
               "--lookahead-steps must be 0 (it is the state-side horizon they "
               "replace). Set the candidate range with --ah-k-min-steps / "
               "--ah-k-max-steps / --ah-k-step, the planning horizon with "
-              "--rh-horizon-steps, or arm D's step with --vd-step-ticks."
+              "--rh-horizon-steps, arm D's step with --vd-step-ticks, or arm "
+              "F's carrot lead with --af-step-ticks."
               % ", ".join(owning), file=sys.stderr)
         return 2
 
@@ -546,12 +555,16 @@ def main(argv=None):
         # present-position fallback. Refuse here, naming the flag, rather than
         # letting the run stop on its first tick with a geometry error.
         if getattr(algorithm, "requires_estimate", False) and not args.estimate:
+            if getattr(algorithm, "owns_horizon", False):
+                how = ("Re-run with --estimate and leave --lookahead-steps at 0: "
+                       "this algorithm projects from the raw estimate itself.")
+            else:
+                how = ("Re-run with --estimate (and --lookahead-steps k to set "
+                       "the horizon; k = 0 uses the current estimate).")
             print(
-                "REFUSED: --algorithm %s centres its ring on the predicted "
-                "target and has no present-position fallback, so it requires the "
-                "state estimator. Re-run with --estimate (and --lookahead-steps k "
-                "to set the horizon; k = 0 uses the current estimate)."
-                % algo_name, file=sys.stderr)
+                "REFUSED: --algorithm %s plans on the state estimate and has no "
+                "present-position fallback, so it requires the state "
+                "estimator. %s" % (algo_name, how), file=sys.stderr)
             return 2
 
         harness = Harness(

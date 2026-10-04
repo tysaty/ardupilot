@@ -641,7 +641,9 @@ def build_session(args, algorithm=None):
                  "rh_horizon_steps", "rh_segment_steps", "rh_candidates",
                  "rh_candidates_2", "rh_command_steps",
                  # TASK-043 arm D.
-                 "vd_step_ticks"):
+                 "vd_step_ticks",
+                 # TASK-060 arm F.
+                 "af_step_ticks"):
         value = getattr(args, name, None)
         if value is not None:
             overrides[name] = value

@@ -162,11 +162,24 @@ ARMS = {
         "note": "No ring construction. Scores rolled-out trajectories against "
                 "the predicted standoff tube and applies only the first command.",
     },
+    "F": {
+        "label": "carrot led one tick",
+        "algorithm": "carrot_shift_cs",
+        # The baseline's guidance about the RAW estimate, then only the carrot
+        # moved by v_est * dt_s * af_step_ticks. Rebuilt every tick, commits
+        # nothing. lookahead_steps must be 0: the arm owns its lead (TASK-060).
+        "overrides": {},
+        "lookahead_steps": 0,
+        "task": "TASK-060",
+        "note": "Keeps the baseline's path, ring and sense, and leads only the "
+                "commanded point by the estimated velocity over one tick. Arm D "
+                "leads the ring centre by the same tick; arm F leads the carrot.",
+    },
 }
 
 #: Order arms are reported in. Explicit, because dict order is an implementation
 #: detail and a comparison table whose row order drifts is hard to read across runs.
-ARM_ORDER = ("0", "D", "A", "B", "C")
+ARM_ORDER = ("0", "D", "A", "B", "C", "F")
 
 
 def _with_sense_hysteresis(arm_id):
@@ -194,8 +207,9 @@ ARMS_HYST = {
     "AH": _with_sense_hysteresis("A"),
     "BH": _with_sense_hysteresis("B"),
     "C": ARMS["C"],
+    "FH": _with_sense_hysteresis("F"),
 }
-ARM_ORDER_HYST = ("0H", "DH", "AH", "BH", "C")
+ARM_ORDER_HYST = ("0H", "DH", "AH", "BH", "C", "FH")
 
 #: Named arm tables a campaign can be run over (`Py_Sweep_Experiment --arm-set`).
 ARM_SETS = {

@@ -34,6 +34,7 @@ from .geometry import adaptive_db_circle as adaptive_db_circle_geom
 from .geometry import adaptive_horizon as adaptive_horizon_geom
 from .geometry import amplitude as amplitude_geom
 from .geometry import amplitude_orbit as amplitude_orbit_geom
+from .geometry import carrot_shift as carrot_shift_geom
 from .geometry import dubins as dubins_geom
 from .geometry import dubins_orbit as dubins_orbit_geom
 from .geometry import dubins_target_circle as dubins_target_circle_geom
@@ -1286,6 +1287,102 @@ class HeadingAOrbitAlgorithm(GeometricAlgorithm):
                 "algorithm_state": {"phase": phase}}
 
 
+class CarrotShiftCsAlgorithm(GeometricAlgorithm):
+    """The baseline CS-onto-orbit with the CARROT led one tick (``TASK-060`` arm F).
+
+    Each tick: the baseline guidance (:mod:`dubins_target_orbit`) about the
+    **raw** state estimate, then only the guidance point it returns is moved
+    by the estimated velocity over ``af_step_ticks`` control ticks
+    (:func:`carrot_shift.carrot_shift`)::
+
+        g' = g + v_est * dt_s * af_step_ticks
+
+    The path, ring, phase, orbit sense and curvature are the baseline's.
+    Where it sits: arm 0 leads nothing; arm D leads the ring centre by the
+    same one tick and re-solves the path; arm F keeps the path and leads the
+    commanded point.
+
+    **The estimator is required**, and the lead is the arm's own
+    (``owns_horizon``): it reads ``target_est_raw``, so a state-side
+    ``lookahead_steps`` would lead the path as well as the carrot, and the
+    runner refuses that combination. No present-position fallback: without
+    an estimate the run would be the baseline under arm F's name.
+
+    Decisions (author, 2026-10-01), recorded in every tick's state so a bundle
+    says which ran: ``D5`` the path is built about the raw estimate
+    (``path_about``); ``D6`` the carrot is led in both phases
+    (``carrot_shift_phases``).
+
+    Lua counterpart: ``modules/harness_carrot_shift.lua`` (``guidance_point``
+    and ``guidance_point_hyst``), gated tick for tick in
+    ``tests/unit/test_lua_differential.py``. Its state has the same fields as
+    this one; the approach-phase ``cost_cw_m`` / ``cost_ccw_m`` diagnostics are
+    not reported on either side, as for the SITL baseline adapter.
+
+    Configuration used: ``turn_radius_m``, ``orbit_radius_m``,
+    ``look_ahead_m``, ``delta_psi_rad``, ``delta_d_m``,
+    ``orbit_precompensate``, ``dt_s``, ``af_step_ticks`` (and
+    ``cs_sense_margin_m`` for the ``_hyst`` variant).
+    """
+
+    name = "carrot_shift_cs"
+    holds_orbit = True
+    requires_estimate = True
+    owns_horizon = True
+
+    #: D5 and D6 (TASK-060), answered 2026-10-01. Changing either is a new
+    #: arm, not an edit.
+    PATH_ABOUT = "estimate"
+    SHIFT_PHASES = "both"
+
+    def guidance_point(self, snapshot):
+        cfg = self.config
+        px, py = snapshot["plane_e_m"], snapshot["plane_n_m"]
+        psi_i = _heading_to_geometry(snapshot["plane_hdg_rad"])
+        est = snapshot.get("target_est_raw")
+        if est is None:
+            raise NoSolution(
+                "carrot_shift_cs requires the state estimator: it leads the "
+                "carrot on the estimated velocity and has no present-position "
+                "fallback. Re-run with --estimate (leave --lookahead-steps at "
+                "0; this arm owns its lead).")
+        preferred, margin = _held_sense(self, snapshot)
+        try:
+            g = dubins_target_orbit_geom.guidance(
+                px, py, psi_i, est["e_m"], est["n_m"],
+                cfg["orbit_radius_m"], cfg["turn_radius_m"], cfg["look_ahead_m"],
+                cfg["delta_psi_rad"], cfg["delta_d_m"],
+                cfg["orbit_precompensate"],
+                preferred_direction=preferred, sense_margin_m=margin,
+            )
+            shift_e, shift_n = carrot_shift_geom.carrot_shift(
+                est, cfg["dt_s"], cfg["af_step_ticks"])
+        except ValueError as exc:
+            raise NoSolution(str(exc))
+
+        gx, gy = g["gx"] + shift_e, g["gy"] + shift_n
+        state = {
+            "phase": g["phase"],
+            "direction": g["direction"],
+            "curvature": g["curvature"],
+            "guidance_raw_n_m": g["gy"],
+            "guidance_raw_e_m": g["gx"],
+            "carrot_shift_n_m": shift_n,
+            "carrot_shift_e_m": shift_e,
+            "carrot_lead_s": cfg["dt_s"] * cfg["af_step_ticks"],
+            "carrot_shifted": True,
+            "path_about": self.PATH_ABOUT,
+            "carrot_shift_phases": self.SHIFT_PHASES,
+        }
+        if "ring_angle_rad" in g:
+            state["ring_angle_rad"] = g["ring_angle_rad"]
+        return {
+            "guidance_n_m": gy,
+            "guidance_e_m": gx,
+            "algorithm_state": state,
+        }
+
+
 #: Name-to-class registry. Selecting an algorithm is a lookup here and nothing
 #: else; no other part of the harness may branch on algorithm identity.
 # --------------------------------------------------------------------------
@@ -1340,6 +1437,15 @@ class AdaptiveHorizonCsHystAlgorithm(_SenseHysteresisMixin,
     name = "adaptive_horizon_cs_hyst"
 
 
+class CarrotShiftCsHystAlgorithm(_SenseHysteresisMixin, CarrotShiftCsAlgorithm):
+    """Arm F with orbit-sense hysteresis (``TASK-060``); see
+    :class:`CarrotShiftCsAlgorithm` and :class:`DubinsTargetOrbitHystAlgorithm`.
+    The held sense applies to the baseline CS solve; the carrot lead is
+    unchanged. Lua: ``harness_carrot_shift.guidance_point_hyst``."""
+
+    name = "carrot_shift_cs_hyst"
+
+
 REGISTRY = {
     AmplitudeAlgorithm.name: AmplitudeAlgorithm,
     AmplitudeOrbitAlgorithm.name: AmplitudeOrbitAlgorithm,
@@ -1354,6 +1460,8 @@ REGISTRY = {
     AdaptiveDbCircleHystAlgorithm.name: AdaptiveDbCircleHystAlgorithm,
     VelocityDbCircleHystAlgorithm.name: VelocityDbCircleHystAlgorithm,
     AdaptiveHorizonCsHystAlgorithm.name: AdaptiveHorizonCsHystAlgorithm,
+    CarrotShiftCsAlgorithm.name: CarrotShiftCsAlgorithm,
+    CarrotShiftCsHystAlgorithm.name: CarrotShiftCsHystAlgorithm,
     AdaptiveDbCircleAlgorithm.name: AdaptiveDbCircleAlgorithm,
     VelocityDbCircleAlgorithm.name: VelocityDbCircleAlgorithm,
     AdaptiveHorizonCsAlgorithm.name: AdaptiveHorizonCsAlgorithm,
@@ -1375,7 +1483,8 @@ IMPLEMENTED = ("amplitude", "amplitude_orbit", "var_amplitude",
                "heading_a_orbit", "adaptive_db_circle", "adaptive_horizon_cs",
                "rh_geometric", "velocity_db_circle",
                "dubins_target_orbit_hyst", "adaptive_db_circle_hyst",
-               "velocity_db_circle_hyst", "adaptive_horizon_cs_hyst")
+               "velocity_db_circle_hyst", "adaptive_horizon_cs_hyst",
+               "carrot_shift_cs", "carrot_shift_cs_hyst")
 
 
 def build(name, config):

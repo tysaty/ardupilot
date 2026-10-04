@@ -34,13 +34,14 @@ from . import plotter
 #: Arm colours in ladder order. Okabe–Ito, colour-blind safe. Keyed by the
 #: arm's base letter, so a `TASK-048` hysteresis arm (``0H``, ``DH``, ``AH``,
 #: ``BH``) is drawn in its base arm's colour; the manifest gives the order.
-ARM_ORDER = ("0", "D", "A", "B", "C")
+ARM_ORDER = ("0", "D", "A", "B", "C", "F")
 ARM_COLOURS = {
     "0": "#4D4D4D",     # baseline: neutral
     "D": "#E69F00",     # one-tick step
     "A": "#0072B2",     # fixed horizon
     "B": "#009E73",     # adaptive horizon
     "C": "#CC79A7",     # receding horizon
+    "F": "#D55E00",     # carrot led one tick (TASK-060)
 }
 ARM_LABELS = {
     "0": "arm 0 — baseline",
@@ -48,6 +49,7 @@ ARM_LABELS = {
     "A": "arm A — fixed horizon",
     "B": "arm B — adaptive horizon",
     "C": "arm C — receding horizon",
+    "F": "arm F — carrot lead",
 }
 
 

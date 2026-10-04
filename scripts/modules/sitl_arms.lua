@@ -9,8 +9,10 @@
 --      entry(snapshot, cfg) -> {guidance_n_m, guidance_e_m, algorithm_state}
 --                            | nil, reason
 --
---  Three arms ship their own `guidance_point` (harness_adaptive_db,
---  harness_adaptive_horizon, harness_rh_geometric). The baseline and its
+--  Four arms ship their own `guidance_point` (harness_adaptive_db,
+--  harness_adaptive_horizon, harness_rh_geometric, and harness_carrot_shift
+--  for arm F, TASK-060, whose held-sense variant is its
+--  `guidance_point_hyst`). The baseline and its
 --  hysteresis variant only have the geometry-level `harness_cs_orbit.guidance`,
 --  so the snapshot adapter for them lives HERE -- outside modules/ -- as a
 --  transliteration of algorithms.py's DubinsTargetOrbitAlgorithm and
@@ -93,6 +95,15 @@ M.REGISTRY = {
     adaptive_db_circle       = { module = "harness_adaptive_db" },
     adaptive_horizon_cs      = { module = "harness_adaptive_horizon" },
     rh_geometric             = { module = "harness_rh_geometric" },
+    -- Arm F (TASK-060, added 2026-10-04): the baseline's carrot led one tick
+    -- on the raw estimate. Gated tick for tick against the Python
+    -- carrot_shift_cs / _hyst in tests/unit/test_lua_differential.py.
+    carrot_shift_cs          = { module = "harness_carrot_shift" },
+    carrot_shift_cs_hyst     = { entry = function(snapshot, cfg)
+                                     return require("harness_carrot_shift")
+                                         .guidance_point_hyst(snapshot, cfg)
+                                 end,
+                                 source = "harness_carrot_shift.guidance_point_hyst" },
 }
 
 --- Known gaps, each with the reason the campaign will record.

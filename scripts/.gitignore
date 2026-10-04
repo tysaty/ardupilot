@@ -1,3 +1,10 @@
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# SITL campaign staging output (kangaroo_follow/stage_scripts.py): copied or
+# generated fresh for every cell and deleted by restore(). The runner's source
+# is Tools/autotest/ArduPlane_Tests/KangarooFollow/sitl_harness_runner.lua;
+# each sitl_cell.lua is generated from a cell's spec.json.
+/sitl_harness_runner.lua
+/modules/sitl_cell.lua
