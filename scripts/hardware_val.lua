@@ -70,6 +70,7 @@ local MAV_SEVERITY = { ERROR = 3, WARNING = 4, INFO = 6 }
 -- Modules, declared here so every function below sees them as upvalues;
 -- assigned in section 12 through load() (fix 6, 2026-10-04).
 local arms, est_mod, segs
+local zone_mod              -- harness_zone, only when spec.json carries a fence
 
 local state = {
     enabled = false,          -- engaged: anchored and computing
@@ -321,6 +322,8 @@ end
 local origin = nil          -- Location at the anchor
 local t0_ms = nil
 local segments = nil        -- the virtual kangaroo's schedule
+local target_legs_now = nil -- the named legs `segments` was built from
+local zone = nil            -- the fence in the anchor frame (ADR-012)
 local estimator = nil
 
 --- The virtual kangaroo's legs for HVAL_TGT, in the spec's frame (target
@@ -350,7 +353,73 @@ local function build_target()
         return false, "could not build virtual target: " .. tostring(reason)
     end
     segments = built
+    target_legs_now = legs
     return true
+end
+
+--- The fence in the anchor frame (ADR-012), built at engagement from
+--  cfg.fence's vertices through the vehicle's own get_distance_NE. The
+--  kangaroo must start inside it less the containment margin (the orbit
+--  radius): otherwise the ring would start across the fence, so engagement
+--  is refused. Returns true, or false and why. No fence: nothing to do.
+local function build_zone()
+    zone = nil
+    if cfg.fence == nil then
+        return true
+    end
+    local built, why = zone_mod.from_latlng(origin, cfg.fence.vertices_latlng)
+    if built == nil then
+        return false, "fence: " .. tostring(why)
+    end
+    local margin = cfg.fence.containment_margin_m
+    if not zone_mod.contains(built, cfg.target_n_m, cfg.target_e_m, margin) then
+        return false, string.format(
+            "kangaroo start (%.0f N, %.0f E) is not inside the fence less %.0f m",
+            cfg.target_n_m, cfg.target_e_m, margin)
+    end
+    zone = built
+    return true
+end
+
+--- Index of the segment active at t (the last one past the end).
+local function active_index(t)
+    for i = 1, #segments do
+        if segments[i].t_start <= t and t < segments[i].t_end then
+            return i
+        end
+    end
+    return #segments
+end
+
+--- Turn the virtual kangaroo back at the fence, by the harness's rule
+--  (ScenarioSession._contain_target through harness_zone): when the next
+--  step along the leg's heading would cross a wall moved the containment
+--  margin inward, the rest of the schedule becomes one leg on the reflected
+--  heading from where the kangaroo is now. As in the harness, the state at
+--  this tick is unchanged; the new leg governs from the next tick.
+--  Returns nil, or a reason when the turned schedule cannot be built.
+local function contain(t, kn, ke)
+    if zone == nil then
+        return nil
+    end
+    local leg = target_legs_now[active_index(t)]
+    local turned = zone_mod.contain_heading(zone, kn, ke, leg.heading_deg or 0.0,
+                                            leg.speed_ms or 0.0, dt_s,
+                                            cfg.fence.containment_margin_m)
+    if turned == nil then
+        return nil
+    end
+    local new_leg = zone_mod.turned_leg(leg, turned)
+    local built, reason = segs.make_segments({ new_leg }, kn, ke, cfg.geometry, t)
+    if built == nil then
+        return "fence turn: " .. tostring(reason)
+    end
+    segments = built
+    target_legs_now = { new_leg }
+    logger:write('HCTN', 't,TN,TE,Hdg', 'ffff', t, kn, ke, turned)
+    gcs:send_text(MAV_SEVERITY.INFO, string.format(
+        "HVAL: kangaroo turned at the fence, hdg %.0f", turned))
+    return nil
 end
 
 --- Each callback: the kangaroo at t, s. Returns kn, ke, kvn, kve or nil, why.
@@ -359,6 +428,10 @@ local function target_at(t)
     if kn == nil then
         -- state_at returns its failure reason in the second value.
         return nil, ke
+    end
+    local why = contain(t, kn, ke)
+    if why ~= nil then
+        return nil, why
     end
     return kn, ke, kvn, kve
 end
@@ -948,6 +1021,11 @@ local function anchor(now_ms, pos, vel)
         return false, why
     end
     origin = pos:copy()
+    local zone_ok, zone_why = build_zone()
+    if not zone_ok then
+        origin = nil
+        return false, zone_why
+    end
     t0_ms = now_ms
     algorithm_state = {}
     sent_alt_m = nil
@@ -1210,6 +1288,15 @@ end
 arms = load("sitl_arms")
 est_mod = load("harness_estimator")
 segs = load("harness_segments")
+if cfg.fence ~= nil then
+    zone_mod = load("harness_zone")
+    if zone_mod == nil then
+        return
+    end
+else
+    gcs:send_text(MAV_SEVERITY.WARNING,
+                  "HVAL: spec.json has no fence; the kangaroo is not contained")
+end
 
 -- Stop startup if a required module failed to load.
 if arms == nil or est_mod == nil or segs == nil then

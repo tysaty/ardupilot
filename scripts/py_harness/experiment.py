@@ -287,8 +287,54 @@ def validate_spec(spec):
 ZONE_OPTIONAL_FIELDS = ("height_m", "centre_n_m", "centre_e_m")
 
 
+#: Polygon zone (`ADR-012`): ``polygon_ne_m`` is ``[[n_m, e_m], ...]`` in the
+#: run's local frame, a convex polygon (the flight-test fence). It replaces
+#: the rectangle fields; a spec carrying both is refused.
+ZONE_POLYGON_FIELD = "polygon_ne_m"
+
+
+def zone_from_spec(zone_spec):
+    """The :class:`~zone.InclusionZone` a spec's ``zone`` block describes:
+    a :class:`~zone.PolygonZone` for ``polygon_ne_m``, a rectangle for
+    ``side_m``, or ``False`` (explicitly unbounded) for neither."""
+    from . import zone as zone_mod
+    zone_spec = zone_spec or {}
+    polygon = zone_spec.get(ZONE_POLYGON_FIELD)
+    if polygon is not None:
+        return zone_mod.PolygonZone(polygon)
+    if zone_spec.get("side_m") is None:
+        return False
+    return zone_mod.InclusionZone(
+        side_m=zone_spec["side_m"],
+        height_m=zone_spec.get("height_m"),
+        centre_n_m=zone_spec.get("centre_n_m") or 0.0,
+        centre_e_m=zone_spec.get("centre_e_m") or 0.0)
+
+
+def _validate_polygon_zone(zone_spec):
+    polygon = zone_spec[ZONE_POLYGON_FIELD]
+    clash = [name for name in ("side_m",) + ZONE_OPTIONAL_FIELDS
+             if zone_spec.get(name) is not None]
+    if clash:
+        raise SpecError("zone.%s is a polygon; it cannot also carry %s"
+                        % (ZONE_POLYGON_FIELD, ", ".join("zone." + c for c in clash)))
+    if not isinstance(polygon, (list, tuple)) or not all(
+            isinstance(v, (list, tuple)) and len(v) == 2
+            and all(isinstance(x, (int, float)) for x in v) for v in polygon):
+        raise SpecError("zone.%s must be a list of [n_m, e_m] number pairs"
+                        % ZONE_POLYGON_FIELD)
+    from . import zone as zone_mod
+    try:
+        zone_mod.PolygonZone(polygon)
+    except ValueError as exc:
+        raise SpecError("zone.%s: %s" % (ZONE_POLYGON_FIELD, exc))
+
+
 def _validate_zone(spec):
     zone_spec = spec.get("zone") or {}
+    if zone_spec.get(ZONE_POLYGON_FIELD) is not None:
+        _validate_polygon_zone(zone_spec)
+        return
     if zone_spec.get("side_m") is None:
         return
     height = zone_spec.get("height_m")
@@ -325,8 +371,10 @@ def _validate_composite_fit(spec):
     kangaroo = spec["kangaroo"]
     zone_spec = spec.get("zone") or {}
     side = zone_spec.get("side_m")
-    if side is None:
+    polygon = zone_spec.get(ZONE_POLYGON_FIELD)
+    if side is None and polygon is None:
         return
+    zone = zone_from_spec(zone_spec) if polygon is not None else None
     aircraft = spec["aircraft"]
     containment = zone_spec.get("containment_margin_m")
     if containment is None:
@@ -346,7 +394,15 @@ def _validate_composite_fit(spec):
         radius_m=kangaroo.get("radius_m", 150.0),
         length_m=kangaroo.get("length_m", 300.0),
         width_m=kangaroo.get("width_m", 150.0),
-        margin_m=margin, dt_s=aircraft["dt_s"])
+        margin_m=margin, dt_s=aircraft["dt_s"], zone=zone)
+    if not check["fits"] and zone is not None:
+        raise SpecError(
+            "kangaroo.composite is set but the schedule does not fit the "
+            "polygon zone: kangaroo.legs[%d] (%s) reaches %.1f m past a wall "
+            "moved %.1f m in at t = %.1f s (n = %.1f, e = %.1f). A composite "
+            "must fit without a containment turn (TASK-050)"
+            % (check["leg_index"], check["leg_mode"], check["worst_excursion_m"],
+               containment + margin, check["t_s"], check["n_m"], check["e_m"]))
     if not check["fits"]:
         raise SpecError(
             "kangaroo.composite is set but the schedule does not fit the "
@@ -453,16 +509,7 @@ def session_from_spec(spec):
 
     legs = [leg_tuple(leg) for leg in kangaroo["legs"]]
 
-    zone = None
-    if zone_spec.get("side_m") is None:
-        zone = False                      # explicitly unbounded
-    else:
-        from . import zone as zone_mod
-        zone = zone_mod.InclusionZone(
-            side_m=zone_spec["side_m"],
-            height_m=zone_spec.get("height_m"),
-            centre_n_m=zone_spec.get("centre_n_m") or 0.0,
-            centre_e_m=zone_spec.get("centre_e_m") or 0.0)
+    zone = zone_from_spec(zone_spec)      # False: explicitly unbounded
 
     return scenario.ScenarioSession(
         legs=legs,

@@ -240,17 +240,13 @@ class ScenarioSession:
             return
         tn, te = self.target_position()
         leg = self.current_leg()
-        speed = leg[3]
-        if speed <= 0.0:
+        # The whole rule lives on the zone (stationary, inside, or a no-op
+        # reflection all return None) so the vehicle's port is gated against it.
+        turned = self.zone.containment_heading_deg(
+            tn, te, leg[2], leg[3], self.config.dt_s,
+            margin_m=self.containment_margin_m)
+        if turned is None:
             return
-        heading = leg[2]
-        margin = self.containment_margin_m
-        if not self.zone.would_exit(tn, te, heading, speed, self.config.dt_s,
-                                    margin_m=margin):
-            return
-        turned = self.zone.reflect_heading_deg(tn, te, heading, margin_m=margin)
-        if abs((turned - heading + 180.0) % 360.0 - 180.0) < 1e-9:
-            return          # reflection changed nothing; do not log a no-op
         self.containment_events.append(self.t_s)
         self.apply_change(heading_deg=turned, source="zone")
 

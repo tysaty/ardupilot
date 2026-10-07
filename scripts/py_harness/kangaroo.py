@@ -722,7 +722,7 @@ def composite_legs(speed_ms, start_range_m, radius_m, length_m, width_m,
 
 def schedule_fits(legs, start, side_m, containment_m, radius_m=150.0,
                   length_m=300.0, width_m=150.0, margin_m=COMPOSITE_MARGIN_M,
-                  dt_s=0.1, centre=(0.0, 0.0)):
+                  dt_s=0.1, centre=(0.0, 0.0), zone=None):
     """Sample a schedule at the tick and check it stays inside the contained
     region of a square zone, with ``margin_m`` to spare (`TASK-050`).
 
@@ -737,8 +737,15 @@ def schedule_fits(legs, start, side_m, containment_m, radius_m=150.0,
     ``worst_excursion_m`` (how far the worst sample lies beyond the usable
     region; negative is clearance), ``leg_index``, ``leg_mode``, ``t_s``,
     ``n_m``, ``e_m`` of that sample, and ``samples``.
+
+    ``zone``, a :class:`~zone.PolygonZone` (`ADR-012`), checks against the
+    polygon instead: each wall moved ``containment_m + margin_m`` in, the
+    excursion the worst sample's distance past the nearest such wall;
+    ``side_m`` and ``centre`` are then unused and ``half_m`` is ``None``.
     """
-    half = contained_half_m(side_m, containment_m, margin_m)
+    half = (None if zone is not None
+            else contained_half_m(side_m, containment_m, margin_m))
+    inset = float(containment_m) + float(margin_m)
     segments = make_segments(legs, start[0], start[1], radius_m, length_m,
                              width_m)
     kangaroo = segments_callable(segments)
@@ -748,7 +755,10 @@ def schedule_fits(legs, start, side_m, containment_m, radius_m=150.0,
     for i in range(steps + 1):
         t = min(i * dt_s, total)
         n, e, _vn, _ve = kangaroo(t)
-        excursion = max(abs(n - centre[0]), abs(e - centre[1])) - half
+        if zone is not None:
+            excursion = inset - min(zone.inward_distances(n, e))
+        else:
+            excursion = max(abs(n - centre[0]), abs(e - centre[1])) - half
         if worst is None or excursion > worst[0]:
             worst = (excursion, t, n, e)
     # Attribute a sample on a leg boundary to the leg that ENDED there: it is
