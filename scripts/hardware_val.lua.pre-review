@@ -4,7 +4,7 @@
 -- Concept
 -- Choose the flight mode 'arm' by name through sitl_arms. Every arm already meets
 --     entry(snapshot, cfg) -> {guidance_n_m, guidance_e_m, algorithm_state} | error: nil, reason
---     and sitl_arms.resolve(name) maps a name to it.
+--     and sitl_arms.resolve(name) maps a name to it. 
 --
 --     Arm       Name                            Lua                                      Needs
 --     Baseline  dubins_target_orbit (or _hyst)  sitl_arms adapter over harness_cs_orbit  target or estimate
@@ -15,23 +15,17 @@
 --   * Write it from shared code, not copies: heading_from, command, release,
 --     log_tick and anchor exist twice already (runner and demo). Lift them into
 --     one module (say sitl_vehicle_io.lua) that all three scripts require.
---     (2026-10-04: still copies; the copies below follow the runner's
---     sitl_harness_runner.lua line for line so the tick is the runner's tick.)
 --
--- SD card requirements (APM/ on the card; HARDWARE_VAL_BOOT_REVIEW.md)
--- APM/scripts/hardware_val.lua
--- APM/scripts/spec.json            generated, never typed (ADR-011)
--- APM/scripts/modules/: sitl_spec.lua, sitl_arms.lua and the HARNESS_MODULES
--- files (harness_geom, harness_dubins, harness_orbit, harness_cs_orbit,
--- harness_kangaroo, harness_segments, harness_estimator, harness_adaptive_db,
--- harness_carrot_shift; harness_adaptive_horizon and harness_rh_geometric
--- only if sitl_arms is asked for arms B or C).
--- Nothing else may be in APM/scripts/: every .lua there runs.
+-- SD card requireements
+-- scripts/hardware_val.lua; 
+-- scripts/modules/: sitl_arms.lua, 
+-- the HARNESS_MODULES files (harness_geom, harness_dubins, harness_orbit,
+-- harness_cs_orbit, harness_kangaroo, harness_segments, harness_estimator,
+-- harness_adaptive_dbm harness_carrot_shift, sitl_adsb.lua, the config
+-- module). 
 
 -- SITL demo used: SCR_VM_I_COUNT 1000000 and SCR_HEAP_SIZE 2 MiB,
--- Arm A implementation was 252k to 846k instructions per tick range.
--- On a flight controller SCR_HEAP_SIZE is limited to 1 MiB by its range and
--- by the board's RAM; measure heap and instructions on the bench (rung 2).
+-- Arm A implementation was 252k to 846k instructions per tick range. 
 --
 -- Validation ladder (the same file all the way):
 --   1. SITL: a KangarooFollowHardwareVal autotest modelled on KangarooFollowDemo,
@@ -47,12 +41,13 @@
 --   the Python and SITL runs.
 
 -- ============================================================
--- 1. Configuration
+-- 1. Configuration 
 -- ============================================================
 -- PLAN: do not retype constants. demo.py --stage --campaign <CAMP-002>
 -- --cell A-straight-constant-half --look-ahead-m 30 already writes
--- spec.json from a campaign cell's spec (cfg, dt_s, estimate,
--- lookahead_steps, estimator noise) (ADR-011).
+-- kangaroo_demo_cfg.lua from a campaign cell's spec (cfg, dt_s, estimate,
+-- lookahead_steps, estimator noise). Copy it to modules/ (or add a
+-- --stage-hardware variant) and require it.
 
 -- PLAN: live settings as a parameter table, like SHR_ / KDEM_: HVAL_ENABLE
 -- (default 0), HVAL_ARM (0 baseline, 1 A, 2 F), HVAL_OUT (0 shadow, 1 active),
@@ -64,20 +59,20 @@
 -- Target-data timeout, test boundary, nominal update interval.
 -- Recovery policy for each fault type.
 -- Default experimental guidance to DISABLED.
+-- initialising values
 
-local MAV_SEVERITY = { ERROR = 3, WARNING = 4, INFO = 6 }
+local arms, est_mod, demo, cfg
 
--- Modules, declared here so every function below sees them as upvalues;
--- assigned in section 12 through load() (fix 6, 2026-10-04).
-local arms, est_mod, segs
+arms = load("sitl_arms")
+est_mod = load("harness_estimator")
+ARM_NAMES = { [0] = "dubins_target_orbit", [1] = "adaptive_db_circle", [2] = "carrot_shift_cs" }
+
+
 
 local state = {
-    enabled = false,          -- engaged: anchored and computing
+    enabled = false,
     active_algorithm = nil,
     fault_latched = false,
-    fault_reason = nil,
-    owns_guidance = false,    -- a heading/altitude command may be in effect
-    switch_was_low = false,   -- engagement needs the switch seen low first
     path = nil,
     point_index = 1,
     last_update_ms = nil,
@@ -102,11 +97,7 @@ local state = {
 --   cfg.cs_sense_margin_m       orbit-sense margin, m     (was HVAL_SO_MARGIN)
 --   cfg.orbit_precompensate     R / cos(L / R) carrot ring (was HVAL_SO_PRECOMP)
 --   cfg.airspeed_ms             the airspeed the geometry assumes (was HVAL_SO_ASPD)
---   cfg.af_step_ticks           arm F's carrot lead, whole ticks of dt_s
 --   cfg.dt_s                    nominal update interval, s (0.1)
---   cfg.duration_s              run length, s; the run ends (released) after it
---   cfg.legs, cfg.geometry, cfg.target_n_m, cfg.target_e_m
---                               the virtual kangaroo's schedule (HVAL_TGT 1)
 --   cfg.bank_limit_deg          the bank the configuration was built for
 --   cfg.roll_limit_deg          the ROLL_LIMIT_DEG it must be flown at (60)
 --
@@ -125,7 +116,7 @@ end
 if cfg == nil then
     -- start disabled and say why; never fall back to typed defaults
     state.fault_latched = true
-    gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: no configuration: " .. tostring(cfg_where))
+    gcs:send_text(3, "HVAL: no configuration: " .. tostring(cfg_where))
 end
 
 --- ADR-011 gate for section 5: true only when the live ROLL_LIMIT_DEG is the
@@ -156,7 +147,7 @@ end
 --[[
     // @Param: HVAL_ENABLE
     // @DisplayName: Hardware validation enable
-    // @Description: Master enable for experimental guidance. 0 (default): nothing is computed or commanded, and a latched fault is cleared. 1: the script may engage when every gate in section 5 passes, including the HVAL_ACT_FN switch and the ROLL_LIMIT_DEG check against spec.json; both this and the switch are required. Set to 0 at every boot.
+    // @Description: Master enable for experimental guidance. 0 (default): nothing is computed or commanded. 1: the script may engage when every gate in section 5 passes, including the HVAL_ACT_FN switch and the ROLL_LIMIT_DEG check against spec.json; both this and the switch are required.
     // @Values: 0:Disabled,1:Enabled
 --]]
 local HVAL_ENABLE = bind("ENABLE", 1, 0)
@@ -164,7 +155,7 @@ local HVAL_ENABLE = bind("ENABLE", 1, 0)
 --[[
     // @Param: HVAL_ARM
     // @DisplayName: Hardware validation arm
-    // @Description: Guidance law, resolved by name through sitl_arms (ARM_NAMES below). Must name the arm spec.json was staged for (cfg.algorithm, or its _hyst form, which is then flown): each arm's spec carries its own estimate and lookahead_steps. Read only while disengaged.
+    // @Description: Guidance law, resolved by name through sitl_arms (ARM_NAMES below). Must name the arm spec.json was staged for (cfg.algorithm): each arm's spec carries its own estimate and lookahead_steps. Read only while disengaged.
     // @Values: 0:Baseline (dubins_target_orbit),1:Arm A (adaptive_db_circle),2:Arm F (carrot_shift_cs)
 --]]
 local HVAL_ARM = bind("ARM", 2, 0)
@@ -180,7 +171,7 @@ local HVAL_OUT = bind("OUT", 3, 0)
 --[[
     // @Param: HVAL_TGT
     // @DisplayName: Hardware validation target source
-    // @Description: 0 virtual stationary point at the spec's target start and 1 virtual moving target on the spec's legs (harness_segments, as the campaign runner), both in the anchor's north/east frame; 2 live target from AP_Follow (FOLL_SYSID), not implemented yet and refused.
+    // @Description: 0 virtual stationary point and 1 virtual moving target (harness_segments, as the demo), placed relative to the anchor at engagement; 2 live target from AP_Follow (FOLL_SYSID).
     // @Values: 0:Virtual point,1:Virtual moving,2:Live
 --]]
 local HVAL_TGT = bind("TGT", 4, 0)
@@ -197,7 +188,7 @@ local HVAL_ALT_M = bind("ALT_M", 5, (cfg and cfg.alt_m) or 60)
 --[[
     // @Param: HVAL_ACT_FN
     // @DisplayName: Hardware validation activation switch
-    // @Description: RCx_OPTION scripting function whose switch engages the experimental guidance (high) and disengages it (low), as FOLLP_ACT_FN in plane_follow.lua. 300 to 307 are the Scripting1 to Scripting8 aux functions. The switch must be seen low before each engagement.
+    // @Description: RCx_OPTION scripting function whose switch engages the experimental guidance (high) and disengages it (low), as FOLLP_ACT_FN in plane_follow.lua. 300 to 307 are the Scripting1 to Scripting8 aux functions.
     // @Range: 300 307
 --]]
 local HVAL_ACT_FN = bind("ACT_FN", 6, 303)
@@ -205,7 +196,7 @@ local HVAL_ACT_FN = bind("ACT_FN", 6, 303)
 --[[
     // @Param: HVAL_BOUND_M
     // @DisplayName: Hardware validation boundary
-    // @Description: Radius of the circular test area centred on the anchor, metres. The aircraft or a guidance point outside it is a fault (section 7). Must fit inside the approved test area.
+    // @Description: Half-side of the square test box centred on the anchor, metres. A guidance point or a virtual target outside it is a fault (section 7). Must fit inside the approved test area.
     // @Range: 100 2000
     // @Units: m
 --]]
@@ -214,7 +205,7 @@ local HVAL_BOUND_M = bind("BOUND_M", 7, 400)
 --[[
     // @Param: HVAL_TGT_TMO
     // @DisplayName: Hardware validation target timeout
-    // @Description: A live target sample older than this is stale: the script disengages (or refuses to engage) and latches a fault. Measured from follow:get_last_update_ms(). Unused until HVAL_TGT 2 is implemented.
+    // @Description: A live target sample older than this is stale: the script disengages (or refuses to engage) and latches a fault. Measured from follow:get_last_update_ms().
     // @Range: 0.2 10
     // @Units: s
 --]]
@@ -235,15 +226,9 @@ local ARM_NAMES = {
     [1] = "adaptive_db_circle",
     [2] = "carrot_shift_cs",
 }
--- Arms that read the estimate (requires_estimate in algorithms.py), and the
--- arm that owns its lead, so a state-side lookahead_steps would lead twice.
-local NEEDS_ESTIMATE = { adaptive_db_circle = true, carrot_shift_cs = true }
-local OWNS_HORIZON = { carrot_shift_cs = true }
 
 -- Nominal update interval: cfg.dt_s (0.1 s), not a parameter: the
 -- estimator and arm A's horizon count in ticks of it.
-local dt_s = (cfg and cfg.dt_s) or 0.1
-local period_ms = math.floor(dt_s * 1000 + 0.5)
 
 -- ============================================================
 -- 2. INPUTS AND AIRCRAFT STATE
@@ -258,38 +243,26 @@ local period_ms = math.floor(dt_s * 1000 + 0.5)
 -- Treat missing/invalid inputs explicitly; never substitute zero.
 -- Use a consistent local North/East frame for geometry.
 
--- ArduPilot parameters this script reads
+-- ArduPilot parameters this script reads 
 local AIRSPEED_MIN = Parameter('AIRSPEED_MIN')
 local ROLL_LIMIT_DEG = Parameter('ROLL_LIMIT_DEG')
 local GRAVITY_MSS = 9.80665
 -- The requested turn radius is cfg.turn_radius_m from spec.json (ADR-011),
 -- no longer a parameter (was HVAL_RHO_M).
 
---- Below this ground speed, m/s, the course is undefined and the yaw is
---  used: the runner's and the demo's threshold (vn^2 + ve^2 < 1).
-local STANDOFF_MIN_COURSE_SPEED = 1.0
 
--- When the aircraft is not moving - the standoff course needs to be the
+-- When the aircraft is not moving - the standoff course needs to be the 
 -- ground course from the NED velocity (the direction of motion), or the yaw
--- when the aircraft is not moving. Same result as the runner's
--- heading_from(vel), including cfg.heading_source "yaw".
+-- when the aircraft is not moving
 local function course(vel)
-   local yaw = ahrs:get_yaw_rad()
-   if vel ~= nil and (cfg == nil or cfg.heading_source ~= "yaw") then
+   if vel ~= nil then
       local vn, ve = vel:x(), vel:y()
+      -- define STANDOFF_MIN_COURSE_SPEED
       if (vn * vn + ve * ve) >= (STANDOFF_MIN_COURSE_SPEED * STANDOFF_MIN_COURSE_SPEED) then
-         return math.atan(ve, vn), yaw
+         return math.atan(ve, vn)
       end
    end
-   return yaw, yaw
-end
-
---- True airspeed, m/s, or nil. The radius floor (section 7) is a TAS
---  quantity; ahrs:airspeed_estimate() is EAS.
-local function true_airspeed()
-    local eas = ahrs:airspeed_estimate()
-    if eas == nil then return nil end
-    return eas * ahrs:get_EAS2TAS()
+   return ahrs:get_yaw_rad()
 end
 
 -- ============================================================
@@ -305,9 +278,6 @@ end
 -- PLAN: harness_estimator.new / update / predict in the runner's order. Call
 -- update only on a new sample, with the measured dt since the last one. A gets
 -- target_est (projected) only; F gets target_est_raw only (no double lead).
--- (2026-10-04: virtual targets produce a sample every tick, so the update is
--- every tick with the nominal dt_s, exactly as the runner and the Python
--- harness; the measured dt matters only for HVAL_TGT 2.)
 
 -- PLAN: with a live target the baseline has no "truth": decide whether it
 -- steers on the measurement or the raw estimate, and record it.
@@ -317,70 +287,30 @@ end
 -- Update estimator only when an accepted measurement arrives.
 -- Predict to the required horizon using measured elapsed time.
 
--- Run state, set by anchor() at engagement (section 10).
-local origin = nil          -- Location at the anchor
-local t0_ms = nil
-local segments = nil        -- the virtual kangaroo's schedule
-local estimator = nil
+-- Once at test start, using the demo's existing helpers:
+local s = settings()
 
---- The virtual kangaroo's legs for HVAL_TGT, in the spec's frame (target
---  start cfg.target_n_m / cfg.target_e_m north/east of the anchor).
-local function target_legs()
-    local source = math.floor(HVAL_TGT:get() + 0.5)
-    if source == 0 then
-        return { { duration_s = cfg.duration_s, mode = "point",
-                   heading_deg = 0.0, speed_ms = 0.0 } }
-    end
-    if source == 1 then
-        return cfg.legs
-    end
-    return nil, "HVAL_TGT " .. tostring(source) .. ": live target not implemented"
+if not rebuild(0.0, kn, ke, legs_for(s), s, 0) then
+    return false, "could not build virtual target"
 end
 
---- Build the schedule once at test start (replaces the demo's
---  settings()/rebuild() at the top level, fix 3).
-local function build_target()
-    local legs, why = target_legs()
-    if legs == nil then
-        return false, why
-    end
-    local built, reason = segs.make_segments(legs, cfg.target_n_m, cfg.target_e_m,
-                                             cfg.geometry, 0.0)
-    if built == nil then
-        return false, "could not build virtual target: " .. tostring(reason)
-    end
-    segments = built
-    return true
+-- Each callback:
+local t = (now_ms - t0_ms) * 0.001
+
+local kn, ke, kvn, kve = segs.state_at(segments, t)
+
+if kn == nil then
+    -- state_at returns its failure reason in the second value.
+    return nil, ke
 end
 
---- Each callback: the kangaroo at t, s. Returns kn, ke, kvn, kve or nil, why.
-local function target_at(t)
-    local kn, ke, kvn, kve = segs.state_at(segments, t)
-    if kn == nil then
-        -- state_at returns its failure reason in the second value.
-        return nil, ke
-    end
-    return kn, ke, kvn, kve
-end
-
---- Estimator, exactly the runner's sequence: update, then project.
---  Returns est_proj, est_raw (both nil when cfg.estimate is off).
-local function estimate(kn, ke)
-    if estimator == nil then
-        return nil, nil
-    end
-    local out = estimator:update(kn, ke, dt_s)
-    if out == nil then
-        return nil, nil
-    end
-    local est_raw = { n_m = out.x, e_m = out.y, vn_ms = out.vx, ve_ms = out.vy }
-    local est_proj = est_mod.predict(est_raw, dt_s, cfg.lookahead_steps or 0)
-    return est_proj, est_raw
-end
+local sample_ms = now_ms
 
 -- ============================================================
 -- 4. PATH RESET AND ALGORITHM SWITCHING
 -- ============================================================
+
+
 
 -- Debounce selection inputs.
 -- Initially accept algorithm changes only while disabled.
@@ -390,44 +320,29 @@ end
 -- algorithms selection
 local algorithm_state = {}
 local active_arm = nil
-local active_name = nil
 local entry = nil
+
+-- arm settings
+local ARM_NAMES = {
+    [0] = "dubins_target_orbit",
+    [1] = "adaptive_db_circle",
+    [2] = "carrot_shift_cs",
+}
+
+
 
 -- PLAN: reset = algorithm_state = {} plus estimator re-init, all the demo's
 -- anchor() does; the arms carry no other state.
 local function reset_path()
     state.path = nil
     state.point_index = 1
-    algorithm_state = {}
-    estimator = nil
-    segments = nil
-    origin = nil
-end
-
---- The name to fly for HVAL_ARM: cfg.algorithm when it is that arm or its
---  _hyst form; otherwise a refusal (the spec carries the arm's estimator
---  settings, so another arm would fly with the wrong ones).
-local function spec_name_for(requested)
-    local base = ARM_NAMES[requested]
-    if base == nil then
-        return nil, "unknown algorithm ID " .. tostring(requested)
-    end
-    if cfg.algorithm ~= base and cfg.algorithm ~= base .. "_hyst" then
-        return nil, string.format("HVAL_ARM %s is %s but spec.json is %s",
-                                  tostring(requested), base, tostring(cfg.algorithm))
-    end
-    if NEEDS_ESTIMATE[base] and not cfg.estimate then
-        return nil, base .. " needs the estimator (spec estimate false)"
-    end
-    if OWNS_HORIZON[base] and (cfg.lookahead_steps or 0) ~= 0 then
-        return nil, base .. " owns its lead: spec lookahead_steps must be 0"
-    end
-    return cfg.algorithm
+    -- Clear controller_busy and algorithm-specific cached geometry.
+    -- Reset estimator only when required by the test protocol.
 end
 
 -- select the algorithm
 local function select_algorithm()
-    local requested = math.floor(HVAL_ARM:get() + 0.5)
+    local requested = HVAL_ARM:get()
 
     if requested == active_arm then
         return true
@@ -438,9 +353,9 @@ local function select_algorithm()
         return false, "disable before changing algorithm"
     end
 
-    local name, why = spec_name_for(requested)
+    local name = ARM_NAMES[requested]
     if name == nil then
-        return false, why
+        return false, "unknown algorithm ID"
     end
 
     local resolved, reason = arms.resolve(name)
@@ -450,10 +365,9 @@ local function select_algorithm()
 
     entry = resolved
     active_arm = requested
-    active_name = name
     reset_path()
 
-    gcs:send_text(MAV_SEVERITY.INFO, "HVAL: selected " .. name)
+    gcs:send_text(6, "HVAL: selected " .. name)
     return true
 end
 
@@ -475,26 +389,19 @@ end
 
 local MODE_GUIDED = 15
 
---- Activation switch position: true high, false low or unavailable.
-local function switch_high()
-    local act_fn = math.floor(HVAL_ACT_FN:get() + 0.5)
-    if act_fn <= 0 then
-        return false, "activation switch not configured"
-    end
-    if not rc:has_valid_input() or rc:get_aux_cached(act_fn) ~= 2 then
-        return false, "pilot activation unavailable/off"
-    end
-    return true
-end
-
 local function can_engage(aircraft_valid, flight_ready, target_fresh)
     if HVAL_ENABLE:get() ~= 1 then
         return false, "disabled"
     end
 
-    local high, why = switch_high()
-    if not high then
-        return false, why
+    local act_fn = HVAL_ACT_FN:get()
+    if act_fn == nil or act_fn <= 0 then
+        return false, "activation switch not configured"
+    end
+
+    if not rc:has_valid_input()
+        or rc:get_aux_cached(act_fn) ~= 2 then
+        return false, "pilot activation unavailable/off"
     end
 
     if not arming:is_armed() then
@@ -521,14 +428,8 @@ local function can_engage(aircraft_valid, flight_ready, target_fresh)
         return false, "fault latched"
     end
 
-    if entry == nil or math.floor(HVAL_ARM:get() + 0.5) ~= active_arm then
+    if entry == nil or HVAL_ARM:get() ~= active_arm then
         return false, "algorithm not ready"
-    end
-
-    -- ADR-011 bank-limit gate (fix 12)
-    local roll_ok, roll_msg = roll_limit_ok()
-    if not roll_ok then
-        return false, roll_msg
     end
 
     return true
@@ -544,11 +445,19 @@ end
 --
 -- Keep servo, throttle and vehicle-mode commands out of algorithms.
 
+   local snapshot = { t_s = t, plane_n_m = pn, plane_e_m = pe, plane_hdg_rad = hdg,
+    target_n_m = kn, target_e_m = ke, target_vn_ms = kvn, target_ve_ms = kve,
+     algorithm_state = algorithm_state, target_est = est_proj, target_est_raw = est_raw }
+   
+     -- entry = arms.resolve(ARM_NAMES[HVAL_ARM])
+
+--
+
 local function compute_guidance(
     t, pn, pe, hdg, kn, ke, kvn, kve, est_proj, est_raw)
 
     if entry == nil then
-        return nil, "no algorithm selected"
+        return nil, pcall(require, "no algorithm selected")
     end
 
     return entry({
@@ -650,8 +559,6 @@ end
 -- section 7: the smallest turn radius the bank limit allows at this airspeed.
 -- The heading command is sent with acceleration g*tan(ROLL_LIMIT_DEG) (runner's
 -- command()), so ROLL_LIMIT_DEG is the only bank limit; no fixed 10 m/s/s cap.
--- (Not called: validate_guidance() applies the floor and refuses rather than
--- substituting it. Kept for the AIRSPEED_MIN variant of the floor.)
 
 local warned_rho = false
 
@@ -711,24 +618,18 @@ local MAV_CMD_GUIDED_CHANGE_HEADING = 43002
 local MAV_FRAME_GLOBAL = 0
 local MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
 local HEADING_TYPE_COG = 0
-local HEADING_TYPE_DEFAULT = 2      -- hand heading back to GUIDED's own navigation
-local ALT_CHANGE_RATE = 1000.0      -- the runner's and plane_follow.lua's rate cap
-
---- gcs:run_command_int returns a MAV_RESULT integer, not a boolean, and 0
---  (MAV_RESULT_ACCEPTED) is true in Lua like every other number: test it.
-local MAV_RESULT_ACCEPTED = 0
-local function command_accepted(result)
-    return result == MAV_RESULT_ACCEPTED
-end
 
 -- Cache the last accepted altitude command.
 -- Clear this cache on release or a new engagement.
 local sent_alt_m = nil
 
+-- Track whether experimental commands may be controlling the aircraft.
+state.owns_guidance = false
+
 local function send_guidance(
     result, pn, pe, aircraft_valid, flight_ready, target_fresh)
 
-    local output_mode = math.floor(HVAL_OUT:get() + 0.5)
+    local output_mode = HVAL_OUT:get()
 
     -- SHADOW: the update loop still computes, validates and logs.
     -- This function sends no flight commands in shadow mode.
@@ -748,7 +649,7 @@ local function send_guidance(
     -- ACTIVE: result must already have passed section 7.
     -- Recheck pilot authority and engagement gates before commands.
     local allowed, reason =
-        can_engage(aircraft_valid, flight_ready, target_fresh)
+        can_engage(aircraft_valid, flight_ready, target_fresh, roll_limit_ok)
 
     if not allowed then
         return false, reason
@@ -787,12 +688,12 @@ local function send_guidance(
     -- PLAN: GUIDED_CHANGE_ALTITUDE once per engagement.
     -- Resend only if the requested altitude changes.
     if sent_alt_m ~= alt_m then
-        local accepted = command_accepted(
+        local accepted =
             gcs:run_command_int(MAV_CMD_GUIDED_CHANGE_ALTITUDE, {
                 frame = MAV_FRAME_GLOBAL_RELATIVE_ALT,
-                p3 = ALT_CHANGE_RATE, -- Demo's rate cap; review for the aircraft.
+                p3 = 1000.0, -- Demo's rate cap; review for the aircraft.
                 z = alt_m,
-            }))
+            })
 
         -- Check acceptance; caller logs rejection and handles the fault.
         if not accepted then
@@ -807,13 +708,13 @@ local function send_guidance(
 
     -- PLAN: GUIDED_CHANGE_HEADING as course over ground (COG).
     -- Send the current guidance course each active callback.
-    local accepted = command_accepted(
+    local accepted =
         gcs:run_command_int(MAV_CMD_GUIDED_CHANGE_HEADING, {
             frame = MAV_FRAME_GLOBAL,
             p1 = HEADING_TYPE_COG,
             p2 = course_deg,
             p3 = acceleration,
-        }))
+        })
 
     -- Return rejection to section 9.
     -- Section 10 must record the reason before the callback exits.
@@ -822,17 +723,6 @@ local function send_guidance(
     end
 
     return true, "active"
-end
-
---- Hand the heading back to GUIDED's own navigation (the runner's release()),
---  or the aircraft keeps steering the last course it was sent. Only while
---  still in GUIDED: in any other mode the GUIDED heading is already gone.
-local function release()
-    if state.owns_guidance and vehicle:get_mode() == MODE_GUIDED then
-        gcs:run_command_int(MAV_CMD_GUIDED_CHANGE_HEADING,
-                            { frame = MAV_FRAME_GLOBAL, p1 = HEADING_TYPE_DEFAULT })
-    end
-    sent_alt_m = nil
 end
 
 
@@ -850,7 +740,10 @@ end
 --
 -- A crashed script cannot execute its own recovery logic.
 -- Validate that case separately; this handler covers detected faults.
--- A latched fault is cleared only by HVAL_ENABLE 0 (section 11).
+
+-- Deliberately unset here: recovery depends on your test procedure.
+
+local RECOVERY_MODE = HVAL_FAIL_MODE:get()
 
 local function handle_fault(reason)
     -- Report and attempt recovery once per latched fault.
@@ -862,11 +755,10 @@ local function handle_fault(reason)
 
     state.fault_latched = true
     state.enabled = false
-    state.switch_was_low = false
     state.fault_reason = tostring(reason)
     sent_alt_m = nil
 
-    gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: fault: " .. state.fault_reason)
+    gcs:send_text(3, "HVAL: fault: " .. state.fault_reason)
 
     -- Shadow faults need no flight-mode change.
     if not owned_guidance then
@@ -879,40 +771,22 @@ local function handle_fault(reason)
         return
     end
 
-    -- Read when needed, so a change on the ground takes effect (fix 13).
-    local recovery_mode = math.floor(HVAL_FAIL_MODE:get() + 0.5)
-    if recovery_mode <= 0 or recovery_mode == MODE_GUIDED then
-        gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: recovery mode not configured")
-        -- Previous commands may remain effective in GUIDED: hand back.
-        release()
+    if RECOVERY_MODE == nil or RECOVERY_MODE == MODE_GUIDED then
+        gcs:send_text(3, "HVAL: recovery mode not configured")
+        -- Previous commands may remain effective in GUIDED.
         return
     end
 
-    local accepted = vehicle:set_mode(recovery_mode)
+    local accepted = vehicle:set_mode(RECOVERY_MODE)
 
-    if not accepted or vehicle:get_mode() ~= recovery_mode then
-        gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: recovery mode change failed")
-        release()
+    if not accepted or vehicle:get_mode() ~= RECOVERY_MODE then
+        gcs:send_text(3, "HVAL: recovery mode change failed")
         -- Retain ownership flag: release has not been confirmed.
         return
     end
 
     state.owns_guidance = false
-    gcs:send_text(MAV_SEVERITY.WARNING, "HVAL: recovery mode entered")
-end
-
---- End an engagement that is not a fault: switch low, HVAL_ENABLE 0, the
---  pilot or a failsafe leaving GUIDED, or the end of cfg.duration_s. Hands
---  the heading back, and the switch must be cycled to engage again.
-local function disengage(reason)
-    if not state.enabled then
-        return
-    end
-    release()
-    state.owns_guidance = false
-    state.enabled = false
-    state.switch_was_low = false
-    gcs:send_text(MAV_SEVERITY.WARNING, "HVAL: disengaged: " .. tostring(reason))
+    gcs:send_text(4, "HVAL: recovery mode entered")
 end
 
 -- ============================================================
@@ -930,177 +804,102 @@ end
 -- Log all switching, engagement, disengagement and fault events.
 -- Rate-limit ground-station text; retain detailed onboard logs.
 
-local PHASE_CODE = { approach = 0, orbit = 1 }
-local DIR_CODE = { cw = 1, ccw = -1 }
+-- section 10, written once (where anchor() runs)
+logger:write('HANC', 't0ms,Lat,Lng,Alt,Hdg,Yaw,AltCmd', 'Iiiffff',
+             now_ms, origin:lat(), origin:lng(),
+             origin:alt() * 0.01,        -- actual altitude of the anchor, m (absolute)
+             hdg, yaw,
+             HVAL_ALT_M:get())  -- commanded altitude, m above home
 
-local function num(v)
-    if v == nil then return 0.0 end
-    if v == true then return 1.0 end
-    if v == false then return 0.0 end
-    return v
-end
-
---- Anchor the run at engagement (fix 5): origin, clock, estimator, target
---  schedule, then HANC once, as the runner's anchor().
-local function anchor(now_ms, pos, vel)
-    local ok, why = build_target()
-    if not ok then
-        return false, why
-    end
-    origin = pos:copy()
-    t0_ms = now_ms
-    algorithm_state = {}
-    sent_alt_m = nil
-    estimator = nil
-    if cfg.estimate then
-        estimator = est_mod.new(cfg.estimator.process_noise,
-                                cfg.estimator.measurement_noise)
-        estimator:init(cfg.target_n_m, cfg.target_e_m)
-    end
-    state.run_id = state.run_id + 1
-    local hdg, yaw = course(vel)
-    logger:write('HANC', 't0ms,Lat,Lng,Alt,Hdg,Yaw,AltCmd', 'Iiiffff',
-                 now_ms, origin:lat(), origin:lng(),
-                 origin:alt() * 0.01,        -- actual altitude of the anchor, m (absolute)
-                 hdg, yaw,
-                 HVAL_ALT_M:get())           -- commanded altitude, m above home
-    gcs:send_text(MAV_SEVERITY.WARNING, string.format(
-        "HVAL: run %d engaged, %s, %s, hdg %.0f deg", state.run_id,
-        tostring(active_name), HVAL_OUT:get() == 1 and "active" or "shadow",
-        math.deg(hdg)))
-    return true
-end
-
---- The runner's per-tick rows, unchanged, plus HVAL.
-local function log_tick(t, pn, pe, hdg, kn, ke, kvn, kve, gn, ge,
-                        est_proj, est_raw, st, vel, yaw, status)
-    logger:write('HREC', 't,PN,PE,PHdg,TN,TE,TVN,TVE,GN,GE', 'ffffffffff',
-                 t, pn, pe, hdg, kn, ke, kvn, kve, gn, ge)
-    if est_proj ~= nil then
-        logger:write('HEST', 't,EN,EE,EVN,EVE,RN,RE,RVN,RVE', 'fffffffff',
-                     t, est_proj.n_m, est_proj.e_m, est_proj.vn_ms, est_proj.ve_ms,
-                     est_raw.n_m, est_raw.e_m, est_raw.vn_ms, est_raw.ve_ms)
-    end
-    st = st or {}
-    logger:write('HALG', 't,Ph,Dir,Cur,Rep,Tsr,Held,Sw,K,Ring', 'ffffffffff',
-                 t, num(PHASE_CODE[st.phase]), num(DIR_CODE[st.direction]),
-                 num(st.curvature), num(st.replanned), num(st.ticks_since_replan),
-                 num(st.sense_held), num(st.sense_switched),
-                 num(st.k_steps or st.k_horizon), num(st.ring_angle_rad))
-    local wind = ahrs:wind_estimate()
-    local aspd = ahrs:airspeed_estimate() or 0.0
-    local roll = ahrs:get_roll_rad()
-    local gvn, gve = 0.0, 0.0
-    if vel ~= nil then gvn, gve = vel:x(), vel:y() end
-    local wn, we = 0.0, 0.0
-    if wind ~= nil then wn, we = wind:x(), wind:y() end
-    logger:write('HAIR', 't,AS,GVN,GVE,WN,WE,Yaw,Roll,Crs', 'fffffffff',
-                 t, aspd, gvn, gve, wn, we, yaw, roll, hdg)
-    -- HVAL: run, arm, output mode, target source, status (1 command accepted
-    -- or shadow, 0 refused), arm F's carrot lead in s (0 for other arms)
-    logger:write('HVAL', 't,Run,Arm,Out,Tgt,Ok,Lead', 'fffffff',
-                 t, state.run_id, num(active_arm), HVAL_OUT:get(), HVAL_TGT:get(),
-                 status and 1.0 or 0.0, num(st.carrot_lead_s))
-end
+             
 
 -- ============================================================
 -- 11. UPDATE CALLBACK
 -- ============================================================
 -- PLAN: this order already matches the runner's step().
-local function step(now_ms)
+local function update()
     -- 1. Read time, controls and aircraft state.
-    local pos = ahrs:get_location()
-    local vel = ahrs:get_velocity_NED()
-    local mode = vehicle:get_mode()
-    local armed = arming:is_armed()
-    local true_airspeed_ms = true_airspeed()
-    local aircraft_valid = (pos ~= nil and vel ~= nil)
+    local now_ms = millis():tofloat()
 
-    -- Switch low arms the next engagement; low while engaged ends it.
-    local high = switch_high()
-    if not high then
-        state.switch_was_low = true
-        disengage("activation switch off")
-    end
+   -- update
+   local pos = ahrs:get_location()
+   local vel = ahrs:get_velocity_NED()
+   local mode = vehicle:get_mode()
+   local armed = arming:is_armed()
+   local airspeed_ms = ahrs:airspeed_estimate()
+
+   if pos == nil or vel == nil then
+      -- Pass this failure to your engagement/fault handling.
+      return
+   end
+
+   local hdg = heading_from(vel)
+
+   -- Only after anchor() has established origin:
+   if origin == nil then
+      return
+   end
+
+   local ne = origin:get_distance_NE(pos)
+   local pn, pe = ne:x(), ne:y()
+
 
     -- 2. Yield immediately if pilot/failsafe has taken authority.
     if mode ~= MODE_GUIDED or not armed then
-        disengage("left GUIDED or disarmed")
-        return
+        if state.owns_guidance then
+            handle_fault("left GUIDED or disarmed")
+        end
+
+        -- Your re-engagement latch must require an OFF/ON cycle.
+        return update, 100
     end
 
     -- 3. Process disengagement and permitted algorithm selection.
     if HVAL_ENABLE:get() == 0 then
-        disengage("experimental guidance disabled")
-        -- HVAL_ENABLE 0 is the deliberate act that clears a latched fault
-        -- (not at boot when spec.json is missing: fix 9).
-        if state.fault_latched and cfg ~= nil and entry ~= nil then
-            state.fault_latched = false
-            state.fault_reason = nil
-            gcs:send_text(MAV_SEVERITY.INFO, "HVAL: fault cleared")
+        if state.owns_guidance then
+            handle_fault("experimental guidance disabled")
         end
+
         local selected, selection_reason = select_algorithm()
-        if not selected and selection_reason ~= state.selection_reason then
-            -- Section 10: record selection refusal, once per reason.
-            gcs:send_text(MAV_SEVERITY.WARNING, "HVAL: " .. tostring(selection_reason))
-        end
-        state.selection_reason = (not selected) and selection_reason or nil
-        return
+
+        -- Section 10: record selection refusal if not selected.
+        -- Do not clear a latched fault automatically.
+        return update, 100
     end
 
-    if state.fault_latched then
-        return
-    end
+    -- 4. Acquire target and update estimator.
+    -- Insert your section 2–3 code here, defining:
+    --   t, pn, pe, hdg
+    --   kn, ke, kvn, kve
+    --   est_proj, est_raw, true_airspeed_ms
+    --   aircraft_valid, flight_ready, target_fresh
+    --
+    -- Anchor once per run before converting local positions.
+    -- Update the estimator only on a new accepted target sample.
 
-    -- Established flight: ArduPlane's own flying estimate and an airspeed
-    -- at or above AIRSPEED_MIN.
-    local v_min = AIRSPEED_MIN:get() or 0
-    local flight_ready = vehicle:get_likely_flying()
-        and finite(true_airspeed_ms) and true_airspeed_ms >= v_min
-    -- Virtual targets are always fresh; live is refused in target_legs().
-    local target_fresh = math.floor(HVAL_TGT:get() + 0.5) ~= 2
-
-    -- 4. Engage: anchor once per run before converting local positions.
-    if not state.enabled then
-        if not state.switch_was_low then
-            return
-        end
-        local allowed, why = can_engage(aircraft_valid, flight_ready, target_fresh)
-        if not allowed then
-            return
-        end
-        local ok, reason = anchor(now_ms, pos, vel)
-        if not ok then
-            handle_fault("cannot anchor: " .. tostring(reason))
-            return
-        end
-        state.enabled = true
-    end
-
-    if not aircraft_valid then
-        handle_fault("no aircraft position or velocity")
-        return
-    end
-
-    local t = (now_ms - t0_ms) * 0.001
-    if cfg.duration_s ~= nil and t > cfg.duration_s then
-        disengage(string.format("run %d complete, %.1f s", state.run_id, t))
-        return
-    end
-
-    local ne = origin:get_distance_NE(pos)
-    local pn, pe = ne:x(), ne:y()
-    local hdg, yaw = course(vel)
-
-    -- Acquire target and update estimator.
-    local kn, ke, kvn, kve = target_at(t)
-    if kn == nil then
-        handle_fault("target: " .. tostring(ke))
-        return
-    end
-    local est_proj, est_raw = estimate(kn, ke)
 
     -- 5. Compute guidance.
+    local result, reason = compute_guidance(
+        t, pn, pe, hdg, kn, ke, kvn, kve, est_proj, est_raw
+    )
+
+    if result == nil then
+        -- Section 9: handle failure using reason.
+        return update, 100
+    end
+
+    -- 6. Validate guidance.
+    local valid, why = validate_guidance(
+        result, pn, pe, true_airspeed_ms, HVAL_BOUND_M:get()
+    )
+
+    if not valid then
+        -- Section 9: handle failure using why.
+        return update, 100
+    end
+
+    algorithm_state = result.algorithm_state or {}
+
     local result, reason = compute_guidance(
         t, pn, pe, hdg,
         kn, ke, kvn, kve,
@@ -1108,56 +907,36 @@ local function step(now_ms)
     )
 
     if result == nil then
-        log_tick(t, pn, pe, hdg, kn, ke, kvn, kve, 0.0 / 0.0, 0.0 / 0.0,
-                 est_proj, est_raw, algorithm_state, vel, yaw, false)
-        handle_fault("no solution: " .. tostring(reason))
-        return
+        handle_fault(reason)
+        return update, 100
     end
 
-    -- 6. Validate output and aircraft envelope.
-    local valid, why = validate_guidance(
+    -- 7. Validate output and aircraft envelope.
+   local valid, why = validate_guidance(
         result, pn, pe,
         true_airspeed_ms, HVAL_BOUND_M:get()
     )
 
     if not valid then
-        log_tick(t, pn, pe, hdg, kn, ke, kvn, kve,
-                 result.guidance_n_m or 0.0 / 0.0, result.guidance_e_m or 0.0 / 0.0,
-                 est_proj, est_raw, result.algorithm_state, vel, yaw, false)
         handle_fault(why)
-        return
+        return update, 100
     end
 
     algorithm_state = result.algorithm_state or {}
-
-    -- 7. Command only if ACTIVE and still authorised.
+    
+    -- 8. Log; command only if ACTIVE and still authorised.
     local accepted, output_status = send_guidance(
         result, pn, pe,
         aircraft_valid, flight_ready, target_fresh
     )
 
-    -- 8. Log.
-    log_tick(t, pn, pe, hdg, kn, ke, kvn, kve,
-             result.guidance_n_m, result.guidance_e_m,
-             est_proj, est_raw, algorithm_state, vel, yaw, accepted)
-
     -- 9. Handle detected faults and verify recovery.
     if not accepted then
         handle_fault(output_status)
+        return update, 100
     end
-end
 
---- One tick inside pcall (fix 10), as the runner: an error is reported and
---  latched as a fault instead of silently stopping the script while a
---  heading command is still in effect.
-local function update()
-    local ok, err = pcall(step, millis():toint())
-    if not ok then
-        gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: " .. tostring(err))
-        pcall(handle_fault, "script error")
-        return update, 1000
-    end
-    return update, period_ms -- nominal callback delay in milliseconds
+    return update, 100 -- nominal callback delay in milliseconds
 end
 
 -- ============================================================
@@ -1174,19 +953,19 @@ local loaded, load_failed = {}, {}
 -- load the name of th efunction
 local function load(name)
    -- return loaded name
-    if loaded[name] ~= nil then
-      return loaded[name]
+    if loaded[name] ~= nil then 
+      return loaded[name] 
    end
     -- if failed to report
-    if load_failed[name] then
-      return nil
+    if load_failed[name] then 
+      return nil 
     end
     -- handle messaging and error handling
     local ok, mod = pcall(require, name)
     if not ok or mod == nil then
         load_failed[name] = true
-        gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: module " .. name .. " not found: " .. tostring(mod))
-
+        gcs:send_text(3, "HVAL: module " .. name .. " not found: " .. tostring(mod))
+        
         return nil
     end
     -- load name
@@ -1194,50 +973,46 @@ local function load(name)
     return mod
 end
 
+
+-- Assign the shared variables declared near the top.
+arms = load("sitl_arms")
+est_mod = load("harness_estimator")
+demo = load("cfg = demo.cfg")
+
+-- Stop startup if a required module failed to load.
+if arms == nil or est_mod == nil or demo == nil then
+    return
+end
+
+cfg = demo.cfg
+
+if type(cfg) ~= "table" then
+    gcs:send_text(3, "HVAL: missing configuration table")
+    return
+end
+
 -- Start disabled; do not arm or change flight mode.
 HVAL_ENABLE:set(0)
 state.enabled = false
 state.owns_guidance = false
-
--- No spec.json: section 1 latched a fault and said why. Stop here; nothing
--- below may run on typed defaults.
-if cfg == nil then
-    return
-end
-
--- Assign the shared variables declared near the top (fixes 7 and 8: the
--- configuration is spec.json, not kangaroo_demo_cfg).
-arms = load("sitl_arms")
-est_mod = load("harness_estimator")
-segs = load("harness_segments")
-
--- Stop startup if a required module failed to load.
-if arms == nil or est_mod == nil or segs == nil then
-    return
-end
+state.fault_latched = false
 
 -- Section 4 resolves the initial algorithm while disabled.
 local selected, reason = select_algorithm()
 
 if not selected then
-    -- Keep running: the operator can correct HVAL_ARM on the ground, and
-    -- can_engage() refuses until an arm is selected.
     gcs:send_text(
-        MAV_SEVERITY.ERROR, "HVAL: initial algorithm unavailable: " .. tostring(reason)
+        3, "HVAL: initial algorithm unavailable: " .. tostring(reason)
     )
+    return
 end
 
 -- Announce the selected algorithm and configuration source.
 gcs:send_text(
-    MAV_SEVERITY.INFO, "HVAL: loaded disabled; algorithm "
-        .. tostring(active_name)
-        .. "; config " .. tostring(cfg_where)
+    6, "HVAL: loaded disabled; algorithm "
+        .. tostring(ARM_NAMES[active_arm])
+        .. "; config kangaroo_demo_cfg"
 )
-do
-    local ok_roll, roll_msg = roll_limit_ok()
-    gcs:send_text(ok_roll and MAV_SEVERITY.INFO or MAV_SEVERITY.WARNING,
-                  "HVAL: " .. tostring(roll_msg))
-end
 
 -- Begin scheduled callbacks.
-return update, period_ms
+return update, 100
