@@ -4,18 +4,12 @@ Fly ArduPlane in SITL
 AP_FLAKE8_CLEAN
 '''
 
-import json
 import math
 import operator
 import os
 import re
 import signal
 import time
-# additional improts for arduplane - dubins weave test runs
-import csv
-import itertools
-import shutil
-import glob
 
 from pymavlink import mavextra
 from pymavlink import mavutil
@@ -71,15 +65,10 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         return os.path.realpath(__file__)
 
     def sitl_start_location(self):
-        # KangarooFollow (TASK-052) may move the site for a cell; see
-        # _kangaroo_follow_set_home
-        return getattr(self, "_kangaroo_follow_home", None) or SITL_START_LOCATION
+        return SITL_START_LOCATION
 
     def sitl_start_heading(self):
-        # KangarooFollow (TASK-052) may move the site for a cell; Location
-        # carries no heading, so the cell's heading rides here
-        heading = getattr(self, "_kangaroo_follow_heading", None)
-        return SITL_START_HEADING if heading is None else heading
+        return SITL_START_HEADING
 
     def set_current_test_name(self, name):
         self.current_test_name_directory = "ArduPlane_Tests/" + name + "/"
@@ -3393,6 +3382,62 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         if abs(report.terrain_height - expected_terrain_height) > 0.5:
             raise NotAchievedException("Expected terrain height=%f got=%f" %
                                        (expected_terrain_height, report.terrain_height))
+
+    def ScriptingTerrainCorrected(self):
+        '''check terrain:height_amsl() applies the arming reference offset when asked to'''
+        # start well above the SRTM height so arming creates a large reference offset
+        start = SITL_START_LOCATION
+        home_alt = start.get_alt_m(AltFrame.ABSOLUTE) + 20
+        self.customise_SITL_commandline([
+            "--home", f"{start.lat:.7f},{start.lng:.7f},{home_alt:.2f},{SITL_START_HEADING:.1f}",
+        ])
+        self.install_terrain_handlers_context()
+        self.install_script_content_context("terrain-corrected.lua", f"""
+local loc = Location()
+loc:lat({int(start.lat * 1e7)})
+loc:lng({int(start.lng * 1e7)})
+
+function update()
+  local raw = terrain:height_amsl(loc, false)
+  local corrected = terrain:height_amsl(loc, true)
+  if raw and corrected then
+    gcs:send_named_float("TER_RAW", raw)
+    gcs:send_named_float("TER_COR", corrected)
+  end
+  return update, 500
+end
+
+return update()
+""")
+        self.set_parameters({
+            "SCR_ENABLE": 1,
+            "TERRAIN_OFS_MAX": 30,
+        })
+        self.reboot_sitl()
+        self.wait_ready_to_arm()
+
+        def script_offset():
+            raw = self.assert_receive_named_value_float("TER_RAW", timeout=60).value
+            corrected = self.assert_receive_named_value_float("TER_COR").value
+            return raw, corrected - raw
+
+        raw, offset = script_offset()
+        if abs(offset) > 0.01:
+            raise NotAchievedException(f"Offset before arming (got={offset:f})")
+
+        self.arm_vehicle()
+        # TERRAIN_REPORT carries the corrected height (C++ default)
+        want = self.get_terrain_height_at(start) - raw
+        if want < 15:
+            raise NotAchievedException(f"Reference offset too small to test (got={want:f})")
+        tstart = self.get_sim_time()
+        while True:
+            if self.get_sim_time_cached() - tstart > 10:
+                raise NotAchievedException(f"Script offset want={want:f} got={offset:f}")
+            raw, offset = script_offset()
+            if abs(offset - want) < 0.01:
+                break
+        self.disarm_vehicle()
 
     def TerrainLoiter(self):
         '''Test terrain following in loiter'''
@@ -7899,8 +7944,24 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             run_cmd(mavutil.mavlink.MAV_CMD_MISSION_START)
             self.wait_mode('AUTO')
 
+        self.start_subtest("refused if AUTO may not be entered from the GCS")
+        self.change_mode('LOITER')
+        self.set_parameter("FLTMODE_GCSBLOCK", 1 << 9)  # AUTO
+        for run_cmd in self.run_cmd, self.run_cmd_int:
+            run_cmd(mavutil.mavlink.MAV_CMD_MISSION_START, want_result=mavutil.mavlink.MAV_RESULT_FAILED)
+            self.assert_mode_is('LOITER')
+
     def MAV_CMD_NAV_LOITER_UNLIM(self):
         '''test receiving MAV_CMD_NAV_LOITER_UNLIM from GCS'''
+        self.start_subtest("refused if LOITER may not be entered from the GCS")
+        self.change_mode('FBWA')
+        self.set_parameter("FLTMODE_GCSBLOCK", 1 << 10)  # LOITER
+        for run_cmd in self.run_cmd, self.run_cmd_int:
+            run_cmd(mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM, want_result=mavutil.mavlink.MAV_RESULT_FAILED)
+            self.assert_mode_is('FBWA')
+        self.set_parameter("FLTMODE_GCSBLOCK", 0)
+
+        self.start_subtest("changes into LOITER")
         self.takeoff(10)
         self.run_cmd(mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM)
         self.wait_mode('LOITER')
@@ -7921,9 +7982,9 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 800, 0, 0),
         ])
 
-        for i in self.run_cmd, self.run_cmd_int:
+        for run_cmd in self.run_cmd, self.run_cmd_int:
             self.wait_current_waypoint(2)
-            self.run_cmd(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH)
+            run_cmd(mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH)
             self.wait_current_waypoint(4)
             self.set_current_waypoint(2)
         self.fly_home_land_and_disarm()
@@ -8227,7 +8288,20 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.assert_parameter_value("COMPASS_OFS_X", old_compass_ofs_x, epsilon=30)
 
     def _MAV_CMD_EXTERNAL_WIND_ESTIMATE(self, command):
+        # the external wind estimate is only used by DCM, and WIND
+        # reports the active estimator's wind, so keep DCM active
+        # rather than racing EKF3 becoming active after the reboot.
+        # DCM's own wind estimator blends the (near-zero) airspeed
+        # into its wind on each GPS sample, even on the ground, so
+        # stop it using the airspeed sensor or the commanded wind
+        # decays before we see it:
+        self.set_parameters({
+            'AHRS_EKF_TYPE': 0,
+            'ARSPD_USE': 0,
+        })
         self.reboot_sitl()
+        self.wait_gps_fix_type_gte(3)
+        self.delay_sim_time(5, reason="let DCM settle after GPS lock")
 
         def cmp_with_variance(a, b, p):
             return abs(a - b) < p
@@ -9383,133 +9457,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
 
         self.reboot_sitl()
 
-    def PlaneFollowAppletStandoff(self):
-        '''Plane Follow standoff orbit: approach and hold a ring about a target the test itself supplies'''
-        self.start_subtest("Plane Follow standoff orbit about a stationary MAVLink target")
-
-        self.install_applet_script_context("plane_follow.lua")
-        self.install_script_module_context(self.script_modules_source_path("pid.lua"), "pid.lua")
-        self.install_script_module_context(self.script_modules_source_path("mavlink_attitude.lua"), "mavlink_attitude.lua")
-        self.install_script_module_context(self.script_modules_source_path("standoff_orbit.lua"), "standoff_orbit.lua")
-        self.install_mavlink_module_context()
-
-        ring_m = 70
-        alt_m = 60
-        self.set_parameters({
-            "SCR_ENABLE": 1,
-            "SCR_VM_I_COUNT": 200000,   # the approach samples four candidate paths per update
-            "SCR_HEAP_SIZE": 1048576,
-            "SIM_SPEEDUP": 3,
-            "RC7_OPTION": 301,
-            "FOLL_ENABLE": 1,
-            # the GUIDED heading controller is proportional (default 5000 cd/rad): a
-            # 30 deg course error gives 27 deg of bank, too little for the planned arc
-            "GUIDED_P": 15000,
-        })
-        self.set_parameters({
-            "FOLL_SYSID": self.mav.source_system,   # the test is the target
-            "FOLL_DIST_MAX": 2000,
-            "FOLL_ALT_TYPE": 1,                     # FOLLP_ALT_OVR is metres above home
-            # the test framework's message loop stalls for about 2.5 s of wall
-            # time each cycle, during which no target is sent; the follow
-            # estimate must outlive that at the chosen speed-up
-            "FOLL_TIMEOUT": 20,
-        })
-
-        self.context_collect("STATUSTEXT")
-        self.reboot_sitl()
-        self.wait_text("Plane Follow .* script loaded", timeout=30, regex=True, check_context=True)
-        # the FOLLP_ table exists only once the script has run; these are read live
-        self.set_parameters({
-            "FOLLP_SO_ENABLE": 1,
-            "FOLLP_SO_RADIUS": ring_m,
-            "FOLLP_SO_ASPD": 22,        # one airspeed; the turn radius is derived from it
-            "FOLLP_ALT_OVR": alt_m,     # the target is on the ground; hold the aircraft's altitude
-            "FOLLP_TIMEOUT": 30,
-        })
-
-        self.wait_ready_to_arm()
-        self.takeoff(alt=alt_m, mode="TAKEOFF")
-        self.change_mode("GUIDED")
-
-        # a stationary target 300 m North of the aircraft, on the ground,
-        # sent by the test at about 10 Hz for the whole run
-        here = self.mav.location()
-        target = self.offset_location_ne(here, 300, 0)
-        ground_alt_m = self.get_altitude(relative=False) - self.get_altitude(relative=True)
-
-        def send_target():
-            # stamp with the vehicle's own clock, as echoed in its last position
-            # message, so the follow library's jitter correction sees a steady
-            # offset; a constant stamp makes its corrected time lag and the
-            # target drops out in bursts
-            gpi = self.mav.messages.get("GLOBAL_POSITION_INT")
-            stamp_ms = int(gpi.time_boot_ms) if gpi is not None else 0
-            self.mav.mav.global_position_int_send(
-                stamp_ms,
-                int(target.lat * 1e7),
-                int(target.lng * 1e7),
-                int(ground_alt_m * 1000),   # mm AMSL
-                0,                          # mm above home
-                0, 0, 0,                    # velocity cm/s
-                0,                          # heading cdeg
-            )
-
-        for _ in range(20):
-            send_target()
-            self.delay_sim_time(0.1, "standoff: priming the follow target")
-        self.set_rc(7, 2000)
-        self.wait_text("PFollow: enabled", check_context=True)
-        self.wait_text("PFollow: standoff orbit R 70 m", check_context=True, timeout=20)
-
-        # fly: first contact with the ring, then a settled hold
-        tstart = self.get_sim_time()
-        contact_s = None
-        hold = []
-        last_send_s = -1.0
-        while self.get_sim_time_cached() - tstart < 240:
-            now = self.get_sim_time_cached()
-            if now - last_send_s >= 0.1:
-                send_target()          # 10 Hz of simulated time, whatever the stream rates
-                last_send_s = now
-            m = self.mav.recv_match(blocking=True, timeout=5)
-            if m is None:
-                raise NotAchievedException("no telemetry from the vehicle")
-            if m.get_type() != "GLOBAL_POSITION_INT":
-                continue
-            range_m = self.get_distance(self.mav.location(), target)
-            if contact_s is None:
-                if range_m <= ring_m + 5:
-                    contact_s = now
-                    self.progress("standoff: first contact at %.1f s, range %.1f m" % (now - tstart, range_m))
-            else:
-                if now - contact_s > 20:
-                    hold.append(range_m)
-                if now - contact_s > 80:
-                    break
-        if contact_s is None:
-            raise NotAchievedException("standoff never reached the %d m ring" % ring_m)
-        if len(hold) < 20:
-            raise NotAchievedException("too few hold samples (%d)" % len(hold))
-        mean_m = sum(hold) / len(hold)
-        worst_m = max(abs(r - ring_m) for r in hold)
-        self.progress("standoff: hold mean %.1f m, worst deviation %.1f m over %d samples" %
-                      (mean_m, worst_m, len(hold)))
-        # tolerances stated before the run: the harness holds 70.00 m with a
-        # 1 m residual; SITL flies ArduPlane's heading PID at the carrot
-        if abs(mean_m - ring_m) > 10:
-            raise NotAchievedException("mean range %.1f m is not the %d m ring" % (mean_m, ring_m))
-        if worst_m > 25:
-            raise NotAchievedException("range left the ring by %.1f m during the hold" % worst_m)
-        # the held sense: switches are reported; more than a few means the hold is flipping
-        switches = [t for t in self.context_collection("STATUSTEXT") if "standoff sense" in t.text]
-        if len(switches) > 4:
-            raise NotAchievedException("orbit sense switched %d times" % len(switches))
-
-        self.set_rc(7, 1000)
-        self.wait_text("PFollow: disabled", check_context=True)
-        self.fly_home_land_and_disarm()
-
     def PreflightRebootComponent(self):
         '''Ensure that PREFLIGHT_REBOOT commands sent to components don't reboot Autopilot'''
         self.run_cmd_int(
@@ -9567,854 +9514,909 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             raise NotAchievedException("Large roll error %0.1f > %0.1f" % (max_roll_error, roll_threshold))
 
         self.progress("Roll error check passed %0.1f <= %0.1f" % (max_roll_error, roll_threshold))
-    # ---------------------------------------------------------
-    # Dubins parameter sweep - added 5 May
-    # ---------------------------------------------------------
 
-    ####### Grid sweeps - parameters
-    # two separate sweeps - one for key params, one for the weights
-    # Grid parameters to be sweeped
-    DUBINS_SWEEP_GRID = {
-        # controller timing / acceptance
-        # rebuild rate (ms)
-        "CTRL_REBUILD_MS": [2000, 3000],
-        # number of hits within range to register as a hit
-        "CTRL_STREAK": [1, 2],
-        # kalman filter noise — varied across orders of magnitude
-        # Q diagonal: sluggish/stable (0.001) to responsive/noisy (10.0)
-        "KF_PROC_NOISE":[0.001, 0.01, 0.1, 1.0, 10.0],
-        # R diagonal: trust measurements tightly (0.5) to smooth heavily (10.0)
-        "KF_MEAS_NOISE": [0.5, 2.0, 5.0, 10.0],
-    }
+    def AVAILABLE_MODES(self):
+        '''check AVAILABLE_MODES lists Plane's modes'''
+        expected_modes = {
+            0: "Manual",
+            1: "Circle",
+            2: "Stabilize",
+            3: "Training",
+            4: "Acro",
+            5: "FBWA",
+            6: "FBWB",
+            7: "Cruise",
+            8: "Autotune",
+            10: "Auto",
+            11: "RTL",
+            12: "Loiter",
+            13: "Takeoff",
+            14: "Avoid ADSB",
+            15: "Guided",
+            16: "Initialising",
+            24: "Thermal",
+            26: "Autoland",
+        }
+        initialising = self.get_mode_from_mode_mapping("INITIALISING")
+        modes = self.assert_available_modes(expected_modes, not_user_selectable=[initialising])
+        for m in modes.values():
+            if m.standard_mode != mavutil.mavlink.MAV_STANDARD_MODE_NON_STANDARD:
+                raise NotAchievedException(f"{m.mode_name}: unexpected standard_mode {m.standard_mode}")
 
-    # Cost-weight sweep — controller timing fixed at best-found values from the param sweep phase of Dubins Sweep.
-    # terms are normalised in main code,
-    DUBINS_COST_SWEEP_GRID = {
-        # cost function weights (w1-w4)
-        # w1: kangaroo heading alignment
-        "CTRL_W_HDG_KANG":[0.1, 0.2, 0.4],
-        # w2: change in bearing to the next point
-        "CTRL_W_HDG_CHG": [0.1, 0.2, 0.4],
-         # w3: plane travel to next waypoint       
-        "CTRL_W_DIST_PLN": [0.1, 0.2, 0.4],
-        # w4: next waypoint proximity to kangaroo
-        "CTRL_W_DIST_KNG": [0.1, 0.2, 0.4],
-    }
+        self.start_subtest("modes blocked by FLTMODE_GCSBLOCK are not user-selectable")
+        circle = self.get_mode_from_mode_mapping("CIRCLE")
+        guided = self.get_mode_from_mode_mapping("GUIDED")
+        self.set_parameter("FLTMODE_GCSBLOCK", (1 << 1) | (1 << 13))  # CIRCLE and GUIDED
+        self.assert_available_modes(expected_modes, not_user_selectable=[initialising, circle, guided])
+        self.set_parameter("FLTMODE_GCSBLOCK", 0)
 
-    # reset kang modes at each start
-    DUBINS_KANG_MODES = [
-        {"kang_mode": "point",     "KANG_POINT": 1, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
-        {"kang_mode": "straight",  "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 1, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
-        {"kang_mode": "circle",    "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 1, "KANG_RECTANGLE": 0},
-        {"kang_mode": "rectangle", "KANG_POINT": 0, "KANG_RANDOM": 0, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 1},
-        # {"kang_mode": "random",    "KANG_POINT": 0, "KANG_RANDOM": 1, "KANG_STRAIGHT": 0, "KANG_CIRCLE": 0, "KANG_RECTANGLE": 0},
-    ]
+        self.start_subtest("request the first and last modes by index")
+        for index in 1, len(modes):
+            single = self.request_available_modes(index=index)
+            if list(single.keys()) != [index]:
+                raise NotAchievedException(f"Asked for mode_index {index} got {list(single.keys())}")
+            if single[index].custom_mode != modes[index].custom_mode:
+                raise NotAchievedException(f"mode_index {index} is not the mode sent when all were requested")
 
-    # interested in the error in the L1, L2 norm, the cost function and the kalman filter prediction error
-    #error values
-    DUBINS_ERROR_RE = re.compile(r"Dubins L1:([\d.]+)m L2:([\d.]+)m J:([-\d.]+)")
+        self.start_subtest("request an index beyond the last mode")
+        beyond = self.request_available_modes(index=len(modes)+1, timeout=3)
+        if len(beyond) != 0:
+            raise NotAchievedException("Received AVAILABLE_MODES for a mode which does not exist")
 
-    # cost function error
-    DUBINS_J_RE = re.compile(r"Dubins J:([\d.]+)")
+    def MAVLinkCommandRejections(self):
+        '''check Plane refuses commands it cannot act on'''
+        here = self.get_location()
+        lat = int(here.lat * 1e7)
+        lng = int(here.lng * 1e7)
+        DENIED = mavutil.mavlink.MAV_RESULT_DENIED
+        FAILED = mavutil.mavlink.MAV_RESULT_FAILED
 
-    # kalman filter prediction error
-    DUBINS_KF_ERR_RE = re.compile(r"KF err: ([\d.]+)m \(N([-\d.]+) E([-\d.]+)\) vel N([-\d.]+) E([-\d.]+) m/s")
+        self.change_mode('FBWA')
 
-    ####### Grid sweeps - two separate girs
-    # build grid to handle kangaroo modes, parameters, KF filter measurement and processing noise
-    def _dubins_build_grid(self):
-        keys = list(self.DUBINS_SWEEP_GRID.keys())
-        for mode in self.DUBINS_KANG_MODES:
-            kang_params = {k: v for k, v in mode.items() if k != "kang_mode"}
-            for combo in itertools.product(*self.DUBINS_SWEEP_GRID.values()):
-                vals = dict(zip(keys, combo))
-                name = mode["kang_mode"] + "_" + "_".join(
-                    f"{k.replace('CTRL_', '').lower()}{v}" for k, v in vals.items()
-                )
-                yield {"name": name, "kang_mode": mode["kang_mode"],
-                       **kang_params, **vals}
-
-    # build grid for cost-weight sweep to handle kangaroo modes, cost function weights
-    def _dubins_cost_build_grid(self):
-        keys = list(self.DUBINS_COST_SWEEP_GRID.keys())
-        for mode in self.DUBINS_KANG_MODES:
-            kang_params = {k: v for k, v in mode.items() if k != "kang_mode"}
-            for combo in itertools.product(*self.DUBINS_COST_SWEEP_GRID.values()):
-                vals = dict(zip(keys, combo))
-                name = mode["kang_mode"] + "_" + "_".join(
-                    f"{k.replace('CTRL_', '').lower()}{v}" for k, v in vals.items()
-                )
-                extra = {}
-                if mode["kang_mode"] == "point":
-                    extra["CTRL_DUB_VEL"] = 50
-                    extra["CTRL_REBUILD_MS"] = 10000
-                yield {"name": name, "kang_mode": mode["kang_mode"], **kang_params, **vals, **extra}
-
-    
-    # copy binary file
-    def _dubins_copy_bin(self, trial_name, dest_dir):
-        log_dir = self.buildlogs_dirpath()
-        bins = sorted(glob.glob(os.path.join(log_dir, "logs", "*.bin")))
-        if not bins:
-            # fallback: SITL writes logs/ relative to its working dir
-            bins = sorted(glob.glob("logs/*.bin"))
-        if not bins:
-            self.progress(f"WARNING: no .bin found for trial {trial_name}")
-            return ""
-        latest = bins[-1]
-        os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, f"{trial_name}.bin")
-        shutil.copy2(latest, dest)
-        self.progress(f".bin saved: {dest}")
-        return dest
-
-    # copy kangaroo values to csv
-    # tracks kangaroo values
-    def _dubins_copy_trace_csv(self, trial_name, dest_dir):
-        # directory path
-        log_dir = self.buildlogs_dirpath()
-        csvs = sorted(glob.glob(os.path.join(log_dir, "logs", "kangaroo_plane_trace_boot*.csv")))
-        if not csvs:
-            csvs = sorted(glob.glob("APM/logs/kangaroo_plane_trace_boot*.csv"))
-        if not csvs:
-            self.progress(f"WARNING: no trace CSV found for trial {trial_name}")
-            return ""
-        # take the directory and save
-        os.makedirs(dest_dir, exist_ok=True)
-        dest = os.path.join(dest_dir, f"{trial_name}_trace.csv")
-        shutil.copy2(csvs[-1], dest)
-        self.progress(f"CSV saved: {dest}")
-        return dest
-
-    #create csv for processing
-    def _dubins_write_csv(self, results, path, grid=None, fixed=None):
-        # grid
-        grid = grid if grid is not None else self.DUBINS_SWEEP_GRID
-        fixed = fixed or {}
-        kang_keys = [k for k in self.DUBINS_KANG_MODES[0] if k != "kang_mode"]
-        param_keys = list(grid.keys()) + list(fixed.keys())
-        fieldnames = ["trial", "name", "kang_mode"] + kang_keys + param_keys + ["l1_error_m", "l2_error_m", "j_min", "kf_err_mean_m", "kf_vel_mean_ms", "bin", "trace", "error"]
-        with open(path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            w.writeheader()
-            for i, r in enumerate(results, 1):
-                w.writerow({"trial": i, **r})
-        self.progress(f"CSV saved: {path}")
-
-    # double check that the connection is right before the next trial
-    def _dubins_ensure_sitl_alive(self):
-        #Ping SITL; if the connection is dead, hard-restart it before the next trial
-        try:
-            self.get_parameter('STAT_BOOTCNT', attempts=1, timeout_in_wallclock=True)
-        except Exception:
-            self.progress("  SITL connection dead - hard restarting")
-            try:
-                self.stop_SITL()
-            except Exception:
-                pass
-            self.start_SITL(wipe=False)
-
-    # dubins trial, over a collection time of 60 seconds
-    def _dubins_run_trial(self, params, trial_name, collect_s=60):
-        # reboot SITL, wiat for lua to lood w/ parameters
-        # rapidly switch between takeoff and guided modes
-        # collect the statustext
-        self._dubins_ensure_sitl_alive()
-        # ensure vehicle is disarmed before rebooting (previous trial may have left it armed)
-        if self.armed():
-            self.disarm_vehicle(force=True)
-        #  STATUSTEXT before reboot so boot messages aren't missed
-        self.context_collect('STATUSTEXT')
-        try:
-            self.reboot_sitl()
-            self.wait_ready_to_arm(timeout=300)
-            # Confirm control loaded and registered CTRL_* param tables
-            self.wait_statustext("Control: loaded at boot", timeout=60, check_context=True)
-        finally:
-            try:
-                self.context_stop_collecting('STATUSTEXT')
-            except Exception:
-                pass
-        # setting parameters
-        self.progress(f"  Setting params for {trial_name}")
-        # setting parameter loop
-        for k, v in params.items():
-            self.set_parameter(k, v)
-        # arming vehcile
-        self.arm_vehicle()
-        # trying takeoff, guided
-        try:
-            self.change_mode("TAKEOFF")
-            #self.delay_sim_time(3)
-            self.delay_sim_time(2)
-            self.change_mode("GUIDED")
-
-            # initialising text and error values
-            l1, l2, j_min = None, None, None
-            kf_err_samples = []
-            kf_vel_samples = []
-            tstart = self.get_sim_time()
-
-            # starting collection
-            while self.get_sim_time_cached() - tstart < collect_s:
-                m = self.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.05)
-                if m is None:
-                    continue
-                # dubins error
-                hit = self.DUBINS_ERROR_RE.search(m.text)
-                if hit:
-                    l1 = float(hit.group(1))
-                    l2 = float(hit.group(2))
-                    j_val = float(hit.group(3))
-                    # -1 means no J was recorded this trial (controller never entered swap logic)
-                    if j_val >= 0:
-                        j_min = j_val if j_min is None else min(j_min, j_val)
-                # filter error
-                hit_kf = self.DUBINS_KF_ERR_RE.search(m.text)
-                if hit_kf:
-                    kf_err_samples.append(float(hit_kf.group(1)))
-                    vel_n = float(hit_kf.group(4))
-                    vel_e = float(hit_kf.group(5))
-                    import math as _math
-                    kf_vel_samples.append(_math.sqrt(vel_n**2 + vel_e**2))
-            # taking the mean kalman filter error
-            kf_err_mean = round(sum(kf_err_samples) / len(kf_err_samples), 3) if kf_err_samples else None
-            kf_vel_mean = round(sum(kf_vel_samples) / len(kf_vel_samples), 3) if kf_vel_samples else None
-
-            self.progress(f"{trial_name}: L1={l1} L2={l2} J_min={j_min} KF_err={kf_err_mean}m KF_vel={kf_vel_mean}m/s")
-        finally:
-            self.disarm_vehicle(force=True)
-        #directory path for values
-        sweep_dir = os.path.join(self.buildlogs_dirpath(), "dubins_sweep_bins")
-        bin_path = self._dubins_copy_bin(trial_name, dest_dir=sweep_dir)
-        trace_path = self._dubins_copy_trace_csv(trial_name, dest_dir=sweep_dir)
-        return l1, l2, j_min, kf_err_mean, kf_vel_mean, bin_path, trace_path
-
-    # incrementally add the trial output to the csv
-    def _dubins_run_sweep(self, combos, csv_path, label, grid=None, fixed=None):
-        total = len(combos)
-        results = []
-        for i, trial in enumerate(combos, 1):
-            name = trial["name"]
-            self.progress(f"=== {label} {i}/{total}: {name} ===")
-            try:
-                l1, l2, j_min, kf_err_mean, kf_vel_mean, bin_path, trace_path = self._dubins_run_trial(
-                    {k: v for k, v in trial.items() if k not in ("name", "kang_mode")}, name,)
-                results.append({
-                    "name": name, **trial,
-                    "l1_error_m": l1,
-                    "l2_error_m": l2,
-                    "j_min": j_min,
-                    "kf_err_mean_m": kf_err_mean,
-                    "kf_vel_mean_ms": kf_vel_mean,
-                    "bin": bin_path,
-                    "trace": trace_path,
-                    "error": None,
-                })
-            # throw an exception if an error
-            except Exception as e:
-                self.progress(f"  Trial {name} FAILED: {e}")
-                results.append({
-                    "name": name, **trial,
-                    "l1_error_m": None, "l2_error_m": None,
-                    "j_min": None,
-                    "kf_err_mean_m": None, "kf_vel_mean_ms": None,
-                    "bin": "", "trace": "", "error": str(e),
-                })
-            self._dubins_write_csv(results, csv_path, grid=grid, fixed=fixed)
-        self.progress(f"{label} complete: {csv_path}")
-
-    #search the csv file for the best configuration
-    def _dubins_find_best_config(self):
-        import csv as _csv
-        csvs = sorted(glob.glob(os.path.join(self.buildlogs_dirpath(), "dubins_sweep_*.csv")))
-        if not csvs:
-            raise Exception("No dubins_sweep_*.csv found in buildlogs - run DubinsSweep first")
-        latest = csvs[-1]
-        self.progress(f"  Reading sweep CSV: {latest}")
-        best = None
-        with open(latest) as f:
-            for row in _csv.DictReader(f):
-                raw = row.get("j_min", "")
-                if raw in ("", "None", None):
-                    continue
-                try:
-                    j = float(raw)
-                except ValueError:
-                    continue
-                if best is None or j < float(best["j_min"]):
-                    best = row
-        if best is None:
-            raise Exception("No trials with valid j_min in latest sweep CSV")
-        # return the best
-        self.progress(f"  Best config: {best.get('name')} j_min={best['j_min']}")
-        return best
-
-    # take the best configuration
-    # rebuilt the J values over each instant
-    def _dubins_run_best_trial(self, best_row, stamp, collect_s=60):
-        # parameters
-        NON_PARAM = {"trial", "name", "kang_mode", "l1_error_m", "l2_error_m", "j_min", "bin", "trace", "error"}
-        params = {k: float(v) for k, v in best_row.items()
-                  if k not in NON_PARAM and v not in ("", None)}
-        # ensure vehicle is disarmed before rebooting (previous trial may have left it armed)
-        if self.armed():
-            self.disarm_vehicle(force=True)
-        #  STATUSTEXT before reboot so boot messages aren't missed
-        self.context_collect("STATUSTEXT")
-        # timeouts and forced restart
-        try:
-            self.reboot_sitl()
-            self.wait_ready_to_arm(timeout=300)
-            # Confirm control loaded and registered CTRL_* param tables
-            self.wait_statustext("Control: loaded at boot", timeout=60, check_context=True)
-        finally:
-            self.context_stop_collecting("STATUSTEXT")
-        # setting parameters
-        # setting parameter loop
-        for k, v in params.items():
-            self.set_parameter(k, v)
-        # arming vehcile
-        self.arm_vehicle()
-        # cost function
-        # initialising J series
-        j_series = []
-        # trying takeoff, guided
-        try:
-            self.change_mode("TAKEOFF")
-            self.delay_sim_time(2)
-            self.change_mode("GUIDED")
-            tstart = self.get_sim_time()
-            # starting collection
-            while self.get_sim_time_cached() - tstart < collect_s:
-                m = self.mav.recv_match(type="STATUSTEXT", blocking=True, timeout=0.05)
-                if m is None:
-                    continue
-                # J cost value
-                hit = self.DUBINS_J_RE.search(m.text)
-                if hit:
-                    t = round(self.get_sim_time_cached() - tstart, 2)
-                    j_series.append({"sim_time_s": t, "J": float(hit.group(1))})
-        finally:
-            self.disarm_vehicle(force=True)
-
-        path = os.path.join(self.buildlogs_dirpath(), f"dubins_best_J_{stamp}.csv")
-        with open(path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["sim_time_s", "J"])
-            w.writeheader()
-            w.writerows(j_series)
-        self.progress(f"Best trial J series ({len(j_series)} pts): {path}")
-        return path
-
-    ##### Key functions - Dubins Sweep, and the Best Trial
-    # Best trial pulls from the best trial for the cost function, re-generates the output to track J value over time
-
-    # main sweep function
-    def DubinsSweep(self):
-        """Run Dubins path parameter sweep and cost sweep."""
-        # running the parameter sweep and the cost sweep
-        import datetime
-        self.set_parameter("SCR_ENABLE", 1)
-        self.set_parameter("SCR_HEAP_SIZE", 1000000)
-        self.reboot_sitl()
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        #parameter sweep for KF, params
-        param_csv = os.path.join(self.buildlogs_dirpath(), f"dubins_sweep_{stamp}.csv")
-        self._dubins_run_sweep(
-            list(self._dubins_build_grid()),
-            param_csv,
-            label="PARAM SWEEP",
+        self.start_subtest("DO_REPOSITION")
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+            p5=lat,
+            p6=lng,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            want_result=DENIED,
         )
-        # weights for cost function
-        cost_csv = os.path.join(self.buildlogs_dirpath(), f"dubins_cost_sweep_{stamp}.csv")
-        self._dubins_run_sweep(
-            list(self._dubins_cost_build_grid()),
-            cost_csv,
-            label="COST SWEEP",
-            grid=self.DUBINS_COST_SWEEP_GRID,
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+            p5=int(91e7),
+            p6=lng,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            want_result=DENIED,
+        )
+        # Plane takes a latitude and longitude of zero to mean "unset":
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+            p5=0,
+            p6=0,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            want_result=DENIED,
+        )
+        # not in GUIDED and not asked to change into it:
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+            p5=lat,
+            p6=lng,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            want_result=FAILED,
         )
 
-    # take the best trial
-    def DubinsBestTrial(self):
-        # best configuration from the sweep csv
-        # must be run after DubinsSweep
-        """best configuration from the sweep csv, must be run after DubinsSweep"""
-        import datetime
-        self.set_parameter("SCR_ENABLE", 1)
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        best_row = self._dubins_find_best_config()
-        self._dubins_run_best_trial(best_row, stamp)
+        self.start_subtest("DO_CHANGE_ALTITUDE")
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_ALTITUDE,
+            p1=100,
+            p2=mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            want_result=DENIED,
+        )
 
-    # ---------------------------------------------------------
-    # Kangaroo-follow harness repeat (TASK-052) - added 16 Sep
-    # ---------------------------------------------------------
-    # Flies one Python-harness cell (a TASK-040 spec.json plus the legs the
-    # harness actually flew) against the ported Lua guidance laws, through
-    # ArduPlane_Tests/KangarooFollow/sitl_harness_runner.lua, and leaves the
-    # DataFlash log for kangaroo_follow/extract_bundle.py. The plan is a
-    # plan.json written by kangaroo_follow/campaign.py; the sequence is the
-    # DubinsSweep pattern (reboot with parameters, wait for the script, take
-    # off, GUIDED, collect) with the start pose established before the window
-    # opens (TASK-046 D6) and the runner reporting completion on SHR_DONE.
+        self.start_subtest("DO_CHANGE_SPEED outside AUTO and GUIDED")
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+            p1=mavutil.mavlink.SPEED_TYPE_AIRSPEED,
+            p2=20,
+            p3=-1,
+            want_result=FAILED,
+        )
 
-    KANGAROO_FOLLOW_HEADING_TOL_DEG = 5.0
-    KANGAROO_FOLLOW_AIRSPEED_TOL_MS = 3.0
-    # distance along the initial heading to fly toward while settling onto it
-    KANGAROO_FOLLOW_LEAD_IN_M = 3000.0
-    # with a site box: run-in starts this far behind the anchor, and the
-    # window opens when the aircraft is within this radius of it. 2000 m
-    # (1000 m until 2026-10-01, TASK-061), so the lead-in has room to settle
-    # onto the spec line before the anchor
-    KANGAROO_FOLLOW_RUN_IN_M = 2000.0
-    KANGAROO_FOLLOW_ANCHOR_RADIUS_M = 60.0
-    # lead-in re-aim period, s, and the range to the anchor where it stops, m
-    # lead-in line following: re-aim period, s; how far ahead of the
-    # aircraft's projection on the spec line to aim, m; and how far before
-    # the anchor to switch to the far point, m
-    KANGAROO_FOLLOW_REAIM_S = 3.0
-    KANGAROO_FOLLOW_REAIM_LEAD_M = 400.0
-    KANGAROO_FOLLOW_REAIM_STOP_M = 300.0
+        self.start_subtest("GUIDED_CHANGE commands outside GUIDED")
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED,
+            p1=mavutil.mavlink.SPEED_TYPE_AIRSPEED,
+            p2=20,
+            want_result=FAILED,
+        )
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            want_result=FAILED,
+        )
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+            p1=mavutil.mavlink.HEADING_TYPE_HEADING,
+            p2=90,
+            want_result=FAILED,
+        )
 
-    def _kangaroo_follow_package(self):
-        # the campaign package lives beside this file; import late so the
-        # plane suite never depends on it unless these tests run
-        import kangaroo_follow.paths as kf_paths
-        return kf_paths
+        self.change_mode('GUIDED')
 
-    def _kangaroo_follow_load_plan(self, path=None):
-        kf_paths = self._kangaroo_follow_package()
-        path = path or os.environ.get(kf_paths.PLAN_ENV)
-        if not path:
-            raise PreconditionFailedException(
-                "set %s to a plan.json written by kangaroo_follow.campaign" % kf_paths.PLAN_ENV)
-        with open(path) as handle:
-            plan = json.load(handle)
-        # plan paths are repository-relative (TASK-052 P2)
-        for key in ("param_file", "logs_dir", "bin_out", "result_out"):
-            if plan.get(key) and not os.path.isabs(plan[key]):
-                plan[key] = os.path.join(kf_paths.REPO_ROOT, plan[key])
-        return plan
+        self.start_subtest("DO_CHANGE_SPEED with an unusable speed")
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+            p1=mavutil.mavlink.SPEED_TYPE_AIRSPEED,
+            p2=1000,
+            p3=-1,
+            want_result=FAILED,
+        )
 
-    def _kangaroo_follow_new_result(self, plan):
-        return {"cell_id": plan["cell_id"], "status": "error", "reason": None,
-                "statustexts": [], "timings": {}, "start_pose": None, "bin": None,
-                "tolerances": {"heading_deg": self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
-                               "airspeed_ms": self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS}}
+        self.start_subtest("GUIDED_CHANGE_SPEED bad parameters")
+        # only airspeed is supported:
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED,
+            p1=mavutil.mavlink.SPEED_TYPE_GROUNDSPEED,
+            p2=20,
+            want_result=DENIED,
+        )
+        # outside AIRSPEED_MIN..AIRSPEED_MAX:
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_SPEED,
+            p1=mavutil.mavlink.SPEED_TYPE_AIRSPEED,
+            p2=1000,
+            want_result=FAILED,
+        )
 
-    def _kangaroo_follow_statustexts(self):
-        try:
-            texts = [m.text for m in self.context_collection("STATUSTEXT")]
-        except Exception:
-            texts = []
-        return [t for t in texts if t.startswith("SHR")]
+        self.start_subtest("GUIDED_CHANGE_ALTITUDE bad parameters")
+        # zero, and the -1 default, are refused:
+        for alt in 0, -1:
+            self.run_cmd_int(
+                mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
+                p7=alt,
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                want_result=DENIED,
+            )
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
+            p7=100,
+            frame=mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            want_result=DENIED,
+        )
 
-    def _kangaroo_follow_set_home(self, plan):
-        """Move SITL to the plan's site (a locations.txt entry) if it is not there."""
-        home = plan.get("home")
-        if not home:
-            return None
-        if "lat_deg" not in home:
-            # a named site: resolve through locations.txt (the plan carries
-            # no coordinates, so nothing under experiments/ does either)
-            import kangaroo_follow.campaign as kf_campaign
-            home = kf_campaign.home_from_locations(home["name"])
-        # upstream carries SITL start locations as vehicle_test_suite.Location
-        # (altitude tagged with its AltFrame, no heading field), so the site's
-        # heading is held beside it for sitl_start_heading()
-        want = Location(home["lat_deg"], home["lng_deg"], home["alt_m"], AltFrame.ABSOLUTE)
-        want_heading = float(home["heading_deg"])
-        have = self.sitl_start_location()
-        if (abs(have.lat - want.lat) < 1e-7 and abs(have.lng - want.lng) < 1e-7
-                and abs(self.sitl_start_heading() - want_heading) < 0.5):
-            return want
-        self.progress("KangarooFollow: moving SITL home to %s" % home["name"])
-        self._kangaroo_follow_home = want
-        self._kangaroo_follow_heading = want_heading
-        self.customise_SITL_commandline([], wipe=False)
-        return want
+        self.start_subtest("GUIDED_CHANGE_HEADING bad parameters")
+        for heading in -1, 360:
+            self.run_cmd_int(
+                mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+                p1=mavutil.mavlink.HEADING_TYPE_HEADING,
+                p2=heading,
+                want_result=DENIED,
+            )
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+            p1=3,  # not a HEADING_TYPE
+            p2=90,
+            want_result=DENIED,
+        )
 
-    def _kangaroo_follow_box_corners(self, home_loc, box):
-        cn, ce = box["centre_offset_ne_m"]
-        hn, he = box["n_m"] / 2.0, box["e_m"] / 2.0
-        return [self.offset_location_ne(home_loc, cn + dn, ce + de)
-                for (dn, de) in ((-hn, -he), (-hn, he), (hn, he), (hn, -he))]
+        self.start_subtest("MISSION_START with first/last items")
+        self.run_cmd(mavutil.mavlink.MAV_CMD_MISSION_START, p1=1, want_result=DENIED)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_MISSION_START, p2=1, want_result=DENIED)
+        self.assert_mode_is('GUIDED')
 
-    def _kangaroo_follow_upload_fence(self, plan, home_loc):
-        """Report-only polygon fence on the site box (TASK-046 D7 as recommended)."""
-        box = plan.get("box")
-        if not box:
-            return
-        self.set_parameters(plan["fence_params"])
-        corners = self._kangaroo_follow_box_corners(home_loc, box)
-        self.upload_fences_from_locations([
-            (mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, corners),
+        self.start_subtest("DO_LAND_START without a landing sequence")
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 500, 0, 50),
         ])
-        self.delay_sim_time(1, "fence upload")
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_LAND_START, want_result=FAILED)
 
-    def _kangaroo_follow_copy_bin(self, dest):
-        src = self.current_onboard_log_filepath()
-        if not os.path.isabs(src):
-            src = os.path.join(self.rootdir(), src)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        shutil.copy2(src, dest)
-        return dest
+        self.start_subtest("DO_LAND_START when AUTO may not be entered from the GCS")
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 500, 0, 50),
+            self.create_MISSION_ITEM_INT(mavutil.mavlink.MAV_CMD_DO_LAND_START),
+            (mavutil.mavlink.MAV_CMD_NAV_LAND, 10, 0, 0),
+        ])
+        self.set_parameter("FLTMODE_GCSBLOCK", 1 << 9)  # AUTO
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_LAND_START, want_result=FAILED)
+        self.assert_mode_is('GUIDED')
+        self.set_parameter("FLTMODE_GCSBLOCK", 0)
 
-    def _kangaroo_follow_fly_cell(self, plan):
-        """Fly one planned cell; returns the result dict also written to plan['result_out']."""
-        result = self._kangaroo_follow_new_result(plan)
-        t_wall = time.time()
-        self.context_push()
-        self.context_collect("STATUSTEXT")
-        try:
-            # 0. the site
-            home_loc = self._kangaroo_follow_set_home(plan)
-            if home_loc is None:
-                home_loc = self.sitl_start_location()
+        self.start_subtest("VTOL commands on a Plane which is not a QuadPlane")
+        # COMMAND_LONG is converted to MAV_FRAME_LOCAL_OFFSET_NED:
+        self.run_cmd(mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, p7=10, want_result=FAILED)
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            p7=10,
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            want_result=DENIED,
+        )
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_VTOL_TRANSITION,
+            p1=mavutil.mavlink.MAV_VTOL_STATE_MC,
+            want_result=FAILED,
+        )
 
-            # 1. parameters, then reboot so scripting starts with them
-            self.progress("KangarooFollow: applying %s" % plan["param_file"])
-            self.repeatedly_apply_parameter_filepath(plan["param_file"])
-            base = {k: v for k, v in plan.get("params", {}).items() if not k.startswith("SHR_")}
-            if base:
-                self.set_parameters(base)
-            if self.armed():
-                self.disarm_vehicle(force=True)
-            self.reboot_sitl()
-            self.wait_statustext("SHR: loaded cell", timeout=plan.get("load_timeout_s", 90),
-                                 check_context=True)
-            result["timings"]["loaded_s"] = time.time() - t_wall
+    def MAV_CMD_GUIDED_CHANGE_HEADING(self):
+        '''test flying headings with MAV_CMD_GUIDED_CHANGE_HEADING'''
+        self.takeoff(50, mode='TAKEOFF')
+        self.change_mode('GUIDED')
+        # centripetal acceleration limit, giving about 45 degrees of bank:
+        accel = 10
 
-            # 2. the runner's own parameters exist only now
-            shr = {k: v for k, v in plan.get("params", {}).items() if k.startswith("SHR_")}
-            if shr:
-                self.set_parameters(shr)
+        self.start_subtest("vehicle heading")
+        for heading in 90, 270:
+            self.run_cmd_int(
+                mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+                p1=mavutil.mavlink.HEADING_TYPE_HEADING,
+                p2=heading,
+                p3=accel,
+            )
+            self.wait_heading(heading, accuracy=5, minimum_duration=10, timeout=60)
 
-            # 3. take off to the window altitude and establish the start
-            #    pose (TASK-046 D6): on the spec's heading at cruise, and,
-            #    with a site box, passing through the anchor point so the
-            #    kangaroo and the box land where the Python counterpart put them
-            self.wait_ready_to_arm(timeout=300)
-            self.takeoff(alt=plan["alt_m"], mode="TAKEOFF",
-                         timeout=plan.get("takeoff_timeout_s", 180))
-            self.change_mode("GUIDED")
-            heading = float(plan["plane_heading_deg"])
-            anchor_ne = plan.get("anchor_ne_from_home_m")
-            if anchor_ne is not None:
-                anchor = self.offset_location_ne(home_loc, anchor_ne[0], anchor_ne[1])
-                run_in = self.offset_location_heading_distance(
-                    anchor, (heading + 180.0) % 360.0, self.KANGAROO_FOLLOW_RUN_IN_M)
-                run_in.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
-                self.send_do_reposition(run_in)
-                self.wait_distance_to_location(run_in, 0, 150,
-                                               timeout=plan.get("pose_timeout_s", 240))
-                # GUIDED flies straight at its point from wherever the turn
-                # onto it leaves the aircraft, so one aim at a point ahead
-                # passed the anchor 120 to 150 m abeam and the window never
-                # opened, and aiming through the anchor from the run-in
-                # arrived 7 deg off the spec heading. Follow the spec line
-                # instead: every KANGAROO_FOLLOW_REAIM_S re-aim at the point
-                # KANGAROO_FOLLOW_REAIM_LEAD_M ahead of the aircraft's
-                # projection onto it, then at the far point once close.
-                un, ue = math.cos(math.radians(heading)), math.sin(math.radians(heading))
-                t_aim = self.get_sim_time()
-                while True:
-                    here = self.mav.location()
-                    dn = (here.lat - anchor.lat) * 111319.5
-                    de = (here.lng - anchor.lng) * 111319.5 * math.cos(math.radians(here.lat))
-                    along = dn * un + de * ue          # negative before the anchor
-                    if along > -self.KANGAROO_FOLLOW_REAIM_STOP_M:
-                        break
-                    if self.get_sim_time_cached() - t_aim > plan.get("pose_timeout_s", 240):
-                        raise NotAchievedException("lead-in did not reach the spec line")
-                    aim = self.offset_location_heading_distance(
-                        anchor, heading, along + self.KANGAROO_FOLLOW_REAIM_LEAD_M) \
-                        if along + self.KANGAROO_FOLLOW_REAIM_LEAD_M >= 0 else \
-                        self.offset_location_heading_distance(
-                            anchor, (heading + 180.0) % 360.0,
-                            -(along + self.KANGAROO_FOLLOW_REAIM_LEAD_M))
-                    aim.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
-                    self.send_do_reposition(aim)
-                    self.delay_sim_time(self.KANGAROO_FOLLOW_REAIM_S, "lead-in")
-                ahead = self.offset_location_heading_distance(
-                    anchor, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
-                ahead.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
-                self.send_do_reposition(ahead)
-                self.wait_distance_to_location(anchor, 0, self.KANGAROO_FOLLOW_ANCHOR_RADIUS_M,
-                                               timeout=plan.get("pose_timeout_s", 240))
-                self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
-                                  timeout=10)
-                result["anchor_distance_m"] = self.get_distance(anchor, self.mav.location())
-            else:
-                here = self.mav.location()
-                ahead = self.offset_location_heading_distance(
-                    here, heading, self.KANGAROO_FOLLOW_LEAD_IN_M)
-                ahead.set_alt_m(plan["alt_m"], AltFrame.ABOVE_HOME)
-                self.send_do_reposition(ahead)
-                self.wait_heading(heading, accuracy=self.KANGAROO_FOLLOW_HEADING_TOL_DEG,
-                                  timeout=plan.get("pose_timeout_s", 240))
-            cruise = float(plan.get("airspeed_ms", 25.0))
-            self.wait_airspeed(cruise - self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS,
-                               cruise + self.KANGAROO_FOLLOW_AIRSPEED_TOL_MS, timeout=60)
-            self.wait_altitude(plan["alt_m"] - 15, plan["alt_m"] + 15, relative=True, timeout=60)
-            result["timings"]["posed_s"] = time.time() - t_wall
+        self.start_subtest("course over ground")
+        # a crosswind makes the course differ from the heading:
+        self.set_parameters({
+            "SIM_WIND_SPD": 8,
+            "SIM_WIND_DIR": 0,
+        })
+        course = 90
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+            p1=mavutil.mavlink.HEADING_TYPE_COURSE_OVER_GROUND,
+            p2=course,
+            p3=accel,
+        )
+        self.wait_and_maintain(
+            value_name="CourseOverGround",
+            target=course,
+            current_value_getter=lambda: self.assert_receive_message('GPS_RAW_INT').cog * 0.01,
+            validator=lambda value, target: self.heading_delta(value, target) <= 5,
+            minimum_duration=10,
+            timeout=60,
+        )
+        heading = self.get_heading()
+        if self.heading_delta(heading, course) < 10:
+            raise NotAchievedException(f"Expected heading ({heading}) to be crabbed away from course ({course})")
+        self.set_parameter("SIM_WIND_SPD", 0)
 
-            # 3b. the site box as a report-only fence, only now: since the
-            #     2026-09 upstream sync ArduPlane refuses a DO_REPOSITION to a
-            #     point outside an enabled fence whatever FENCE_ACTION is
-            #     (GCS_MAVLink_Plane.cpp, check_location_within_fence), and the
-            #     run-in and lead-in points lie outside the box (TASK-061).
-            #     The window, where breaches are measured, starts after it.
-            self._kangaroo_follow_upload_fence(plan, home_loc)
+        self.start_subtest("HEADING_TYPE_DEFAULT returns to normal GUIDED navigation")
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_GUIDED_CHANGE_HEADING,
+            p1=mavutil.mavlink.HEADING_TYPE_DEFAULT,
+        )
+        # the GUIDED loiter point is where GUIDED was entered, behind us:
+        self.wait_heading(270, accuracy=20, timeout=60)
 
-            # 4. open the window; the runner anchors the frame at the aircraft
-            self.set_parameter("SHR_START", 1)
-            self.wait_statustext("SHR: started", timeout=20, check_context=True)
-            hud = self.mav.recv_match(type="VFR_HUD", blocking=True, timeout=5)
-            loc = self.mav.location()
-            result["start_pose"] = {
-                "lat_deg": loc.lat, "lng_deg": loc.lng, "alt_m": loc.alt,
-                "heading_deg": float(hud.heading) if hud else None,
-                "airspeed_ms": float(hud.airspeed) if hud else None,
-                "groundspeed_ms": float(hud.groundspeed) if hud else None,
-                "heading_error_deg": (((float(hud.heading) - heading + 180.0) % 360.0) - 180.0)
-                if hud else None,
-                "sim_time_s": self.get_sim_time_cached(),
-            }
+        self.fly_home_land_and_disarm()
 
-            # 5. wait for the runner: SHR_DONE 1 done, 2 refused, 3 load error
-            timeout = float(plan.get("window_s") or plan["duration_s"]) + float(plan.get("margin_s", 30.0))
-            tstart = self.get_sim_time()
-            done = 0
-            while self.get_sim_time_cached() - tstart < timeout:
-                done = int(self.get_parameter("SHR_DONE", attempts=1))
-                if done != 0:
-                    break
-                self.delay_sim_time(2, "kangaroo-follow window")
-            result["timings"]["window_s"] = time.time() - t_wall
-            result["shr_done"] = done
-            result["shr_t_s"] = float(self.get_parameter("SHR_T_S", attempts=1))
-            result["shr_tick"] = int(self.get_parameter("SHR_TICK", attempts=1))
-            if done == 1:
-                result["status"] = "complete"
-            elif done == 2:
-                result["status"] = "partial"
-                result["reason"] = "runner refused (no solution); see statustexts"
-            elif done == 3:
-                result["status"] = "error"
-                result["reason"] = "runner load error; see statustexts"
-            else:
-                result["status"] = "partial"
-                result["reason"] = "cell timeout after %.0f s sim time" % timeout
-        finally:
-            result["statustexts"] = self._kangaroo_follow_statustexts()
-            try:
-                self.disarm_vehicle(force=True)
-            except Exception as exc:
-                self.progress("KangarooFollow: disarm failed: %s" % exc)
-            try:
-                self.delay_sim_time(2, "log close")
-                result["bin"] = self._kangaroo_follow_copy_bin(plan["bin_out"])
-            except Exception as exc:
-                result["reason"] = (result.get("reason") or "") + "; log copy failed: %s" % exc
-            self.context_pop()
-            result["timings"]["total_s"] = time.time() - t_wall
-            os.makedirs(os.path.dirname(plan["result_out"]), exist_ok=True)
-            with open(plan["result_out"], "w") as handle:
-                json.dump(result, handle, indent=2)
-                handle.write("\n")
-            self.progress("KangarooFollow: %s -> %s (%s)" % (
-                plan["cell_id"], result["status"], result.get("reason")))
-        return result
+    def send_set_position_target_local_ned_z(self, frame, z):
+        self.mav.mav.set_position_target_local_ned_send(
+            0, # time_boot_ms
+            self.sysid_thismav(),
+            1, # target component
+            frame,
+            MAV_POS_TARGET_TYPE_MASK.ALT_ONLY,
+            0, # x
+            0, # y
+            z,
+            0, # vx
+            0, # vy
+            0, # vz
+            0, # afx
+            0, # afy
+            0, # afz
+            0, # yaw
+            0, # yaw_rate
+        )
 
-    def KangarooFollowCell(self):
-        """Fly one kangaroo-follow harness cell named by KANGAROO_FOLLOW_PLAN (TASK-052)."""
-        plan = self._kangaroo_follow_load_plan()
-        result = self._kangaroo_follow_fly_cell(plan)
-        if result["status"] == "error":
-            raise NotAchievedException(result["reason"])
+    def SET_POSITION_TARGET_LOCAL_NED(self):
+        '''test changing altitude in GUIDED with SET_POSITION_TARGET_LOCAL_NED'''
+        takeoff_alt = 50
+        self.takeoff(takeoff_alt, mode='TAKEOFF')
+        self.context_collect('STATUSTEXT')
 
-    def KangarooFollowCampaign(self):
-        """Fly every planned cell of the manifest directory named by KANGAROO_FOLLOW_CAMPAIGN (TASK-052)."""
-        kf_paths = self._kangaroo_follow_package()
-        out_dir = os.environ.get(kf_paths.CAMPAIGN_ENV)
-        if not out_dir:
-            raise PreconditionFailedException(
-                "set %s to a campaign directory holding MANIFEST.json or MANIFEST-wind.json"
-                % kf_paths.CAMPAIGN_ENV)
-        errors = []
-        for name in ("MANIFEST.json", "MANIFEST-wind.json"):
-            path = os.path.join(out_dir, name)
-            if not os.path.isfile(path):
-                continue
-            with open(path) as handle:
-                manifest = json.load(handle)
-            for cid in sorted(manifest["cells"]):
-                entry = manifest["cells"][cid]
-                plan_path = os.path.join(out_dir, cid, "plan.json")
-                if entry.get("status") != "planned" or not os.path.isfile(plan_path):
-                    self.progress("KangarooFollow: skipping %s (%s)" % (cid, entry.get("status")))
-                    continue
-                result = self._kangaroo_follow_fly_cell(self._kangaroo_follow_load_plan(plan_path))
-                if result["status"] == "error":
-                    errors.append("%s: %s" % (cid, result["reason"]))
-        if errors:
-            raise NotAchievedException("; ".join(errors))
+        def assert_no_altitude_change_text():
+            self.delay_sim_time(5, reason="vehicle to process message")
+            for m in self.context_collection('STATUSTEXT'):
+                if m.text.startswith("Change alt to"):
+                    raise NotAchievedException(f"Unexpected altitude change: {m.text}")
 
-    # ---------------------------------------------------------
-    # Live demonstration (TASK-058): kangaroo_demo.lua flies the baseline
-    # against a kangaroo whose mode and speed are KDEM_* parameters, and
-    # broadcasts it as ADSB_VEHICLE. This test walks every harness mode
-    # through the swept speeds so it can be watched with `autotest.py --map`;
-    # the same script is flown by hand under sim_vehicle.py after
-    # `python3 -m kangaroo_follow.demo --stage`. It checks the display and
-    # the mode mapping, not guidance performance (that is the campaign's).
-    # KDEM_MODE codes: 0 point, 1 straight, 2 circle, 3 rectangle, 4 rand.
-    KANGAROO_DEMO_MODES = ((0, "point"), (1, "straight"), (2, "circle"),
-                           (3, "rectangle"), (4, "rand"))
-    # the CAMP-003 speed ratios against the 25 m/s cruise, m/s
-    KANGAROO_DEMO_SPEEDS_MS = (6.25, 12.5, 18.75, 25.0, 37.5)
-    # elastic pace is flown for these modes at this speed (the thesis's
-    # elastic cells run at fast-phase ratio 0.5)
-    KANGAROO_DEMO_ELASTIC_MODES = ((1, "straight"), (2, "circle"), (3, "rectangle"))
-    KANGAROO_DEMO_ELASTIC_SPEED_MS = 12.5
-    # time spent on each step, s of sim time
-    KANGAROO_DEMO_DWELL_S = 30.0
-    # Certification criteria, fixed before any run (TASK-058, 2026-09-24):
-    # C1 the kangaroo is on the map (ADS-B) in every step;
-    # C2 a straight constant-pace kangaroo reports the speed set, within this
-    #    tolerance, m/s (the message carries cm/s);
-    KANGAROO_DEMO_SPEED_TOL_MS = 0.1
-    # C3 a stationary kangaroo is on the 70 m ring at the end of its step,
-    #    range within this band, m (the loiter failure read 200 to 390 m);
-    KANGAROO_DEMO_POINT_RANGE_M = (40.0, 110.0)
-    # C4 in the holdable range (speed at or below this, constant or elastic
-    #    pace) the aircraft reaches the ring in every mode: closest approach
-    #    at or below the band's upper edge. Above it the thesis's dynamic
-    #    limit applies (ratio 0.5 is already at it for a straight kangaroo),
-    #    so those steps are reported, not judged;
-    KANGAROO_DEMO_HOLDABLE_MS = 12.5
-    # C5 no script fault in the whole flight: any of these statustexts fails.
-    KANGAROO_DEMO_FAULT_TEXTS = ("Lua:", "KDEM: load failed", "KDEM: schedule",
-                                 "KDEM: not enough mem", "KDEM: guidance command refused",
-                                 "KDEM: cannot start")
+        self.start_subtest("ignored outside GUIDED")
+        self.change_mode('LOITER')
+        self.send_set_position_target_local_ned_z(mavutil.mavlink.MAV_FRAME_LOCAL_OFFSET_NED, -30)
+        assert_no_altitude_change_text()
 
-    def _kangaroo_demo_step(self, seen, name, code, pace, speed, failures):
-        """Fly one (mode, pace, speed) step; returns its summary row."""
-        self.set_parameters({"KDEM_MODE": code, "KDEM_PACE": pace, "KDEM_SPD": speed})
-        self.wait_statustext("KDEM: kangaroo %s" % name, timeout=10, check_context=True)
-        label = "%s%s %.2f m/s" % (name, " elastic" if pace else "", speed)
-        del seen[:]
-        ranges = []
+        self.change_mode('GUIDED')
+
+        self.start_subtest("ignored in frames other than MAV_FRAME_LOCAL_OFFSET_NED")
+        self.send_set_position_target_local_ned_z(mavutil.mavlink.MAV_FRAME_LOCAL_NED, -30)
+        assert_no_altitude_change_text()
+
+        self.start_subtest("offset the altitude")
+        want_alt = self.get_altitude(relative=True)
+        for z in -30, 20:
+            want_alt -= z
+            self.context_clear_collection('STATUSTEXT')
+            self.send_set_position_target_local_ned_z(mavutil.mavlink.MAV_FRAME_LOCAL_OFFSET_NED, z)
+            m = self.wait_statustext("Change alt to", check_context=True)
+            target_alt = float(m.text.split()[-1])
+            if abs(target_alt - want_alt) > 5:
+                raise NotAchievedException(f"Want target altitude near {want_alt} got {target_alt}")
+            self.wait_altitude(target_alt-3, target_alt+3, relative=True, minimum_duration=10, timeout=60)
+            want_alt = target_alt
+
+        self.fly_home_land_and_disarm()
+
+    def GuidedOnlyOffboardControl(self):
+        '''check offboard altitude targets are ignored outside GUIDED, and attitude targets in AVOID_ADSB'''
+        self.set_parameters({
+            "ADSB_TYPE": 1,
+            "AVD_ENABLE": 1,
+            "AVD_F_ACTION": mavutil.mavlink.MAV_COLLISION_ACTION_MOVE_HORIZONTALLY,
+        })
+        self.reboot_sitl()
+        self.takeoff(50, mode='TAKEOFF')
+
+        def send_altitude_target(frame, alt):
+            self.mav.mav.set_position_target_global_int_send(
+                0, # time_boot_ms
+                self.sysid_thismav(),
+                1, # target component
+                frame,
+                MAV_POS_TARGET_TYPE_MASK.ALT_ONLY,
+                0, # lat
+                0, # lon
+                alt,
+                0, # vx
+                0, # vy
+                0, # vz
+                0, # afx
+                0, # afy
+                0, # afz
+                0, # yaw
+                0, # yaw_rate
+            )
+
+        def send_zero_thrust_target():
+            # use thrust only:
+            type_mask = (mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_ROLL_RATE_IGNORE |
+                         mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_PITCH_RATE_IGNORE |
+                         mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_BODY_YAW_RATE_IGNORE |
+                         mavutil.mavlink.ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE)
+            self.mav.mav.set_attitude_target_send(
+                0, # time_boot_ms
+                self.sysid_thismav(),
+                1, # target component
+                type_mask,
+                [1, 0, 0, 0],
+                0, # roll rate
+                0, # pitch rate
+                0, # yaw rate
+                0, # thrust
+            )
+
+        # LOITER flies at the altitude of the navigation target which
+        # SET_POSITION_TARGET_GLOBAL_INT changes in GUIDED:
+        self.start_subtest("SET_POSITION_TARGET_GLOBAL_INT ignored in LOITER")
+        self.change_mode('LOITER')
+        self.delay_sim_time(10, reason="vehicle to settle into LOITER")
+        start_alt = self.get_altitude(relative=True)
+        send_altitude_target(mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, start_alt+40)
+        self.wait_altitude(start_alt-5, start_alt+5, relative=True, minimum_duration=15, timeout=30)
+
+        self.start_subtest("SET_POSITION_TARGET_GLOBAL_INT with an invalid frame")
+        self.change_mode('GUIDED')
+        self.context_collect('STATUSTEXT')
+        send_altitude_target(mavutil.mavlink.MAV_FRAME_LOCAL_NED, start_alt+40)
+        # the text is long enough to be sent in chunks, so match on the first:
+        self.wait_statustext("Invalid coord frame in SET_POSITION_TARGET_GLOBAL", check_context=True)
+        self.wait_altitude(start_alt-5, start_alt+5, relative=True, minimum_duration=15, timeout=30)
+
+        # AVOID_ADSB runs the GUIDED controllers, which would act on an
+        # accepted attitude or thrust target.  (Avoidance resets the
+        # navigation target continually, so an accepted altitude
+        # target would not be seen here.)
+        self.start_subtest("SET_ATTITUDE_TARGET ignored in AVOID_ADSB")
+        self.change_mode('LOITER')
+
+        def send_threat():
+            # keep a threat just beside the vehicle so it stays in AVOID_ADSB:
+            self.test_adsb_send_threatening_adsb_message(self.get_location(), offset_ne=(0, 30))
+
+        send_threat()
+        self.wait_mode('AVOID_ADSB')
+        start_alt = self.get_altitude(relative=True)
+        throttles = []
         tstart = self.get_sim_time()
-        while self.get_sim_time_cached() - tstart < self.KANGAROO_DEMO_DWELL_S:
-            self.delay_sim_time(2, "kangaroo %s" % label)
-            if seen:
-                here = self.assert_receive_message("GLOBAL_POSITION_INT")
-                ranges.append(self.get_distance_int(here, seen[-1]))
-        if not seen or not ranges:
-            failures.append("C1 %s: no KANGAROO ADSB_VEHICLE" % label)
-            return (label, None, None, None, "FAIL C1")
-        verdict = "pass"
-        if name == "straight" and not pace:
-            got = seen[-1].hor_velocity * 0.01
-            if abs(got - speed) > self.KANGAROO_DEMO_SPEED_TOL_MS:
-                failures.append("C2 %s: reports %.2f m/s" % (label, got))
-                verdict = "FAIL C2"
-        lo, hi = self.KANGAROO_DEMO_POINT_RANGE_M
-        if name == "point" and not lo <= ranges[-1] <= hi:
-            failures.append("C3 %s: end range %.0f m, want %.0f to %.0f" % (label, ranges[-1], lo, hi))
-            verdict = "FAIL C3"
-        if name != "point" and speed <= self.KANGAROO_DEMO_HOLDABLE_MS:
-            if min(ranges) > hi:
-                failures.append("C4 %s: closest %.0f m, want <= %.0f" % (label, min(ranges), hi))
-                verdict = "FAIL C4"
-        elif name != "point":
-            verdict = "reported"
-        row = (label, min(ranges), sum(ranges) / len(ranges), ranges[-1], verdict)
-        self.progress("KangarooFollowDemo: %-26s range min %4.0f mean %4.0f end %4.0f m  %s" % row)
-        return row
+        while self.get_sim_time_cached() - tstart < 15:
+            send_threat()
+            send_zero_thrust_target()
+            self.assert_mode_is('AVOID_ADSB')
+            throttle = self.assert_receive_message('VFR_HUD').throttle
+            if self.get_sim_time_cached() - tstart > 1:
+                # an accepted target would have taken effect by now
+                throttles.append(throttle)
+            alt = self.get_altitude(relative=True)
+            if abs(alt - start_alt) > 10:
+                raise NotAchievedException(f"Altitude changed from {start_alt} to {alt} in AVOID_ADSB")
+            self.delay_sim_time(0.2, reason="rate-limit targets")
+        low = [t for t in throttles if t < 10]
+        self.progress(f"AVOID_ADSB throttle samples: {throttles}")
+        if len(throttles) < 10 or len(low) > 0.2 * len(throttles):
+            raise NotAchievedException(
+                f"Throttle below 10% in {len(low)} of {len(throttles)} samples; zero thrust target followed?")
+        self.wait_for_collision_threat_to_clear()
 
-    def KangarooFollowDemo(self):
-        """Baseline vs every kangaroo mode across the swept speeds, visible on the map (TASK-058)."""
-        kf_paths = self._kangaroo_follow_package()
-        import kangaroo_follow.demo as kf_demo
-        import kangaroo_follow.stage_scripts as kf_stage
-        # KANGAROO_DEMO_LOOK_AHEAD_M: the carrot, m (default the cell's 50;
-        # the thesis's short-carrot baseline is 5)
-        look_ahead = os.environ.get("KANGAROO_DEMO_LOOK_AHEAD_M")
-        # KANGAROO_DEMO_ROLL_LIMIT_DEG: the bank limit, deg (default the
-        # parameter file's 45, the flight code's; the harness's is 60)
-        roll_limit = os.environ.get("KANGAROO_DEMO_ROLL_LIMIT_DEG")
-        # KANGAROO_DEMO_CAMPAIGN / KANGAROO_DEMO_CELL: the Python cell whose
-        # spec (arm, estimator, carrot) the demonstration flies (default
-        # CAMP-003 0H-straight-constant-half; TASK-061 flies CAMP-002 A and 0)
-        kf_demo.stage(campaign_dir=os.environ.get("KANGAROO_DEMO_CAMPAIGN", kf_demo.DEFAULT_CAMPAIGN),
-                      cell_id=os.environ.get("KANGAROO_DEMO_CELL", kf_demo.DEFAULT_CELL),
-                      look_ahead_m=float(look_ahead) if look_ahead else None)
+        self.fly_home_land_and_disarm()
+
+    def MAV_CMD_DO_RETURN_PATH_START(self):
+        '''test MAV_CMD_DO_RETURN_PATH_START as a mavlink command'''
+        self.start_subtest("refused without a return path in the mission")
+        self.clear_mission(mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START, want_result=mavutil.mavlink.MAV_RESULT_FAILED)
+        self.upload_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 50),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 800, 0, 50),
+        ])
+        self.run_cmd_int(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START, want_result=mavutil.mavlink.MAV_RESULT_FAILED)
+
+        # a mission with DO_RETURN_PATH_START fails prearms with RTL_AUTOLAND disabled:
+        self.set_parameter("RTL_AUTOLAND", 4)
+
+        self.start_subtest("does not switch away from a return path being flown")
+        # the leg from item 5 to item 6 passes 100m from item 2:
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 50),     # 1
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 100, 400, 50),  # 2
+            self.create_MISSION_ITEM_INT(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START),  # 3
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 800, 800, 50),  # 4
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 800, 50),    # 5
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 0, 50),      # 6
+        ])
+        self.wait_current_waypoint(4, timeout=120)
+        self.context_collect('STATUSTEXT')
+        self.context_collect('MISSION_CURRENT')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START)
+        self.wait_statustext("Return path active", check_context=True)
+        self.delay_sim_time(2, reason="any rejoin to take effect")
+        # not rejoined at the nearby leg to item 6:
+        for m in self.context_collection('MISSION_CURRENT'):
+            if m.seq == 6:
+                raise NotAchievedException("Switched away from the return path being flown")
+
+        self.start_subtest("refused if AUTO may not be entered from the GCS")
+        self.change_mode('GUIDED')
+        # beside the leg from item 4 to item 5:
+        loc = self.offset_location_ne(self.home_position_as_location(), 400, 900)
+        loc.set_alt_m(50, AltFrame.ABOVE_HOME)
+        self.send_do_reposition(loc)
+        self.wait_location(loc, accuracy=200, height_accuracy=None, timeout=120)
+        self.set_parameter("FLTMODE_GCSBLOCK", 1 << 9)  # AUTO
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START, want_result=mavutil.mavlink.MAV_RESULT_FAILED)
+        self.assert_mode_is('GUIDED')
+        self.set_parameter("FLTMODE_GCSBLOCK", 0)
+
+        self.start_subtest("joins the closest leg of the return path")
+        # the refused request has already moved the current item to the
+        # joining point; move it away so this request has to do it:
+        self.set_current_waypoint(2)
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_RETURN_PATH_START)
+        self.wait_mode('AUTO')
+        self.wait_current_waypoint(5, timeout=10)
+
+        self.fly_home_land_and_disarm()
+
+    def MAV_CMD_SET_HAGL(self):
+        '''test height above ground from MAV_CMD_SET_HAGL is used for the landing flare'''
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 1000, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_LAND, 10, 0, 0),
+        ])
+        self.wait_current_waypoint(3, timeout=120)
+
+        self.context_collect('STATUSTEXT')
+        tstart = self.get_sim_time()
+        flare = None
+        while flare is None:
+            if self.get_sim_time_cached() - tstart > 120:
+                raise NotAchievedException("Did not flare")
+            # tell the vehicle it is just above the ground while it is still well up the approach:
+            self.run_cmd_int(
+                mavutil.mavlink.MAV_CMD_SET_HAGL,
+                p1=0.5,  # height above ground (m)
+                p3=1,    # timeout (s)
+                quiet=True,
+            )
+            for m in self.context_collection('STATUSTEXT'):
+                if m.text.startswith("Flare "):
+                    flare = m
+            self.delay_sim_time(0.2, reason="rate-limit SET_HAGL")
+        # the flare message reports the height used to trigger it:
+        if not flare.text.startswith("Flare 0.5m"):
+            raise NotAchievedException(f"Flare was not triggered by the external HAGL: {flare.text}")
+        alt = self.get_altitude(relative=True)
+        if alt < 10:
+            raise NotAchievedException(f"Flare at {alt}m could have come from the vehicle's own height estimate")
+
+        self.wait_disarmed(timeout=120)
+
+    def MAV_CMD_DO_PARACHUTE_actions(self):
+        '''test enabling, disabling and repeated release of the parachute via mavlink'''
+        self.setup_simulated_parachute()
+        # releasing on the ground requires a vehicle which has never flown:
+        self.reboot_sitl()
+        self.context_collect('STATUSTEXT')
+
+        self.start_subtest("disable")
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_PARACHUTE, p1=mavutil.mavlink.PARACHUTE_DISABLE)
+        self.assert_parameter_value("CHUTE_ENABLED", 0)
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_PARACHUTE,
+            p1=mavutil.mavlink.PARACHUTE_RELEASE,
+            want_result=mavutil.mavlink.MAV_RESULT_FAILED,
+        )
+        self.wait_statustext("Parachute not enabled", check_context=True)
+
+        self.start_subtest("enable")
+        self.run_cmd_int(mavutil.mavlink.MAV_CMD_DO_PARACHUTE, p1=mavutil.mavlink.PARACHUTE_ENABLE)
+        self.assert_parameter_value("CHUTE_ENABLED", 1)
+
+        self.start_subtest("action not in PARACHUTE_ACTION")
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_PARACHUTE,
+            p1=3,
+            want_result=mavutil.mavlink.MAV_RESULT_FAILED,
+        )
+
+        self.start_subtest("release twice")
+        self.wait_ready_to_arm()
+        self.arm_vehicle()
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_PARACHUTE, p1=mavutil.mavlink.PARACHUTE_RELEASE)
+        self.wait_servo_channel_value(9, 1300)
+        self.wait_disarmed()
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_PARACHUTE,
+            p1=mavutil.mavlink.PARACHUTE_RELEASE,
+            want_result=mavutil.mavlink.MAV_RESULT_FAILED,
+        )
+        self.wait_statustext("Parachute already released", check_context=True)
+
+        # the released state is only cleared by a reboot:
+        self.reboot_sitl()
+
+    def MAV_CMD_DO_SET_MISSION_CURRENT(self):
+        '''test changing the mission item being flown with MAV_CMD_DO_SET_MISSION_CURRENT'''
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 50),       # 1
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 800, 0, 50),    # 2
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 800, 800, 50),  # 3
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 800, 50),    # 4
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 0, 0, 50),      # 5
+        ])
+        self.wait_current_waypoint(2, timeout=60)
+
+        self.start_subtest("invalid sequence numbers")
+        self.run_cmd(
+            mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT,
+            p1=-2,
+            want_result=mavutil.mavlink.MAV_RESULT_DENIED,
+        )
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT,
+            p1=100,
+            want_result=mavutil.mavlink.MAV_RESULT_FAILED,
+        )
+
+        self.start_subtest("change item while flying the mission")
+        for run_cmd, seq in (self.run_cmd, 4), (self.run_cmd_int, 3):
+            run_cmd(mavutil.mavlink.MAV_CMD_DO_SET_MISSION_CURRENT, p1=seq)
+            self.wait_current_waypoint(seq, timeout=10)
+            self.wait_distance_to_waypoint(seq, 0, 100, timeout=120)
+
+        self.fly_home_land_and_disarm()
+
+    def DO_REPOSITION_loiter_radius_and_direction(self):
+        '''test the loiter radius and direction parameters of MAV_CMD_DO_REPOSITION'''
+        self.takeoff(50, mode='TAKEOFF')
+        centre = self.offset_location_ne(self.home_position_as_location(), 600, 0)
+
+        def get_yaw_rate():
+            return self.assert_receive_message('ATTITUDE').yawspeed
+
+        for direction, radius, min_yaw_rate, max_yaw_rate in (1, 150, -1, -0.03), (0, 250, 0.03, 1):
+            self.start_subtest(f"direction={direction} radius={radius}")
+            self.change_mode('LOITER')
+            self.run_cmd_int(
+                mavutil.mavlink.MAV_CMD_DO_REPOSITION,
+                p2=mavutil.mavlink.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+                p3=radius,
+                p4=direction,  # 0 is clockwise, 1 counter-clockwise
+                p5=int(centre.lat * 1e7),
+                p6=int(centre.lng * 1e7),
+                p7=50,
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            )
+            self.wait_mode('GUIDED')
+            self.wait_distance_to_location(centre, radius-30, radius+30, minimum_duration=20, timeout=120)
+            self.wait_and_maintain_range(
+                value_name="YawRate",
+                minimum=min_yaw_rate,
+                maximum=max_yaw_rate,
+                current_value_getter=get_yaw_rate,
+                minimum_duration=10,
+                timeout=30,
+            )
+
+        self.fly_home_land_and_disarm()
+
+    def DO_SET_HOME_in_RTL(self):
+        '''check RTL follows a home position which is changed while in RTL'''
+        self.takeoff(50, mode='TAKEOFF')
+        self.change_mode('RTL')
+
+        self.start_subtest("set home to a location")
+        home = self.home_position_as_location()
+        new_home = self.offset_location_ne(home, 1000, 0)
+        self.run_cmd_int(
+            mavutil.mavlink.MAV_CMD_DO_SET_HOME,
+            p5=int(new_home.lat * 1e7),
+            p6=int(new_home.lng * 1e7),
+            p7=home.get_alt_m(AltFrame.ABSOLUTE),
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL,
+        )
+        self.wait_distance_to_location(new_home, 0, 200, timeout=120)
+
+        self.start_subtest("set home to the current location")
+        self.change_mode('GUIDED')
+        away = self.offset_location_ne(new_home, 0, 800)
+        away.set_alt_m(50, AltFrame.ABOVE_HOME)
+        self.send_do_reposition(away)
+        self.wait_distance_to_location(new_home, 600, 10000, timeout=120)
+        self.change_mode('RTL')
+        self.run_cmd(mavutil.mavlink.MAV_CMD_DO_SET_HOME, p1=1)
+        here = self.get_location()
+        # without RTL picking up the new home we would fly back to new_home:
+        self.wait_distance_to_location(here, 0, 300, minimum_duration=30, timeout=60)
+
+        # home is locked; reboot to release it
+        self.reboot_sitl(force=True)
+
+    def HEARTBEAT_system_status(self):
+        '''check HEARTBEAT system_status tracks the vehicle state'''
+        def wait_system_status(status, timeout=30):
+            self.wait_message_field_values('HEARTBEAT', {"system_status": status}, timeout=timeout)
+
+        self.wait_ready_to_arm()
+        wait_system_status(mavutil.mavlink.MAV_STATE_STANDBY)
+
+        self.set_parameter("CRASH_DETECT", 1)  # disarm on crash
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 50),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 3000, 0, 50),
+        ])
+        self.wait_current_waypoint(2, timeout=60)
+        wait_system_status(mavutil.mavlink.MAV_STATE_ACTIVE)
+
+        self.start_subtest("failsafe")
+        self.set_parameter("SIM_RC_FAIL", 1)
+        wait_system_status(mavutil.mavlink.MAV_STATE_CRITICAL)
+        self.set_parameter("SIM_RC_FAIL", 0)
+        wait_system_status(mavutil.mavlink.MAV_STATE_ACTIVE)
+        self.assert_mode_is('AUTO')
+
+        self.start_subtest("crash")
+        self.context_collect('STATUSTEXT')
+        self.set_parameters({
+            "SIM_ENGINE_FAIL": 1 << 2,  # throttle servo
+            "SIM_ENGINE_MUL": 0,
+        })
+        self.wait_statustext("Crash detected", check_context=True, timeout=180)
+        self.wait_disarmed()
+        wait_system_status(mavutil.mavlink.MAV_STATE_EMERGENCY)
+
+        self.reboot_sitl()
+
+    def EXTENDED_SYS_STATE(self):
+        '''check EXTENDED_SYS_STATE through a fixed-wing flight'''
+        self.context_set_message_rate_hz('EXTENDED_SYS_STATE', 10)
+        vtol_state = mavutil.mavlink.MAV_VTOL_STATE_UNDEFINED
+        self.wait_extended_sys_state(vtol_state, mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND)
+
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 600, 0, 30),
+            (mavutil.mavlink.MAV_CMD_NAV_LAND, 10, 0, 0),
+        ])
+        for landed_state, timeout in [
+                (mavutil.mavlink.MAV_LANDED_STATE_TAKEOFF, 30),
+                (mavutil.mavlink.MAV_LANDED_STATE_IN_AIR, 60),
+                (mavutil.mavlink.MAV_LANDED_STATE_LANDING, 120),
+                (mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND, 180),
+        ]:
+            self.wait_extended_sys_state(vtol_state, landed_state, timeout=timeout)
+        self.wait_disarmed(timeout=60)
+
+    def PID_TUNING_axes(self):
+        '''check PID_TUNING is sent for the axes selected by GCS_PID_MASK'''
+        self.set_parameter("GCS_PID_MASK", 1 | 2 | 4 | 8)  # roll, pitch, yaw, steer
+        self.change_mode('FBWA')
+        want_axes = set([
+            mavutil.mavlink.PID_TUNING_ROLL,
+            mavutil.mavlink.PID_TUNING_PITCH,
+            mavutil.mavlink.PID_TUNING_YAW,
+            mavutil.mavlink.PID_TUNING_STEER,
+        ])
+        axes = self.received_pid_tuning_axes()
+        if axes != want_axes:
+            raise NotAchievedException(f"Want axes {sorted(want_axes)} got {sorted(axes)}")
+
+        self.start_subtest("not sent in MANUAL")
+        self.change_mode('MANUAL')
+        axes = self.received_pid_tuning_axes()
+        if len(axes) != 0:
+            raise NotAchievedException(f"Received PID_TUNING in MANUAL: {sorted(axes)}")
+
+        self.start_subtest("landing PID sent only while landing")
+        self.set_parameters({
+            "GCS_PID_MASK": 16,  # landing
+            "LAND_TYPE": 1,  # deepstall, which has a landing PID
+            "LAND_DS_ELEV_PWM": 1661,
+        })
+        self.change_mode('FBWA')
+        axes = self.received_pid_tuning_axes()
+        if len(axes) != 0:
+            raise NotAchievedException(f"Received PID_TUNING when not landing: {sorted(axes)}")
+        land_loc = self.offset_location_ne(self.home_position_as_location(), -30, -210)
+        # a mission with DO_LAND_START fails prearms with RTL_AUTOLAND disabled:
+        self.set_parameter("RTL_AUTOLAND", 1)
+        self.start_flying_simple_relhome_mission([
+            (mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 100),
+            (mavutil.mavlink.MAV_CMD_NAV_WAYPOINT, 110, -65, 100),
+            self.create_MISSION_ITEM_INT(mavutil.mavlink.MAV_CMD_DO_LAND_START),
+            self.create_MISSION_ITEM_INT(
+                mavutil.mavlink.MAV_CMD_NAV_LAND,
+                p4=1,
+                x=int(land_loc.lat * 1e7),
+                y=int(land_loc.lng * 1e7),
+                z=60,
+                frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            ),
+        ])
+        self.assert_receive_message(
+            'PID_TUNING',
+            condition=f'PID_TUNING.axis=={mavutil.mavlink.PID_TUNING_LANDING}',
+            timeout=240,
+        )
+        self.disarm_wait(timeout=120)
+
+    def CustomController(self):
+        '''Test Custom Controller API'''
+
+        CC_CHANNEL = 6
+        # Channel assignments correspond to AP_CustomControl_PID.cpp configuration.
+        CUSTOM_CHANNEL = 5
+        AIRBRAKE_CHANNEL = 7
+        AIRBRAKE_CHANNEL_2 = 10
+        PARACHUTE_CHANNEL = 8
+        UNDEFINED_CHANNEL = 6
+        SERVO_MIN = 1100
+        SCALING = 4/5  # Scaling factor between a 1000-2000 input to a 1100-1900 servo.
+
+        self.progress("Configure custom controller parameters")
+        self.set_parameters({
+            'CP_TYPE': 2,
+            'CP_MASK': 65535,
+            f'RC{CC_CHANNEL}_OPTION': 109,  # Configure CP switch.
+            # Configure an input channel to read flap control separate from the stock flap input.
+            f'RC{CUSTOM_CHANNEL}_OPTION': 29,  # A custom input channel (i.e. LANDING_GEAR)
+            f'SERVO{CUSTOM_CHANNEL}_FUNCTION': 26,  # Configure a custom output channel (i.e. STEERING)
+            f'SERVO{AIRBRAKE_CHANNEL}_FUNCTION': 110,  # Configure airbrake output.
+            f'SERVO{AIRBRAKE_CHANNEL_2}_FUNCTION': 110,  # Configure another airbrake output.
+            # Configure a parachute output that is driven only by the custom controller.
+            f'SERVO{PARACHUTE_CHANNEL}_FUNCTION': 27,
+        })
+        self.set_rc_from_map({
+            CC_CHANNEL: 1000,
+            AIRBRAKE_CHANNEL: 1000,
+        })
+        self.reboot_sitl()
+        # Some adjustments to pass the inverted flight test with more margin.
+        self.set_parameters({
+            # roll
+            "CP2_RAT_RLL_P": 0.27,
+            "CP2_RAT_RLL_I": 0.225,
+            "CP2_RAT_RLL_D": 0.015,
+            "CP2_RAT_RLL_FF": 0.213,
+            # pitch
+            "CP2_RAT_PIT_P": 0.135,
+            "CP2_RAT_PIT_I": 0.1,
+            "CP2_RAT_PIT_IMAX": 0.9,
+            "CP2_RAT_PIT_D": 0.0,
+            "CP2_RAT_PIT_FF": 0.536,
+        })
+
+        if self.get_parameter("CP_TYPE") != 2 :
+            raise NotAchievedException("Custom controller is not switched to PID backend.")
+
+        # check if we can retrieve any param inside PID backend
+        self.get_parameter("CP2_RAT_RLL_P")
+
+        # takeoff in GPS mode and perform a standard maneuver: fly straight, then loiter.
+        self.takeoff(100)
+        self.set_rc(3, 1500)
+        self.change_mode("CRUISE")
+        self.delay_sim_time(10, "Let the plane fly straight and level.")
+        self.change_mode("LOITER")
+        self.delay_sim_time(30, "Let the plane settle on the loiter.")
+        # Return to level flight.
+        self.change_mode("CRUISE")
+        self.delay_sim_time(10, "Let the plane fly straight and level.")
+
         self.context_push()
-        try:
-            self._kangaroo_follow_set_home({"home": {"name": kf_demo.location_name()}})
-            self.repeatedly_apply_parameter_filepath(kf_paths.PARAM_FILE)
-            self.repeatedly_apply_parameter_filepath(kf_demo.DEMO_PARAM_FILE)
-            speedup = os.environ.get("KANGAROO_DEMO_SPEEDUP")
-            if speedup:
-                self.set_parameter("SIM_SPEEDUP", float(speedup))
-            if roll_limit:
-                self.set_parameter("ROLL_LIMIT_DEG", float(roll_limit))
-            self.context_collect("STATUSTEXT")
-            self.reboot_sitl()
-            self.wait_statustext("KDEM: loaded", timeout=90, check_context=True)
-            self.progress("KangarooFollowDemo: carrot %s m, ROLL_LIMIT_DEG %.0f" % (
-                look_ahead or "cell default", self.get_parameter("ROLL_LIMIT_DEG")))
-            self.wait_ready_to_arm(timeout=300)
-            self.takeoff(alt=60, mode="TAKEOFF", timeout=180)
-            self.change_mode("GUIDED")
-            self.wait_statustext("KDEM: started", timeout=20, check_context=True)
+        self.context_collect('STATUSTEXT')
 
-            seen = []
+        # switch custom controller on
+        self.set_rc(CC_CHANNEL, 2000)
+        self.wait_statustext("Custom controller is ON", check_context=True)
+        self.delay_sim_time(10, "Give some time to the custom controller to establish level flight.")
+        self.change_mode("LOITER")
 
-            def hook(mav, m):
-                if m.get_type() == "ADSB_VEHICLE" and m.callsign.startswith("KANGAROO"):
-                    seen.append(m)
-            self.install_message_hook_context(hook)
+        # wait 30 seconds to see if the custom controller destabilize the aircraft
+        current_alt = self.get_altitude(relative=True)
+        self.wait_altitude(current_alt-10, current_alt+10, relative=True, minimum_duration=30, timeout=40)
 
-            summary = []
-            failures = []
-            for code, name in self.KANGAROO_DEMO_MODES:
-                speeds = (0.0,) if name == "point" else self.KANGAROO_DEMO_SPEEDS_MS
-                # each mode starts with the kangaroo placed ahead again
-                self.set_parameter("KDEM_RESET", 1)
-                for speed in speeds:
-                    summary.append(self._kangaroo_demo_step(seen, name, code, 0, speed, failures))
-            for code, name in self.KANGAROO_DEMO_ELASTIC_MODES:
-                self.set_parameter("KDEM_RESET", 1)
-                summary.append(self._kangaroo_demo_step(
-                    seen, name, code, 1, self.KANGAROO_DEMO_ELASTIC_SPEED_MS, failures))
-            faults = [m.text for m in self.context_collection("STATUSTEXT")
-                      if m.text.startswith(self.KANGAROO_DEMO_FAULT_TEXTS)]
-            if faults:
-                failures.append("C5 script faults: %s" % "; ".join(sorted(set(faults))))
-            self.progress("KangarooFollowDemo: %d steps flown, %d criteria failures" % (
-                len(summary), len(failures)))
-            if failures:
-                raise NotAchievedException("; ".join(failures))
-        finally:
-            try:
-                self.disarm_vehicle(force=True)
-            except Exception as exc:
-                self.progress("KangarooFollowDemo: disarm failed: %s" % exc)
-            # revert the KDEM_ parameters while the script that owns them is loaded
-            self.context_pop()
-            kf_stage.restore()
-            if getattr(self, "_kangaroo_follow_home", None) is not None:
-                # put SITL back at the suite's start location, so the
-                # SIM_PLD_* values the site move changed are restored
-                # rather than reported as leaked
-                self._kangaroo_follow_home = None
-                self._kangaroo_follow_heading = None
-                self.customise_SITL_commandline([], wipe=False)
-            else:
-                self.reboot_sitl()
+        # ensure we can fly inverted
+        self.run_auxfunc(43, 2)  # 43 == inverted flight
+        self.wait_altitude(current_alt-20, current_alt+10, relative=True, minimum_duration=30, timeout=40)
+        self.run_auxfunc(43, 0)
+
+        # Ensure we can manipulate the outputs in various ways.
+
+        self.set_rc(CUSTOM_CHANNEL, 1800)
+        w = vehicle_test_suite.WaitAndMaintainServoChannelValue(
+            self,
+            CUSTOM_CHANNEL,
+            1500 + (1800-1500)*SCALING,  # Ensure we can address outputs by function and drive them with unit inputs.
+            minimum_duration=1,
+        )
+        w.run()
+        self.set_rc(CUSTOM_CHANNEL, 1500)
+
+        self.set_rc(1, 1800)
+        self.wait_servo_channel_value(UNDEFINED_CHANNEL, 1800)  # Ensure we can control unused channels with pwm values.
+        self.set_rc(1, 1500)
+
+        self.assert_servo_channel_value(AIRBRAKE_CHANNEL, SERVO_MIN)  # Ensure that the function output is at minimum.
+        self.assert_servo_channel_value(AIRBRAKE_CHANNEL_2, 1000)  # Direct PWM writes don't respect min/max.
+        self.assert_servo_channel_value(PARACHUTE_CHANNEL, 1000)  # Direct PWM writes don't respect min/max.
+        self.set_rc(AIRBRAKE_CHANNEL, 1800)
+        # Ensure we don't override servos.cpp by default. We haven't configured an airbrake input.
+        # servos.cpp overrides us. We expect zero output here.
+        self.wait_servo_channel_value(AIRBRAKE_CHANNEL, SERVO_MIN)
+        self.wait_servo_channel_value(AIRBRAKE_CHANNEL_2, 1800)  # Ensure channel overrides work.
+        self.wait_servo_channel_value(PARACHUTE_CHANNEL, 1800)  # Ensure a channel can be controlled by function addressing.
+        self.set_rc(AIRBRAKE_CHANNEL, 1000)
+
+        # Ensure output masking works.
+        self.set_parameter("CP_MASK", 65407)  # The custom PID controller puts the 2nd airbrake output on bit7.
+        self.set_rc(AIRBRAKE_CHANNEL, 1800)
+        # Ensure masking works and the airbrake is set by its non-custom source.
+        self.wait_servo_channel_value(PARACHUTE_CHANNEL, 1800)  # Ensure this channel is still active.
+        self.wait_servo_channel_value(AIRBRAKE_CHANNEL_2, SERVO_MIN)
+        self.set_rc(AIRBRAKE_CHANNEL, 1000)
+
+        # switch custom controller off
+        self.set_rc(CC_CHANNEL, 1000)
+        self.wait_statustext("Custom controller is OFF", check_context=True)
+
+        self.context_pop()
+        self.fly_home_land_and_disarm()
 
     def tests(self):
         '''return list of all tests'''
@@ -10425,133 +10427,128 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         return ret
 
     def tests1a(self):
-        ret = []
+        '''return list of all tests'''
         ret = super(AutoTestPlane, self).tests()
         ret.extend([
-            self.AuxModeSwitch,
-            self.TestRCCamera,
-            self.TestRCRelay,
-            self.ThrottleFailsafe,
-            self.NeedEKFToArm,
             self.ThrottleFailsafeFence,
-            self.NoShortFailsafe,
-            self.SoaringClimbRate,
-            self.TestFlaps,
-            self.TestAutoSpeedFlaps,
             self.DO_CHANGE_SPEED,
-            self.GuidedThrottleNudge,
-            self.DO_REPOSITION,
             self.GuidedRequest,
             self.MainFlight,
             self.TestGripperMission,
-            self.Parachute,
-            self.ParachuteSinkRate,
-            self.DO_PARACHUTE,
-            self.PitotBlockage,
             self.AIRSPEED_AUTOCAL,
             self.RangeFinder,
-            self.TemperatureSensorRangefinder,
+            self.FenceRTLRally,
+            self.FenceMinAltEnableAutoland,
+            self.FenceAutoEnableDisableSwitch,
+            Test(self.FenceCircleExclusionAutoEnable, speedup=20),
+            self.ADSBFailActionRTL,
+            self.FRSkyPassThroughSensorIDs,
+            self.FRSkyD,
+            self.DEVO,
+            self.loiter_inside_circle,
+            self.MAV_CMD_NAV_LOITER_TURNS,
+            self.WatchdogHome,
+            self.Soaring,
+            self.Terrain,
+            self.ScriptingTerrainCorrected,
+            self.UniversalAutoLandScript,
+            self.TerrainLoiter,
+            self.KebniSensAItionExternalINS,
+            self.AeronEAHRS,
+            self.EKFlaneswitch,
+            self.ClimbBeforeTurn,
+            self.AltOffsetReset,
+            self.MAV_CMD_DO_AUX_FUNCTION,
+            self.AHRS_ORIENTATION,
+            self.AHRS2Logging,
+            self.TakeoffAuto2,
+            self.TakeoffAuto3,
+            self.TakeoffTakeoff2,
+            self.TakeoffTakeoff3,
+            self.TakeoffIdleThrottle,
+            self.TakeoffBadLevelOff,
+            self.ForcedDCM,
+            self.DCMFallback,
+            self.MAVFTPBurstEOFOffset,
+            self.MAVFTPListDirectoryRoot,
+            self.MAVFTPShortReplyPadding,
+            self.MAVFTPReadFile,
+            self.MAVFTPRename,
+            self.MAVFTPGapReadMAVProxy,
+            self.AutotuneFiltering,
+            self.MidAirDisarmDisallowed,
+            self.AerobaticsScripting,
+            self.MANUAL_CONTROL,
+            self.SDCardWPTest,
+            self.SagetechMXS,
+            self.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
+            self.MAV_CMD_PREFLIGHT_CALIBRATION,
+            self.MAV_CMD_DO_INVERTED_FLIGHT,
+            self.MAV_CMD_DO_GO_AROUND,
+            self.MAV_CMD_DO_FLIGHTTERMINATION,
+            self.MAV_CMD_DO_FLIGHTTERMINATION_unterminate,
+            self.CompassLearnInFlight,
+            self.GPSPreArms,
+            self.BadRollChannelDefined,
+            self.mavlink_AIRSPEED,
+            self.AirspeedEAS2TAS,
+            self.LoggedNamedValueInt,
+            self.AdvancedFailsafeBadBaro,
+            self.TerrainLoiterToCircle,
+            self.EK3HeightDatumResetFlushesBuffers,
+            self.DeadreckoningNoAirSpeed,
+        ])
+        return ret
+
+    def tests1b(self):
+        '''return list of all tests'''
+        ret = ([
+            self.TestRCRelay,
+            self.ThrottleFailsafe,
+            self.NeedEKFToArm,
+            self.SoaringClimbRate,
+            self.TestAutoSpeedFlaps,
+            self.DO_REPOSITION,
+            self.Parachute,
+            self.ParachuteSinkRate,
             self.FenceStatic,
             self.FenceRTL,
-            self.FenceRTLRally,
             self.FenceRetRally,
             self.FenceAltCeilFloor,
             self.FenceMinAltAutoEnable,
-            self.FenceMinAltEnableAutoland,
             self.FenceMinAltAutoEnableAbort,
-            self.FenceAutoEnableDisableSwitch,
-            Test(self.FenceCircleExclusionAutoEnable, speedup=20),
             self.GuidedRejectOutsideFence,
-            self.FenceEnableDisableSwitch,
-            self.FenceEnableDisableAux,
             self.FenceBreachedChangeMode,
             self.FenceNoFenceReturnPoint,
-            self.FenceNoFenceReturnPointInclusion,
             self.FenceDisableUnderAction,
-            self.ADSBFailActionRTL,
             self.ADSBResumeActionResumeLoiter,
             self.SimADSB,
             self.Button,
             self.FRSkySPort,
             self.FRSkyPassThroughStatustext,
-            self.FRSkyPassThroughSensorIDs,
-            self.FRSkyMAVlite,
-            self.FRSkyD,
-            self.LTM,
-            self.DEVO,
-            self.AdvancedFailsafe,
             self.LOITER,
-            self.loiter_inside_circle,
-            self.MAV_CMD_NAV_LOITER_TURNS,
             self.MAV_CMD_NAV_LOITER_TO_ALT,
-            self.DeepStall,
-            self.WatchdogHome,
-            self.LargeMissions,
-            self.Soaring,
-            self.Terrain,
             self.TerrainMission,
             self.TerrainMissionInterrupt,
-            self.UniversalAutoLandScript,
-            self.SIMCompare,
-            self.Replay,
-        ])
-        return ret
-
-    def tests1b(self):
-        return [
-            self.TerrainLoiter,
-            self.VectorNavEAHRS,
-            self.MicroStrainEAHRS5,
-            self.MicroStrainEAHRS7,
             self.InertialLabsEAHRS,
-            self.KebniSensAItionExternalINS,
             self.KebniSensAItionExternalIMU,
-            self.AeronEAHRS,
             self.GpsSensorPreArmEAHRS,
-            self.EKF_STATUS_REPORT,
             self.Deadreckoning,
-            self.EKFlaneswitch,
             self.EKF3AirspeedAffinity,
             self.EKF3AirspeedAffinityDCM,
             self.AHRSActiveAirspeedIndex,
-            self.AirspeedDrivers,
             self.RTL_CLIMB_MIN,
-            self.ClimbBeforeTurn,
-            self.AltOffsetReset,
-            self.IMUTempCal,
-            self.MAV_CMD_DO_AUX_FUNCTION,
             self.SmartBattery,
             self.FlyEachFrame,
             self.FlyEachFrameRCInput,
-            self.AutoLandMode,
             self.RCDisableAirspeedUse,
-            self.AHRS_ORIENTATION,
-            self.AHRSTrim,
-            self.AHRS2Logging,
             self.AHRS2NoSecondaryEstimate,
             self.LandingDrift,
-            self.TakeoffAuto1,
-            self.TakeoffAuto2,
-            self.TakeoffAuto3,
             self.TakeoffAuto4,
             self.TakeoffTakeoff1,
-            self.TakeoffTakeoff2,
-            self.TakeoffTakeoff3,
-            self.TakeoffTakeoff4,
-            self.TakeoffTakeoff5,
             self.TakeoffGround,
-            self.TakeoffIdleThrottle,
-            self.TakeoffBadLevelOff,
-            self.TakeoffLevelOffWind,
-            self.ForcedDCM,
-            self.DCMFallback,
             self.MAVFTP,
-            self.MAVFTPBurstEOFOffset,
-            self.MAVFTPBurstMissionDat,
-            self.MAVFTPParamPck,
             self.MAVFTPListDirectoryFullPacket,
-            self.MAVFTPListDirectoryRoot,
-            self.MAVFTPShortReplyPadding,
             self.MAVFTPMavLogDirectory,
             self.MAVFTPListDirectoryWithTime,
             self.MAVFTPListDirectoryWithTimeTabInName,
@@ -10560,104 +10557,56 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             self.MAVFTPListDirectoryUnknownTimeMAVProxy,
             self.MAVFTPListDirectoryFallbackMAVProxy,
             self.MAVFTPListDirectoryLossyRetry,
-            self.MAVFTPListDirectoryEdgeCases,
-            self.MAVFTPListDirectoryLongNames,
             self.MAVFTPDuplicateRequest,
             self.MAVFTPUnknownOpcodeNack,
-            self.MAVFTPReadFile,
-            self.MAVFTPCalcFileCRC32,
-            self.MAVFTPRename,
             self.MAVFTPFileCommandsMAVProxy,
-            self.MAVFTPCrcCompareMAVProxy,
-            self.MAVFTPGapReadMAVProxy,
             self.MAVFTPListDirectoryInterleavedPut,
             self.MAVFTPListDirectoryInterleavedGet,
             self.MAVFTPListDirectoryTabInNameMAVProxy,
-            self.AUTOTUNE,
-            self.AutotuneFiltering,
             self.MegaSquirt,
-            self.Hirth,
-            self.MSP_DJI,
             self.SpeedToFly,
-            self.AltitudeSlopeMaxHeight,
-            self.HIGH_LATENCY2,
-            self.MidAirDisarmDisallowed,
-            self.AerobaticsScripting,
-            self.MANUAL_CONTROL,
             self.RunMissionScript,
-            self.WindEstimates,
             self.WindEstimatesTrim,
-            self.WindMessageSpeed,
-            self.AltResetBadGPS,
             self.AirspeedCal,
             self.AirspeedScripting,
             self.MissionJumpTags,
             Test(self.GCSFailsafe, speedup=8),
-            self.SDCardWPTest,
-            self.NoArmWithoutMissionItems,
             self.RudderArmedTakeoffRequiresNeutralThrottle,
-            self.MODE_SWITCH_RESET,
-            self.ExternalPositionEstimate,
-            self.SagetechMXS,
-            self.MAV_CMD_GUIDED_CHANGE_ALTITUDE,
-            self.MAV_CMD_PREFLIGHT_CALIBRATION,
-            self.MAV_CMD_DO_INVERTED_FLIGHT,
             self.MAV_CMD_DO_AUTOTUNE_ENABLE,
-            self.MAV_CMD_DO_GO_AROUND,
-            self.MAV_CMD_DO_FLIGHTTERMINATION,
-            self.MAV_CMD_DO_FLIGHTTERMINATION_unterminate,
-            self.MAV_CMD_DO_LAND_START,
             self.MAV_CMD_NAV_ALTITUDE_WAIT,
             self.InteractTest,
-            self.CompassLearnInFlight,
             self.MAV_CMD_MISSION_START,
             self.TerrainRally,
-            self.MAV_CMD_NAV_LOITER_UNLIM,
-            self.MAV_CMD_NAV_RETURN_TO_LAUNCH,
-            self.MinThrottle,
             self.ClimbThrottleSaturation,
-            self.GuidedAttitudeNoGPS,
-            self.ScriptStats,
-            self.GPSPreArms,
             self.SetHomeAltChange,
-            self.SetHomeAltChange2,
             self.SetHomeAltChange3,
             self.ForceArm,
-            self.MAV_CMD_EXTERNAL_WIND_ESTIMATE,
-            self.GliderPullup,
-            self.BadRollChannelDefined,
             self.VolzMission,
-            self.mavlink_AIRSPEED,
-            self.AirspeedEAS2TAS,
             self.Volz,
             self.LoggedNamedValueFloat,
-            self.LoggedNamedValueInt,
-            self.LoggedNamedValueString,
-            self.AdvancedFailsafeBadBaro,
-            self.DO_CHANGE_ALTITUDE,
-            self.SET_POSITION_TARGET_GLOBAL_INT_for_altitude,
             self.MAV_CMD_NAV_LOITER_TURNS_zero_turn,
             self.RudderArmingWithArmingChecksSkipped,
-            self.TerrainLoiterToCircle,
             self.FenceDoubleBreach,
             self.ScriptedArmingChecksApplet,
             self.ScriptedArmingChecksAppletEStop,
             self.ScriptedArmingChecksAppletRally,
-            self.PlaneFollowAppletSanity,
-            self.PlaneFollowAppletStandoff,
-            self.PreflightRebootComponent,
-            self.UTMGlobalPosition,
-            self.UTMGlobalPositionWaypoint,
-            self.EK3HeightDatumResetFlushesBuffers,
-            self.PPPPeriph,
-            self.steplessAHRSSwitch,
-            self.DO_REPOSITION_mode_change_refused,
-            self.DubinsSweep,
-            self.DubinsBestTrial,
-            self.KangarooFollowCell,
-            self.KangarooFollowCampaign,
-            self.KangarooFollowDemo,
-        ]
+            self.AVAILABLE_MODES,
+            self.MAVLinkCommandRejections,
+            self.MAV_CMD_GUIDED_CHANGE_HEADING,
+            self.SET_POSITION_TARGET_LOCAL_NED,
+            self.GuidedOnlyOffboardControl,
+            self.MAV_CMD_DO_RETURN_PATH_START,
+            self.MAV_CMD_SET_HAGL,
+            self.MAV_CMD_DO_PARACHUTE_actions,
+            self.MAV_CMD_DO_SET_MISSION_CURRENT,
+            self.DO_REPOSITION_loiter_radius_and_direction,
+            self.DO_SET_HOME_in_RTL,
+            self.HEARTBEAT_system_status,
+            self.EXTENDED_SYS_STATE,
+            self.PID_TUNING_axes,
+            self.CustomController,
+        ])
+        return ret
 
     def UTMGlobalPositionWaypoint(self):
         '''test UTM_GLOBAL_POSITION waypoint fields in AUTO and GUIDED'''
@@ -10878,10 +10827,82 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.progress("PPP link established: %s" % m.text.strip())
 
     def tests1c(self):
-        '''kind of reserved for flapping tests which we still have hopes for'''
-        return [
-            self.DeadreckoningNoAirSpeed,
-        ]
+        '''return list of all tests'''
+        ret = ([
+            self.AuxModeSwitch,
+            self.TestRCCamera,
+            self.NoShortFailsafe,
+            self.TestFlaps,
+            self.GuidedThrottleNudge,
+            self.DO_PARACHUTE,
+            self.PitotBlockage,
+            self.TemperatureSensorRangefinder,
+            self.FenceEnableDisableSwitch,
+            self.FenceEnableDisableAux,
+            self.FenceNoFenceReturnPointInclusion,
+            self.FRSkyMAVlite,
+            self.LTM,
+            self.AdvancedFailsafe,
+            self.DeepStall,
+            self.LargeMissions,
+            self.SIMCompare,
+            self.Replay,
+            self.VectorNavEAHRS,
+            self.MicroStrainEAHRS5,
+            self.MicroStrainEAHRS7,
+            self.EKF_STATUS_REPORT,
+            self.AirspeedDrivers,
+            self.IMUTempCal,
+            self.AutoLandMode,
+            self.AHRSTrim,
+            self.TakeoffAuto1,
+            self.TakeoffTakeoff4,
+            self.TakeoffTakeoff5,
+            self.TakeoffLevelOffWind,
+            self.MAVFTPBurstMissionDat,
+            self.MAVFTPParamPck,
+            self.MAVFTPListDirectoryEdgeCases,
+            self.MAVFTPListDirectoryLongNames,
+            self.MAVFTPCalcFileCRC32,
+            self.MAVFTPCrcCompareMAVProxy,
+            self.MAVFTPVirtualWriteBounds,
+            self.MAVFTPParamUploadBounds,
+            self.MAVFTPListROMFS,
+            self.MAVFTPListROMFSLongNames,
+            self.MAVFTPListROMFSMissingDirectory,
+            self.MAVFTPListROMFSFile,
+            self.AUTOTUNE,
+            self.Hirth,
+            self.MSP_DJI,
+            self.AltitudeSlopeMaxHeight,
+            self.HIGH_LATENCY2,
+            self.WindEstimates,
+            self.WindMessageSpeed,
+            self.AltResetBadGPS,
+            self.NoArmWithoutMissionItems,
+            self.MODE_SWITCH_RESET,
+            self.ExternalPositionEstimate,
+            self.MAV_CMD_DO_LAND_START,
+            self.MAV_CMD_NAV_LOITER_UNLIM,
+            self.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+            self.MinThrottle,
+            self.GuidedAttitudeNoGPS,
+            self.ScriptStats,
+            self.SetHomeAltChange2,
+            self.MAV_CMD_EXTERNAL_WIND_ESTIMATE,
+            self.GliderPullup,
+            self.LoggedNamedValueString,
+            self.DO_CHANGE_ALTITUDE,
+            self.SET_POSITION_TARGET_GLOBAL_INT_for_altitude,
+            self.PlaneFollowAppletSanity,
+            self.PreflightRebootComponent,
+            self.UTMGlobalPosition,
+            self.UTMGlobalPositionWaypoint,
+            self.PPPPeriph,
+            self.steplessAHRSSwitch,
+            self.DO_REPOSITION_mode_change_refused,
+        ])
+        return ret
 
     def disabled_tests(self):
         ret = {
@@ -10890,9 +10911,6 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             "InteractTest": "requires user interaction",
             "ClimbThrottleSaturation": "requires https://github.com/ArduPilot/ardupilot/pull/27106 to pass",
             "SoaringClimbRate": "very bad sink rate",
-            "KangarooFollowCell": "campaign test; run explicitly with KANGAROO_FOLLOW_PLAN set (TASK-052)",
-            "KangarooFollowCampaign": "campaign test; run explicitly with KANGAROO_FOLLOW_CAMPAIGN set (TASK-052)",
-            "KangarooFollowDemo": "demonstration (about 12 min at real time); run explicitly, --map to watch (TASK-058)",
         }
         if not self.mavproxy_ftp_module_has_command("crccmp"):
             # added to MAVProxy in 328d7de20 (2026-07-27) and not in any

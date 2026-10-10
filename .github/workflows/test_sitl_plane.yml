@@ -74,7 +74,6 @@ on:
       - '.valgrindrc'
       - 'Dockerfile'
       - 'Vagrantfile'
-      - 'Makefile'
       # Remove some directories check
       - '.vscode/**'
       # Remove change on other workflows
@@ -154,7 +153,6 @@ on:
       - '.valgrindrc'
       - 'Dockerfile'
       - 'Vagrantfile'
-      - 'Makefile'
       # Remove some directories check
       - '.vscode/**'
       # Remove change on other workflows
@@ -242,7 +240,9 @@ jobs:
             sitltest-plane-tests1a,
             sitltest-plane-tests1b,
             sitltest-plane-tests1c,
-            sitltest-quadplane,
+            sitltest-quadplane-tests1a,
+            sitltest-quadplane-tests1b,
+            sitltest-quadplane-tests1c,
         ]
 
     steps:

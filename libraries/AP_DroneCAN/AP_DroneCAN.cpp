@@ -1490,7 +1490,8 @@ void AP_DroneCAN::handle_himark_servoinfo(const CanardRxTransfer& transfer, cons
                          AP_Servo_Telem::TelemetryData::Types::STATUS
     };
 
-    servo_telem->update_telem_data(msg.servo_id - 1, telem_data);
+    // servo_id is zero indexed, matching its position in the ServoCmd array sent by SRV_send_himark
+    servo_telem->update_telem_data(msg.servo_id, telem_data);
 }
 #endif // AP_DRONECAN_HIMARK_SERVO_SUPPORT
 
@@ -1975,7 +1976,7 @@ bool AP_DroneCAN::check_and_reset_option(Options option)
 {
     bool ret = option_is_set(option);
     if (ret) {
-        _options.set_and_save(int16_t(_options.get() & ~uint16_t(option)));
+        _options.set_and_save(_options & ~uint16_t(option));
     }
     return ret;
 }
