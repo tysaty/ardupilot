@@ -139,7 +139,7 @@ def with_algorithm(spec, name):
 
 def demo_table(spec, cell_id, mode_base=None, alt_m=None,
                bound_m=DEFAULT_BOUND_M, look_ahead_m=None, roll_limit_deg=None,
-               fence_path=None, suite_runs=None):
+               fence_path=None, suite_runs=None, cs_sampling=None):
     """The flat ``cfg`` the demonstration reads from the vehicle ``spec.json``
     (:func:`schedule.spec_cfg`, `ADR-011`): the cell's configuration exactly
     as the campaign runner gets it, plus the demonstration's own fields.
@@ -151,7 +151,12 @@ def demo_table(spec, cell_id, mode_base=None, alt_m=None,
     demonstration and ``hardware_val.lua`` contain the kangaroo in
     (:func:`fence.spec_block`, `ADR-012`); ``None`` stages none.
     ``suite_runs`` (:func:`pv_plan.run_table`) makes it a suite: mode 5,
-    the spec's legs flown from the site reference, each run announced."""
+    the spec's legs flown from the site reference, each run announced.
+    ``cs_sampling`` ({fine_m, coarse_m}, from pv_plan.json) writes
+    ``cs_fine_m`` / ``cs_coarse_m``: the CS path's straights are sampled every
+    ``delta_d_m`` for the first fine_m metres and every coarse_m after
+    (harness_dubins; the flight's heap). Absent: the whole path every
+    ``delta_d_m``, as the Python harness."""
     spec = with_look_ahead(spec, look_ahead_m)
     table = schedule.cell_table(spec, cell_id)
     speeds = [leg["speed_ms"] for leg in table["legs"] if leg["speed_ms"] > 0.0]
@@ -164,6 +169,9 @@ def demo_table(spec, cell_id, mode_base=None, alt_m=None,
             fa = json.load(handle).get("flight_area") or {}
         alt_m = float(fa.get("alt_m", campaign.DEFAULT_ALT_M))
     extra = {}
+    if cs_sampling is not None:
+        extra["cs_fine_m"] = float(cs_sampling["fine_m"])
+        extra["cs_coarse_m"] = float(cs_sampling["coarse_m"])
     if suite_runs is not None:
         extra["suite_runs"] = [{"name": r["name"], "t_start_s": float(r["t_start_s"]),
                                 "t_end_s": float(r["t_end_s"])} for r in suite_runs]
@@ -212,6 +220,7 @@ def stage(campaign_dir=DEFAULT_CAMPAIGN, cell_id=DEFAULT_CELL,
                restore_command()))
     mode_base = None
     suite_runs = None
+    cs_sampling = None
     if plan_arm is not None:
         from . import pv_plan
         plan = pv_plan.load(plan_path or pv_plan.PLAN_FILE)
@@ -220,6 +229,7 @@ def stage(campaign_dir=DEFAULT_CAMPAIGN, cell_id=DEFAULT_CELL,
         cell_id = "pv:%s" % plan_arm
         fence_path = pv_plan.fence_path(plan)
         roll_limit_deg = float(plan["aircraft"]["bank_limit_deg"])
+        cs_sampling = plan.get("cs_sampling")
     if spec is None:
         spec, entry = _cell_spec(campaign_dir, cell_id)
         mode_base = entry.get("mode_base")
@@ -230,7 +240,8 @@ def stage(campaign_dir=DEFAULT_CAMPAIGN, cell_id=DEFAULT_CELL,
         fence_path = fence_mod.environment_fence_path()
     table = demo_table(spec, cell_id, mode_base=mode_base, alt_m=alt_m, bound_m=bound_m,
                        look_ahead_m=look_ahead_m, roll_limit_deg=roll_limit_deg,
-                       fence_path=fence_path, suite_runs=suite_runs)
+                       fence_path=fence_path, suite_runs=suite_runs,
+                       cs_sampling=cs_sampling)
 
     modules_dir = os.path.join(scripts_dir, "modules")
     os.makedirs(modules_dir, exist_ok=True)

@@ -36,6 +36,11 @@
     "straight_m": 194.4
   },
   "fit_margin_m": 0.0,
+  "cs_sampling": {
+    "fine_m": 100.0,
+    "coarse_m": 10.0,
+    "note": "Heap (2026-10-10): the guidance samples its CS approach path's straights every delta_d_m (0.5 m) only for the first fine_m metres of the path (the carrot is read 30 m along it; AH replans every tick) and every coarse_m after, so a far approach no longer costs about 1.25 kB per metre. Leaves the guidance unchanged (tests/unit/test_hardware_val_merged.py). Remove this block to sample the whole path, as the Python harness."
+  },
   "arms": {
     "0H": {
       "label": "baseline",
@@ -68,8 +73,8 @@
   "hval_out": 1,
   "flight_card": {
     "ROLL_LIMIT_DEG": 60,
-    "SCR_HEAP_SIZE_min_bytes": 1048576,
+    "SCR_HEAP_SIZE_min_bytes": 750000,
     "ADSB_TYPE": 0,
-    "note": "Active only (HVAL_OUT 1), one arm across every run before the next arm. SCR_HEAP_SIZE: set the maximum of its range, 1048576 (1 MiB). Measured 2026-10-10 in SITL with both scripts (hardware_val.lua on HVAL_TGT 3 and kangaroo_source.lua) flying arm AH through the whole plan: peak 928 kB of a 1 MB heap, about 120 kB of headroom at the maximum. 0H and FH not yet measured in the two-script layout. Confirm on the board (SCR_DEBUG_OPTS 2) before flight; hardware_val.lua alone needed more than 692 kB on 2026-10-07, and Follow-03 flew in 350 kB."
+    "note": "Active only (HVAL_OUT 1), one arm across every run before the next arm. SCR_HEAP_SIZE 750000: the board's limit (author, 2026-10-10). Measured 2026-10-10 in SITL with both scripts and heap expansion disabled (SCR_DEBUG_OPTS 64): 0H, FH and AH each flew the whole plan at 750000 with no memory error; the heap in use between ticks was about 310 kB (median), and the highest reading before an emergency collection 730 kB. That needed spec.json without rand_legs (sdcard.py) and kangaroo_source.lua loading mavlink_msgs and sitl_adsb only when used; before those, every arm ran out of memory on engagement. Confirm on the board (SCR_DEBUG_OPTS 2) before flight."
   }
 }

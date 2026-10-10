@@ -63,10 +63,19 @@ local PI = math.pi
 -- Part 1: Generating arrival direction onto tangent pairs
 -- ---------------------------------------------------------
 --- Build the Circle-Straight path for one sense pair.
---  Returns a table {points, reach, direction, arrival_x, arrival_y, sweep, L}
+--  Returns a table {points, reach, direction, arrival_x, arrival_y, s1, s2}
 --  OR nil when this pair has no tangent.
+--
+--  sampling (optional, 10 October 2026; heap): nil samples the whole path as
+--  before. false returns the candidate WITHOUT points (reach, direction and
+--  arrival are closed form, so a candidate can be scored without sampling
+--  it; sense_costs does this and shortest_path samples only the winner). A
+--  table {fine_m, coarse_m} keeps a straight's points within fine_m of the
+--  path's start and every coarse_m beyond (dubins generate_straight_points:
+--  the same points, fewer of them stored); arcs are sampled by angle either
+--  way.
 -- determining reach
-function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
+function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d, sampling)
     -- The arc sweep moves a phase by at most one turn, so it is correct only
     -- for a heading in the harness's range, [-pi, pi). A heading outside it
     -- (the SITL scripts passed [0, 2 pi) until 24 September 2026) gave the
@@ -112,7 +121,7 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
     local arrival_x = tx - R * s2 * nx
     local arrival_y = ty - R * s2 * ny
 
-    local points = {}
+    local points = (sampling ~= false) and {} or nil
     local start_ph, end_ph, inc
     -- right / clockwise initial arc
     if s1 > 0 then                      
@@ -121,16 +130,24 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
         -- left / counter-clockwise initial arc
         start_ph, end_ph, inc = psi_i + PI / 2.0, theta + PI / 2.0, false
     end
-    -- generate arc
-    dubins.generate_arc_points(points, o1x, o1y, rho, start_ph, end_ph, delta_psi, inc)
     local sweep1 = dubins.arc_sweep_rad(start_ph, end_ph, inc)
-
-    local sx, sy = px, py
-    if #points > 0 then
-        sx, sy = points[#points].x, points[#points].y
-    end
-    if L > 1e-6 then
-        dubins.generate_straight_points(points, sx, sy, theta, L, delta_d)
+    if points ~= nil then
+        -- generate arc
+        dubins.generate_arc_points(points, o1x, o1y, rho, start_ph, end_ph, delta_psi, inc)
+        local sx, sy = px, py
+        if #points > 0 then
+            sx, sy = points[#points].x, points[#points].y
+        end
+        if L > 1e-6 then
+            local keep = nil
+            if type(sampling) == "table" then
+                -- fine within fine_m of where the path starts (the pose it
+                -- was planned from), every coarse_m beyond
+                keep = { x0 = px, y0 = py, fine_m = sampling.fine_m,
+                         coarse_m = sampling.coarse_m }
+            end
+            dubins.generate_straight_points(points, sx, sy, theta, L, delta_d, keep)
+        end
     end
 
     -- No terminal arc: the path flies into the tangent and ends on the ring.
@@ -145,7 +162,19 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
         direction = direction,
         arrival_x = arrival_x,
         arrival_y = arrival_y,
+        s1 = s1,
+        s2 = s2,
     }
+end
+
+--- The sampling table for reach_path from spec.json (cfg.cs_fine_m and
+--  cfg.cs_coarse_m, written for the flight by pv_plan.json), or nil (the
+--  whole path every delta_d, as the Python harness and the campaigns).
+function M.sampling(cfg)
+    if cfg ~= nil and cfg.cs_fine_m ~= nil and cfg.cs_coarse_m ~= nil then
+        return { fine_m = cfg.cs_fine_m, coarse_m = cfg.cs_coarse_m }
+    end
+    return nil
 end
 
 -- ---------------------------------------------------------
@@ -157,8 +186,13 @@ end
 --  preferred_direction / sense_margin_m (optional; orbit-sense hysteresis): hold the
 --  previous tick's orbit sense unless the other is cheaper by more than the
 --  margin. Both nil reproduces the argmin used before 14 September 2026 exactly.
+--  sampling (optional): see reach_path. Only the chosen candidate is sampled
+--  (10 October 2026): the four were sampled and three discarded every tick,
+--  most of the script's heap. The choice uses the closed-form reach, so it is
+--  unchanged, and the chosen path is the same points as before.
 function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
-                         delta_psi, delta_d, preferred_direction, sense_margin_m)
+                         delta_psi, delta_d, preferred_direction, sense_margin_m,
+                         sampling)
     -- handle curvature constraints
     if orbit_radius_m < turn_radius_m - 1e-9 then
         return nil, "target circle radius < minimum turn radius: the orbit " ..
@@ -179,7 +213,9 @@ function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     if best == nil then
         return nil, "no target-circle tangent solves this configuration"
     end
-    return best
+    -- sample only the winner (the same pair, so the same path)
+    return M.reach_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
+                        best.s1, best.s2, delta_psi, delta_d, sampling)
 end
 
 -- ---------------------------------------------------------
@@ -190,6 +226,8 @@ end
 --  Returns {cw = cand|nil, ccw = cand|nil, argmin = cand|nil}. `argmin` is
 --  the first-visited least-cost candidate over all four pairs, in the
 --  (+1,+1), (+1,-1), (-1,+1), (-1,-1) order with strict-less replacement.
+--  The candidates carry no points (reach_path sampling false): they are
+--  scored on the closed-form reach only.
 
 function M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                        delta_psi, delta_d)
@@ -197,7 +235,7 @@ function M.sense_costs(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
     for _, s1 in ipairs({ 1, -1 }) do
         for _, s2 in ipairs({ 1, -1 }) do
             local cand = M.reach_path(px, py, psi_i, tx, ty, orbit_radius_m,
-                                      turn_radius_m, s1, s2, delta_psi, delta_d)
+                                      turn_radius_m, s1, s2, delta_psi, delta_d, false)
             if cand ~= nil then
                 local key = cand.direction
                 if out[key] == nil or cand.reach < out[key].reach then
@@ -246,10 +284,11 @@ end
 
 function M.approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
                              turn_radius_m, look_ahead_m, delta_psi, delta_d,
-                             preferred_direction, sense_margin_m)
+                             preferred_direction, sense_margin_m, sampling)
     local path, reason = M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m,
                                          turn_radius_m, delta_psi, delta_d,
-                                         preferred_direction, sense_margin_m)
+                                         preferred_direction, sense_margin_m,
+                                         sampling)
     if path == nil then
         return nil, reason
     end
@@ -281,7 +320,7 @@ end
 
 function M.guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                     look_ahead_m, delta_psi, delta_d, precompensate,
-                    preferred_direction, sense_margin_m)
+                    preferred_direction, sense_margin_m, sampling)
     local R = orbit_radius_m
     if R < turn_radius_m - 1e-9 then
         return nil, "target circle radius < minimum turn radius: the orbit " ..
@@ -297,7 +336,8 @@ function M.guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
         local g, reason = M.approach_guidance(px, py, psi_i, tx, ty, R,
                                               turn_radius_m, look_ahead_m,
                                               delta_psi, delta_d,
-                                              preferred_direction, sense_margin_m)
+                                              preferred_direction, sense_margin_m,
+                                              sampling)
         if g == nil then
             return nil, reason
         end

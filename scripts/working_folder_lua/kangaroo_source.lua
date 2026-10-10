@@ -28,17 +28,22 @@
 --  MAVLink/mavlink_msgs and MAVLink/mavlink_msg_FOLLOW_TARGET
 --  (libraries/AP_Scripting/modules/MAVLink).
 --  Aircraft: ADSB_TYPE 0 and avoidance off (it must ignore its own kangaroo);
---  SCR_HEAP_SIZE: set the maximum, 1048576 (1 MiB). The two scripts share one
---  heap: flying arm AH through the whole plan in SITL (10 October 2026) peaked at
---  928 kB, about 120 kB below the maximum. Confirm on the board with
---  SCR_DEBUG_OPTS 2 before flight.
+--  SCR_HEAP_SIZE 750000 (the board's limit). The two scripts share one heap:
+--  in SITL (10 October 2026, heap expansion off) 0H, FH and AH each flew the
+--  whole plan at 750000 with no memory error, with about 310 kB in use between
+--  ticks. That needs spec.json without rand_legs (the flight package drops it)
+--  and the MAVLink and ADS-B modules loaded only when used (below). Confirm on
+--  the board with SCR_DEBUG_OPTS 2 before flight.
 --
 --  Logs: HKSR every tick (t, run, n, e, vn, ve, sent); HKSB on every rebuild
 --  (t, run, speed, heading, why: 1 run change, 2 live change, 3 fence turn,
 --  4 plan run start).
 
 -- requires
-local mavlink_msgs = require("MAVLink/mavlink_msgs")
+-- MAVLink/mavlink_msgs (about 10 kB of heap) is loaded the first time
+-- FOLLOW_TARGET is sent (KSRC_OUT bit 1), not here: a bus-only flight never
+-- needs it, and the two scripts must fit in a 750 kB heap.
+local mavlink_msgs = nil
 local spec_mod = require("sitl_spec")
 local segs = require("harness_segments")
 local kang = require("harness_kangaroo")
@@ -165,17 +170,26 @@ end
 -----------------------------------------------------------------------------
 -- 2. ADS-B for the ground station
 -----------------------------------------------------------------------------
--- display only (sitl_adsb, Follow-03's framing)
-local ok_adsb, adsb = pcall(require, "sitl_adsb")
+-- display only (sitl_adsb, Follow-03's framing). Loaded the first time
+-- KSRC_ADSB is on (about 4 kB of heap), not at start-up.
+local ok_adsb, adsb = nil, nil
 local ADSB_PERIOD_MS = 200
 local last_adsb_ms = nil
+-- true when broadcast() will send this tick (KSRC_ADSB on, module present,
+-- period elapsed), so outputs() builds the Location only when it is needed
+local function adsb_due(now_ms)
+    if KSRC_ADSB:get() <= 0 then
+        return false
+    end
+    if ok_adsb == nil then
+        ok_adsb, adsb = pcall(require, "sitl_adsb")
+    end
+    if not ok_adsb then
+        return false
+    end
+    return last_adsb_ms == nil or (now_ms - last_adsb_ms) >= ADSB_PERIOD_MS
+end
 local function broadcast(now_ms, loc, vn, ve)
-    if not ok_adsb or KSRC_ADSB:get() <= 0 then
-        return
-    end
-    if last_adsb_ms ~= nil and (now_ms - last_adsb_ms) < ADSB_PERIOD_MS then
-        return
-    end
     last_adsb_ms = now_ms
     -- every channel; missing ones dropped
     adsb.send(loc, vn, ve)
@@ -453,13 +467,28 @@ end
 outputs = function(t, now_ms, n, e, vn, ve)
     if KSRC_ENABLE:get() <= 0 then return end
     local out = math.floor(KSRC_OUT:get() + 0.5)
-    local loc = site:copy()
-    loc:offset(n, e)
+    local follow = (out & 2) ~= 0
+    local display = adsb_due(now_ms)
+    -- the geographic position only when FOLLOW_TARGET or ADS-B sends it
+    local loc = nil
+    if follow or display then
+        loc = site:copy()
+        loc:offset(n, e)
+    end
     if (out & 1) ~= 0 then
         publish_bus(now_ms * 0.001, n, e, vn, ve, running, rebuild_count)
     end
     local sent = false
-    if (out & 2) ~= 0 then
+    if follow and mavlink_msgs == nil then
+        local ok, mod = pcall(require, "MAVLink/mavlink_msgs")
+        if ok then
+            mavlink_msgs = mod
+        else
+            mavlink_msgs = false
+            gcs:send_text(MAV_SEVERITY.ERROR, "KSRC: FOLLOW_TARGET off: " .. tostring(mod))
+        end
+    end
+    if follow and mavlink_msgs then
         local msg = { timestamp = now_ms, est_capabilities = 3,
                       lat = loc:lat(), lon = loc:lng(), alt = site:alt() * 0.01,
                       vel = { vn, ve, 0 }, acc = { 0, 0, 0 },
@@ -467,7 +496,9 @@ outputs = function(t, now_ms, n, e, vn, ve)
                       position_cov = { 0, 0, 0 }, custom_state = 0 }
         sent = mavlink:send_chan(KSRC_CHAN:get(), mavlink_msgs.encode("FOLLOW_TARGET", msg))
     end
-    broadcast(now_ms, loc, vn, ve)
+    if display then
+        broadcast(now_ms, loc, vn, ve)
+    end
     logger:write('HKSR', 't,Run,N,E,VN,VE,Sent', 'fffffff',
                  t, running, n, e, vn, ve, sent and 1 or 0)
 end

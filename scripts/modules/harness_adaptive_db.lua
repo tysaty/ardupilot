@@ -107,7 +107,7 @@ M.orbit_hold = orbit_hold
 --  hysteresis on the CS solve, passed through to harness_cs_orbit. 
 function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
                     look_ahead_m, delta_psi, delta_d, hold_policy, precompensate,
-                    preferred_direction, sense_margin_m)
+                    preferred_direction, sense_margin_m, sampling)
     if hold_policy ~= M.HOLD_PLAN and hold_policy ~= M.HOLD_CENTRE_ONLY then
         return nil, "unknown hold policy"
     end
@@ -134,7 +134,8 @@ function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
         local g, reason = cs.approach_guidance(px, py, psi_i, cx, cy, R,
                                                turn_radius_m, look_ahead_m,
                                                delta_psi, delta_d,
-                                               preferred_direction, sense_margin_m)
+                                               preferred_direction, sense_margin_m,
+                                               sampling)
         if g == nil then
             return nil, reason
         end
@@ -158,7 +159,8 @@ function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
     local path, reason = cs.shortest_path(commit_x, commit_y, commit_psi,
                                           cx, cy, R, turn_radius_m,
                                           delta_psi, delta_d,
-                                          preferred_direction, sense_margin_m)
+                                          preferred_direction, sense_margin_m,
+                                          sampling)
     if path == nil then
         return nil, reason
     end
@@ -265,7 +267,7 @@ local function guidance_point(snapshot, cfg, hyst)
                                  cfg.orbit_radius_m, cfg.turn_radius_m,
                                  cfg.look_ahead_m, cfg.delta_psi_rad,
                                  cfg.delta_d_m, policy, cfg.orbit_precompensate,
-                                 previous, margin)
+                                 previous, margin, cs.sampling(cfg))
     if g == nil then
         return nil, reason
     end
@@ -317,7 +319,8 @@ local function guidance_point(snapshot, cfg, hyst)
         local old = M.guidance(px, py, psi_i, st.centre_e_m, st.centre_n_m,
                                old_plan, cfg.orbit_radius_m, cfg.turn_radius_m,
                                cfg.look_ahead_m, cfg.delta_psi_rad,
-                               cfg.delta_d_m, policy, cfg.orbit_precompensate)
+                               cfg.delta_d_m, policy, cfg.orbit_precompensate,
+                               nil, nil, cs.sampling(cfg))
         if old ~= nil then
             local dx, dy = g.gx - old.gx, g.gy - old.gy
             state.replan_step_m = math.sqrt(dx * dx + dy * dy)

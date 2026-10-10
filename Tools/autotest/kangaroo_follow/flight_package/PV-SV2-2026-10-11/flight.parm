@@ -1,7 +1,7 @@
 # Physical-validation experiment parameters (flight card). Load on top of
 # the airframe's own parameters; none of these replaces an airframe limit.
 SCR_ENABLE        1
-SCR_HEAP_SIZE     1048576    # the maximum; two scripts with AH peaked at 928 kB in SITL
+SCR_HEAP_SIZE     750000    # the board's limit; all three arms flew the plan at 750000 in SITL
 SCR_VM_I_COUNT    1000000    # as SITL; measure on the bench
 ROLL_LIMIT_DEG    60    # must equal spec.json roll_limit_deg (the script checks)
 GUIDED_P          15000    # the heading-command gain the SITL runs used
@@ -13,7 +13,7 @@ FENCE_TYPE        4    # polygon: upload fence/SV2_fence_line2.txt from the grou
 
 # HVAL_* parameters exist only once hardware_val.lua has loaded; set them after boot:
 #   HVAL_ARM  0 (0H) / 2 (FH) / 1 (AH), matching the spec.json on the card
-#   HVAL_TGT  3 (the kangaroo from kangaroo_source.lua)
+#   HVAL_TGT  3 (the site kangaroo in hardware_val.lua)
 #   HVAL_OUT  1 (active; 0 = shadow)
 #   HVAL_ENABLE 1 when ready; then the RC7 switch low -> high engages in GUIDED
-# KSRC_RUN 5 starts the plan (kangaroo_source.lua); set it after engaging.
+# KSRC_RUN 5 starts the plan (hardware_val.lua section 3b); set it after engaging.

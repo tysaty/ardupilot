@@ -34,7 +34,7 @@ import tempfile
 from . import demo, paths, pv_plan, schedule
 
 #: The flight scripts, from scripts/.
-SCRIPTS = ("hardware_val.lua", "kangaroo_source.lua")
+SCRIPTS = ("hardware_val.lua",)      # one script: the kangaroo is its section 3b (2026-10-10)
 #: Modules from scripts/modules/ (arms 0H, FH and AH, the kangaroo, the fence).
 MODULES = ("sitl_arms.lua", "sitl_adsb.lua",
            "harness_geom.lua", "harness_dubins.lua", "harness_orbit.lua",
@@ -43,10 +43,12 @@ MODULES = ("sitl_arms.lua", "sitl_adsb.lua",
            "harness_zone.lua")
 #: Modules kept with the SITL test assets (Tools/autotest/ArduPlane_Tests/KangarooFollow/).
 ASSET_MODULES = ("sitl_spec.lua",)
-#: Upstream MAVLink encoder and the one message kangaroo_source.lua can send.
+#: Upstream MAVLink encoder: needed only by the two-script layout's
+#: FOLLOW_TARGET output (archived in working_folder_lua/); the one script sends
+#: no MAVLink messages of its own except ADS-B (sitl_adsb), so none are copied.
 MAVLINK_DIR = os.path.join(paths.ARDUPILOT_DIR, "libraries", "AP_Scripting", "modules",
                            "MAVLink")
-MAVLINK = ("mavlink_msgs.lua", "mavlink_msg_FOLLOW_TARGET.lua")
+MAVLINK = ()
 
 #: HVAL_ARM for each plan arm (hardware_val.lua ARM_NAMES).
 HVAL_ARM = {"0H": 0, "FH": 2, "AH": 1}
@@ -90,7 +92,12 @@ def arm_tree(plan, arm, root, roll_limit_deg):
     table = demo.demo_table(spec, "pv-%s" % arm, alt_m=float(plan.get("alt_m", 60.0)),
                             fence_path=pv_plan.fence_path(plan),
                             suite_runs=pv_plan.run_table(plan),
-                            roll_limit_deg=roll_limit_deg)
+                            roll_limit_deg=roll_limit_deg,
+                            cs_sampling=plan.get("cs_sampling"))
+    # rand_legs is the SITL demo's random-mode schedule (KDEM_MODE 4); neither
+    # flight script reads it, and both parse spec.json, so it would hold about
+    # 60 kB of heap in each (2026-10-10: the two scripts must fit 750 kB).
+    table.pop("rand_legs", None)
     schedule.write_spec(table, os.path.join(scripts, paths.SPEC_FILE))
     return table
 
@@ -101,8 +108,8 @@ def flight_parm(plan):
         "# Physical-validation experiment parameters (flight card). Load on top of",
         "# the airframe's own parameters; none of these replaces an airframe limit.",
         "SCR_ENABLE        1",
-        "SCR_HEAP_SIZE     %d    # the maximum; two scripts with AH peaked at 928 kB in SITL"
-        % int(card.get("SCR_HEAP_SIZE_min_bytes", 1048576)),
+        "SCR_HEAP_SIZE     %d    # the board's limit; all three arms flew the plan at 750000 in SITL"
+        % int(card.get("SCR_HEAP_SIZE_min_bytes", 750000)),
         "SCR_VM_I_COUNT    1000000    # as SITL; measure on the bench",
         "ROLL_LIMIT_DEG    %d    # must equal spec.json roll_limit_deg (the script checks)"
         % int(card.get("ROLL_LIMIT_DEG", 60)),
@@ -117,10 +124,10 @@ def flight_parm(plan):
         "",
         "# HVAL_* parameters exist only once hardware_val.lua has loaded; set them after boot:",
         "#   HVAL_ARM  0 (0H) / 2 (FH) / 1 (AH), matching the spec.json on the card",
-        "#   HVAL_TGT  3 (the kangaroo from kangaroo_source.lua)",
+        "#   HVAL_TGT  3 (the site kangaroo in hardware_val.lua)",
         "#   HVAL_OUT  1 (active; 0 = shadow)",
         "#   HVAL_ENABLE 1 when ready; then the RC7 switch low -> high engages in GUIDED",
-        "# KSRC_RUN 5 starts the plan (kangaroo_source.lua); set it after engaging.",
+        "# KSRC_RUN 5 starts the plan (hardware_val.lua section 3b); set it after engaging.",
     ]
     return "\n".join(lines) + "\n"
 
@@ -144,7 +151,7 @@ regenerate them.
 %(arm_lines)s
 
 For an arm, copy the **contents** of its `APM/` folder onto the card's `APM/`
-(the card ends up with `APM/scripts/hardware_val.lua`, `kangaroo_source.lua`,
+(the card ends up with `APM/scripts/hardware_val.lua`,
 `spec.json` and `modules/`). Nothing else may be in `APM/scripts/`: every
 `.lua` there runs.
 
@@ -156,8 +163,12 @@ For an arm, copy the **contents** of its `APM/` folder onto the card's `APM/`
    match the fence corners in `spec.json` (the scripts cannot read the fence).
 3. Boot. Expect `HVAL: loaded disabled; algorithm <arm>` and
    `KSRC: kangaroo at 30 N 0 E of the site`.
-4. Set `HVAL_ARM` (table above), `HVAL_TGT 3`, `HVAL_OUT 1`, then `HVAL_ENABLE 1`.
-5. Take off and climb, fly to the site centre in GUIDED, switch low then high to engage.
+4. Set `HVAL_ARM` (table above), `HVAL_TGT 3` and `HVAL_OUT 1`, with
+   `HVAL_ENABLE 0`. `hardware_val.lua` selects an arm only while disabled, in
+   GUIDED and armed (or at boot, from the saved `HVAL_ARM`).
+5. Take off and climb, fly to the site centre in GUIDED and wait for
+   `HVAL: selected <algorithm>`; then set `HVAL_ENABLE 1` and switch low then
+   high to engage.
 6. When the aircraft is orbiting the point, set `KSRC_RUN 5`. The plan runs
    %(dur).0f s and ends with `KSRC: plan complete; least spare ... m`.
 7. Switch low to hand back, land, and copy the `.BIN` log.

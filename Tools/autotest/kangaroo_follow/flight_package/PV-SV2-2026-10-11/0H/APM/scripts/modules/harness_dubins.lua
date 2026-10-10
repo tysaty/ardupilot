@@ -156,16 +156,45 @@ end
 --  during a port, a "fix" here would make the differential test pass while
 --  hiding the real difference.
 
+--
+--  Fine near, coarse far (optional, 10 October 2026; heap): `keep` =
+--  {x0, y0, fine_m, coarse_m}. The straight is still stepped every delta_d,
+--  so every point is where it was and the last one (with its overshoot) is
+--  exactly the same; but a point is STORED only when it lies within fine_m
+--  (straight-line distance) of the path's start (x0, y0: the pose the path
+--  was planned from), or is every (coarse_m / delta_d)-th point, or is the
+--  last. The points left out lie on the same straight line between stored
+--  ones, so nearest-point progress and arc-length interpolation along the
+--  path give the same answer (to rounding), wherever on the path they land.
+--  Without `keep` (nil, as the Python harness and the campaigns): every
+--  point stored, as before.
+
 function M.generate_straight_points(points, x_start, y_start, theta, total_d,
-                                    delta_d)
+                                    delta_d, keep)
     local x, y = x_start, y_start
     local dsum = 0.0
+    local every, r2 = 1, nil
+    if keep ~= nil and keep.coarse_m ~= nil and keep.fine_m ~= nil
+            and keep.coarse_m > delta_d then
+        every = math.max(1, math.floor(keep.coarse_m / delta_d + 0.5))
+        r2 = keep.fine_m * keep.fine_m
+    end
+    local k, stored = 0, true
     -- generate along the points along theta
     while dsum <= total_d do
         x, y = M.straight_step(x, y, theta, delta_d)
-        points[#points + 1] = { x = x, y = y, psi = theta }
+        k = k + 1
+        stored = (r2 == nil) or (k % every == 0)
+            or ((x - keep.x0) * (x - keep.x0) + (y - keep.y0) * (y - keep.y0) <= r2)
+        if stored then
+            points[#points + 1] = { x = x, y = y, psi = theta }
+        end
         -- regenerate new points
         dsum = dsum + delta_d
+    end
+    if not stored then
+        -- the last point always (the straight's end, with its overshoot)
+        points[#points + 1] = { x = x, y = y, psi = theta }
     end
     return x, y
 end
