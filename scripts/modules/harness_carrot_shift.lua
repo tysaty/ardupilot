@@ -1,6 +1,6 @@
 -- =========================================================
 --  ARM F - the carrot shift CS-orbit algorithm
---  created 2026-10-01 
+--  created 1 October 2026 
 --  This algorithm implements the kalman filter to provide state esitamtion
 --  to offset the predicted path by 
 ---      g' = g + v_est * dt_s * af_step_ticks

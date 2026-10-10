@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_orbit -- standoff-ring geometry  
---  Ported/created 2026-09-03
+--  Ported/created 3 September 2026
 --
 --  Ring entry, orbit sense, the arc-length carrot and the applied pre-compensation.
 --

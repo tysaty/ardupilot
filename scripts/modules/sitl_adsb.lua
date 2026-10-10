@@ -1,6 +1,6 @@
 -- =========================================================
 --  sitl_adsb -- show the virtual kangaroo on a ground station map
---  created 2026-09-24
+--  created 24 September 2026
 --
 --  The SITL runner and the demonstration script evaluate the kangaroo inside
 --  the vehicle's Lua, so nothing outside the log knows where it is. This

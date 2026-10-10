@@ -15,9 +15,10 @@
 --  KSRC_ or KBUS_ parameter is a flight limit.
 --
 --  The physical-validation plan: cfg.legs starts at the point run's
---  place (cfg.target_n_m, cfg.target_e_m: 120 s at the fence's deepest point),
---  then the transit to the shared start and the nine runs (straight, circle,
---  rectangle at constant, elastic and stop-start pace), each with a rest.
+--  place (cfg.target_n_m, cfg.target_e_m: held 45 s at the fence's deepest
+--  point), then the transit to the shared start and the nine runs (straight,
+--  circle, rectangle at constant, elastic and stop-start pace, one lap each),
+--  chained with no rests because each ends back at the shared start.
 --  cfg.suite_runs names each run. Set KSRC_RUN 5 from the ground once the
 --  aircraft is engaged, so the point run is not spent before then.
 --
@@ -28,7 +29,7 @@
 --  (libraries/AP_Scripting/modules/MAVLink).
 --  Aircraft: ADSB_TYPE 0 and avoidance off (it must ignore its own kangaroo);
 --  SCR_HEAP_SIZE: set the maximum, 1048576 (1 MiB). The two scripts share one
---  heap: flying arm AH through the whole plan in SITL (2026-10-10) peaked at
+--  heap: flying arm AH through the whole plan in SITL (10 October 2026) peaked at
 --  928 kB, about 120 kB below the maximum. Confirm on the board with
 --  SCR_DEBUG_OPTS 2 before flight.
 --
@@ -259,7 +260,7 @@ end
 -----------------------------------------------------------------------------
 -- 5. Full package
 -----------------------------------------------------------------------------
--- the point run, the transit and the nine runs, with a rest between them:
+-- the point run, the transit and the nine runs (no rests: each ends at the start):
 -- generated once in Python (pv_plan.py) and carried in spec.json, already
 -- fence-checked. This script plays them; it never builds or changes them.
 local function plan_legs()
@@ -470,14 +471,5 @@ outputs = function(t, now_ms, n, e, vn, ve)
     logger:write('HKSR', 't,Run,N,E,VN,VE,Sent', 'fffffff',
                  t, running, n, e, vn, ve, sent and 1 or 0)
 end
-
------------------------------------------------------------------------------
--- 8. Managing the load from the bus
------------------------------------------------------------------------------
--- The reader is in hardware_val.lua (kbus_bind(), read_bus(), HVAL_TGT 3):
--- it checks the sequence (odd = being written, changed = torn read) and the
--- age against HVAL_TGT_TMO, shifts the site-frame sample into its own frame
--- (site_to_origin, once at engagement) and projects it forward by its age;
--- the estimator updates only on fresh samples.
 
 return update, 1000

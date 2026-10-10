@@ -1,5 +1,5 @@
 -- =========================================================
---  harness_kangaroo -- target motion models  |  created 2026-09-03
+--  harness_kangaroo -- target motion models  |  created 3 September 2026
 --  Lua port of the harness kangaroo, gated against the Python.
 --
 --  point / straight / circle / rectangle / elastic, as PURE FUNCTIONS OF t:

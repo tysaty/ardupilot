@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_segments -- scripted leg chaining, and the kangaroo_rand replay
---  created 2026-09-03
+--  created 3 September 2026
 --  Lua port of the harness's leg chaining, gated against the Python.
 --
 --  Chains legs into continuous segments and evaluates the chain at a
@@ -52,7 +52,7 @@ local M = {}
 --  or, for an elastic leg over a non-straight base,
 --  {duration_s, "elastic", heading_deg, speed_ms, elastic_base}; the named
 --  form uses the keys duration_s, mode, heading_deg, speed_ms, elastic_base.
---  A four-element leg keeps the original straight base. (Found 2026-09-15:
+--  A four-element leg keeps the original straight base. (Found 15 September 2026:
 --  the composite schedule's elastic-circle and
 --  elastic-rectangle legs diverged from the Python until the base was
 --  carried here; the differential test now gates it.)

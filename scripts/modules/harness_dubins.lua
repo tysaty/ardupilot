@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_dubins -- Dubins primitives  
---  Ported 2026-09-03
+--  Ported 3 September 2026
 --
 --  Circle centres, arc sweep, arc- and straight-segment point generation, and
 --  path arc-length sampling. 

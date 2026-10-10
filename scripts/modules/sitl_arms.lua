@@ -1,6 +1,6 @@
 -- =========================================================
 --  sitl_arms -- which ported guidance law flies a cell (SITL, demo, aircraft)
---  created 2026-09-16
+--  created 16 September 2026
 --
 --  Maps a Python registry name (spec.json "algorithm.name") to the Lua
 --  entry point that produces one guidance point from one snapshot, in the
@@ -12,7 +12,7 @@
 --  Four arms ship their own `guidance_point` (harness_adaptive_db,
 --  harness_adaptive_horizon, harness_rh_geometric, and harness_carrot_shift
 --  for arm F). Arms A and F carry their held-sense variant as
---  `guidance_point_hyst` (AH added 2026-10-10, FH 2026-10-04). The baseline and its
+--  `guidance_point_hyst` (AH added 10 October 2026, FH 4 October 2026). The baseline and its
 --  hysteresis variant only have the geometry-level `harness_cs_orbit.guidance`,
 --  so the snapshot adapter for them lives HERE -- outside modules/ -- as a
 --  transliteration of algorithms.py's DubinsTargetOrbitAlgorithm and
@@ -92,7 +92,7 @@ M.REGISTRY = {
     dubins_target_orbit      = { entry = cs_orbit_entry(false), source = "sitl_arms adapter over harness_cs_orbit.guidance" },
     dubins_target_orbit_hyst = { entry = cs_orbit_entry(true),  source = "sitl_arms adapter over harness_cs_orbit.guidance (held sense)" },
     adaptive_db_circle       = { module = "harness_adaptive_db" },
-    -- Arm AH (added 2026-10-10): arm A with the held orbit sense. Gated
+    -- Arm AH (added 10 October 2026): arm A with the held orbit sense. Gated
     -- tick for tick against the Python adaptive_db_circle_hyst in
     -- tests/unit/test_lua_differential.py.
     adaptive_db_circle_hyst  = { entry = function(snapshot, cfg)
@@ -102,7 +102,7 @@ M.REGISTRY = {
                                  source = "harness_adaptive_db.guidance_point_hyst" },
     adaptive_horizon_cs      = { module = "harness_adaptive_horizon" },
     rh_geometric             = { module = "harness_rh_geometric" },
-    -- Arm F (added 2026-10-04): the baseline's carrot led af_step_ticks
+    -- Arm F (added 4 October 2026): the baseline's carrot led af_step_ticks
     -- ticks ahead on the raw estimate. Gated tick for tick against the Python
     -- carrot_shift_cs / _hyst in tests/unit/test_lua_differential.py.
     carrot_shift_cs          = { module = "harness_carrot_shift" },

@@ -1,6 +1,5 @@
 -- =========================================================
---  harness_adaptive_db -- CS-orbit about a PREDICTED target  |  created 2026-09-03
---  Lua port of the harness's adaptive_db_circle (arm A), gated against the Python.
+--  harness_adaptive_db -- CS-orbit about a PREDICTED target  |  created 3 September 2026
 --
 --  THE FIRST STATEFUL ALGORITHM PORTED. It carries algorithm_state across ticks
 --  -- the committed pose, the held centre, the replan clock -- so the
@@ -105,8 +104,7 @@ M.orbit_hold = orbit_hold
 --  plan?} or nil plus a reason. `plan` is present in the approach phase only:
 --  the orbit phase commits no curve.
 --  preferred_direction / sense_margin_m (optional): orbit-sense
---  hysteresis on the CS solve, passed through to harness_cs_orbit. Both nil
---  reproduces the pre-2026-09-14 behaviour exactly.
+--  hysteresis on the CS solve, passed through to harness_cs_orbit. 
 function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
                     look_ahead_m, delta_psi, delta_d, hold_policy, precompensate,
                     preferred_direction, sense_margin_m)

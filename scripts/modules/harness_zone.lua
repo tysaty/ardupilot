@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_zone -- the kangaroo's containment in the flight-test fence
---  created 2026-10-07
+--  created 7 October 2026
 --
 --  Port of py_harness/zone.py PolygonZone and its containment rule
 --  (InclusionZone.containment_heading_deg, as ScenarioSession._contain_target

@@ -15,7 +15,7 @@
 --   * Write it from shared code, not copies: heading_from, command, release,
 --     log_tick and anchor exist twice already (runner and demo). Lift them into
 --     one module (say sitl_vehicle_io.lua) that all three scripts require.
---     (2026-10-04: still copies; the copies below follow the runner's
+--     (4 October 2026: still copies; the copies below follow the runner's
 --     sitl_harness_runner.lua line for line so the tick is the runner's tick.)
 --
 -- SD card requirements (APM/ on the card; HARDWARE_VAL_BOOT_REVIEW.md)
@@ -33,7 +33,7 @@
 -- On a flight controller SCR_HEAP_SIZE is limited to 1 MiB by its range and
 -- by the board's RAM; measure heap and instructions on the bench (rung 2).
 -- With kangaroo_source.lua on the same board (HVAL_TGT 3) the two scripts
--- share the heap: arm AH through the whole plan in SITL (2026-10-10) peaked
+-- share the heap: arm AH through the whole plan in SITL (10 October 2026) peaked
 -- at 928 kB, so set SCR_HEAP_SIZE to its 1 MiB maximum. Update time in that
 -- run (PC SITL): median 12.5 ms, 95th percentile 27 ms, worst 84 ms for this
 -- script, against the 100 ms tick; a board is slower, so time it on the bench.
@@ -313,7 +313,7 @@ end
 -- PLAN: harness_estimator.new / update / predict in the runner's order. Call
 -- update only on a new sample, with the measured dt since the last one. A gets
 -- target_est (projected) only; F gets target_est_raw only (no double lead).
--- (2026-10-04: virtual targets produce a sample every tick, so the update is
+-- (4 October 2026: virtual targets produce a sample every tick, so the update is
 -- every tick with the nominal dt_s, exactly as the runner and the Python
 -- harness; the measured dt matters only for HVAL_TGT 2.)
 

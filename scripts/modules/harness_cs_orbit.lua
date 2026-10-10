@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_cs_orbit -- the CS target-circle approach and its orbit continuation
---  created 2026-09-03
+--  created 3 September 2026
 --  algorithm ported to Lua - verified no structural change to logic
 -- ported from the baseline algorithm CS-orbit:
 --          py_harness/geometry/dubins_target_circle.py and
@@ -69,7 +69,7 @@ local PI = math.pi
 function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
     -- The arc sweep moves a phase by at most one turn, so it is correct only
     -- for a heading in the harness's range, [-pi, pi). A heading outside it
-    -- (the SITL scripts passed [0, 2 pi) until 2026-09-24) gave the
+    -- (the SITL scripts passed [0, 2 pi) until 24 September 2026) gave the
     -- right-turn candidate a negative sweep, a phantom turn-in cost and a
     -- path starting away from the aircraft. Only an
     -- out-of-range heading is wrapped, so every in-range heading is
@@ -156,7 +156,7 @@ end
 --  Returns the same table shape as reach_path, or nil plus a reason.
 --  preferred_direction / sense_margin_m (optional; orbit-sense hysteresis): hold the
 --  previous tick's orbit sense unless the other is cheaper by more than the
---  margin. Both nil reproduces the pre-2026-09-14 argmin exactly.
+--  margin. Both nil reproduces the argmin used before 14 September 2026 exactly.
 function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                          delta_psi, delta_d, preferred_direction, sense_margin_m)
     -- handle curvature constraints
@@ -278,6 +278,7 @@ end
 --
 --  Returns a table {gx, gy, phase, direction, curvature, ring_angle_rad?} or
 --  nil plus a reason.
+
 function M.guidance(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
                     look_ahead_m, delta_psi, delta_d, precompensate,
                     preferred_direction, sense_margin_m)

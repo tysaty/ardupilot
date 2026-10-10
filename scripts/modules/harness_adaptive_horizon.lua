@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_adaptive_horizon -- the prediction horizon SELECTED per replan
---  created 2026-09-03
+--  created 3 September 2026
 --  TASK-006 Tranche 6b (forward port).  Algorithm: adaptive_horizon_cs,
 --  TASK-039 arm B.
 --

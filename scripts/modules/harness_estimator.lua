@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_estimator -- constant-velocity target estimator and look-ahead
---  created 2026-09-03
+--  created 3 September 2026
 --  Lua port check of the harness estimator (reverse check, plus a small forward port).
 --
 --  A Kalman filter over [x, y, vx, vy] estimating target velocity from position

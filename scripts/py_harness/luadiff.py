@@ -52,6 +52,9 @@ import tempfile
 #: Absolute path to the Lua module directory the ported modules live in.
 MODULE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "modules")
+#: Lua modules no longer flown (the weave families and the original estimator),
+#: kept for the differential tests (`scripts/working_folder_lua/modules`).
+WORKING_MODULE_DIR = os.path.join(os.path.dirname(MODULE_DIR), "working_folder_lua", "modules")
 
 #: The Lua version ArduPilot's scripting engine runs. Recorded here because
 #: Tranche 0 requires the target runtime's version and numeric semantics to be
@@ -207,6 +210,9 @@ class LuaSandbox:
         self._lua_path = os.path.join(MODULE_DIR, "?.lua")
         paths = [os.path.join(str(d), "?.lua") for d in extra_module_dirs]
         paths.append(self._lua_path)
+        # Modules kept only for the differential tests (the weave families),
+        # moved out of the flight scripts folder on 2026-10-10.
+        paths.append(os.path.join(WORKING_MODULE_DIR, "?.lua"))
         self.runtime.execute(
             'package.path = %s .. ";" .. package.path'
             % _lua_quote(";".join(paths)))

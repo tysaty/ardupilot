@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_rh_geometric -- receding-horizon geometric planner
---  created 2026-09-03
+--  created 3 September 2026
 --  TASK-006 Tranche 6c (forward port).  Algorithm: rh_geometric,
 --  TASK-039 arm C.
 --

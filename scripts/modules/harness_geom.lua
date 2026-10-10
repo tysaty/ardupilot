@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_geom -geometric primitives  
---  created 2026-09-03
+--  created 3 September 2026
 --
 --  Angle wrapping, frame conversion and the small helpers every other ported
 --  module depends on. Ported from the python harness
