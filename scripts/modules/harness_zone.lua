@@ -145,7 +145,23 @@ end
 --  TURN_LEG_S (ScenarioSession.apply_change).
 function M.turned_leg(leg, heading_deg)
     return { duration_s = M.TURN_LEG_S, mode = leg.mode, heading_deg = heading_deg,
-             speed_ms = leg.speed_ms, elastic_base = leg.elastic_base }
+             speed_ms = leg.speed_ms, elastic_base = leg.elastic_base,
+             pace = leg.pace }
+end
+
+--- The polygon's area centroid, n, e (PolygonZone.centroid).
+function M.centroid(z)
+    local a, cn, ce = 0.0, 0.0, 0.0
+    local v = z.vertices
+    for i = 1, #v do
+        local p, q = v[i], v[i % #v + 1]
+        local w = p[2] * q[1] - q[2] * p[1]
+        a = a + w
+        ce = ce + (p[2] + q[2]) * w
+        cn = cn + (p[1] + q[1]) * w
+    end
+    a = a * 0.5
+    return cn / (6.0 * a), ce / (6.0 * a)
 end
 
 --- Vehicle only: fence vertices {{lat_deg, lng_deg}, ...} as a zone in the

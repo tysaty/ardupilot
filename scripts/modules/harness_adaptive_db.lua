@@ -199,7 +199,13 @@ end
 --  back to the true target: centring the ring on a prediction is the whole
 --  algorithm, and without one the run would quietly become plain CS-orbit under
 --  a different name and be mistaken for evidence.
-function M.guidance_point(snapshot, cfg)
+--
+--  `hyst` selects the held orbit sense (TASK-048, arm AH), the way sitl_arms'
+--  cs_orbit_entry(hyst) and the Python _SenseHysteresisMixin do: it is a
+--  property of the arm, not a config value, so it is passed in, not read from
+--  cfg (which then also carries cs_sense_margin_m). M.guidance_point and
+--  M.guidance_point_hyst below are the two entries.
+local function guidance_point(snapshot, cfg, hyst)
     local px, py = snapshot.plane_e_m, snapshot.plane_n_m
     local psi_i = snapshot.plane_hdg_rad
 
@@ -244,10 +250,24 @@ function M.guidance_point(snapshot, cfg)
         ticks = prev_ticks + 1
     end
 
+    -- Held orbit sense, for the _hyst variant only (Python _held_sense): the
+    -- previous tick's direction and the margin. nil, nil is the plain argmin.
+    -- It applies to the CS solve of the plan flown this tick (approach phase,
+    -- either hold policy); the orbit phase re-derives its sense from the
+    -- heading, as without hysteresis.
+    local previous, margin = nil, nil
+    if hyst then
+        if st.direction == "cw" or st.direction == "ccw" then
+            previous = st.direction
+        end
+        margin = cfg.cs_sense_margin_m
+    end
+
     local g, reason = M.guidance(px, py, psi_i, cx, cy, plan,
                                  cfg.orbit_radius_m, cfg.turn_radius_m,
                                  cfg.look_ahead_m, cfg.delta_psi_rad,
-                                 cfg.delta_d_m, policy, cfg.orbit_precompensate)
+                                 cfg.delta_d_m, policy, cfg.orbit_precompensate,
+                                 previous, margin)
     if g == nil then
         return nil, reason
     end
@@ -287,7 +307,9 @@ function M.guidance_point(snapshot, cfg)
     -- The FR-011 / PR-008 quantity: the guidance-point jump caused by THE PLAN
     -- CHANGING, isolated from the aircraft's own motion by evaluating the OLD
     -- plan at the SAME pose. Omitted -- rather than faked as 0.0 -- when there
-    -- is no old plan or it no longer solves from here.
+    -- is no old plan or it no longer solves from here. The old plan is
+    -- re-solved WITHOUT the held sense, exactly as the Python does for both
+    -- variants, so replan_step_m means the same thing in A and AH.
     if replanned and prev_ticks ~= nil then
         local old_plan = nil
         if st.plan_valid then
@@ -306,11 +328,30 @@ function M.guidance_point(snapshot, cfg)
         state.replan_step_m = 0.0
     end
 
+    -- Hysteresis bookkeeping (Python _sense_state): set on EVERY tick of the
+    -- _hyst variant, false when there is no previous sense yet, so the first
+    -- tick matches field for field.
+    if hyst then
+        state.sense_held = (previous ~= nil) and (g.direction == previous)
+        state.sense_switched = (previous ~= nil) and (g.direction ~= previous)
+    end
+
     return {
         guidance_n_m = g.gy,
         guidance_e_m = g.gx,
         algorithm_state = state,
     }
+end
+
+--- The two entries, as sitl_arms' contract expects: (snapshot, cfg).
+--  adaptive_db_circle      -> M.guidance_point       (no held sense)
+--  adaptive_db_circle_hyst -> M.guidance_point_hyst  (held sense, TASK-048)
+function M.guidance_point(snapshot, cfg)
+    return guidance_point(snapshot, cfg, false)
+end
+
+function M.guidance_point_hyst(snapshot, cfg)
+    return guidance_point(snapshot, cfg, true)
 end
 
 return M

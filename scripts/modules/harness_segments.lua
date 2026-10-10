@@ -85,12 +85,17 @@ function M.make_segments(legs, start_n, start_e, opts, t0)
         local heading_deg = leg.heading_deg or leg[3]
         local speed_ms = leg.speed_ms or leg[4]
         local elastic_base = leg.elastic_base or leg[5]
+        local pace = leg.pace or leg[6]
         if duration_s == nil or duration_s <= 0.0 then
             return nil, "leg duration must be positive"
         end
         if mode ~= "point" and mode ~= "straight" and mode ~= "circle"
-                and mode ~= "rectangle" and mode ~= "elastic" then
+                and mode ~= "rectangle" and mode ~= "elastic"
+                and mode ~= "stopstart" then
             return nil, "unknown leg mode"
+        end
+        if pace ~= nil and mode ~= "stopstart" then
+            return nil, "pace is for stopstart legs only"
         end
         if speed_ms < 0.0 then
             return nil, "leg speed must be >= 0"
@@ -107,6 +112,7 @@ function M.make_segments(legs, start_n, start_e, opts, t0)
             heading_deg = heading_deg,
             speed_ms = speed_ms,
             elastic_base = elastic_base or "straight",
+            pace = pace,
             radius_m = radius_m,
             length_m = length_m,
             width_m = width_m,
@@ -154,6 +160,7 @@ function M.local_state(seg, t_local)
         fast_ms = seg.speed_ms,
         hold_s = kang.ELASTIC_HOLD_S,
         ramp_s = kang.ELASTIC_RAMP_S,
+        pace = seg.pace,
     })
 end
 

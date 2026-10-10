@@ -433,6 +433,12 @@ local function target_at(t)
     if why ~= nil then
         return nil, why
     end
+    -- The rule turns on the leg's heading, so a circle or rectangle wider
+    -- than the fence less the ring can still carry the kangaroo out (ADR-012).
+    -- Following it out is never wanted: fault, which stops commanding.
+    if zone ~= nil and not zone_mod.contains(zone, kn, ke, 0.0) then
+        return nil, string.format("kangaroo left the fence at (%.0f N, %.0f E)", kn, ke)
+    end
     return kn, ke, kvn, kve
 end
 
@@ -564,40 +570,31 @@ local function can_engage(aircraft_valid, flight_ready, target_fresh)
     if HVAL_ENABLE:get() ~= 1 then
         return false, "disabled"
     end
-
     local high, why = switch_high()
     if not high then
         return false, why
     end
-
     if not arming:is_armed() then
         return false, "not armed"
     end
-
     if vehicle:get_mode() ~= MODE_GUIDED then
         return false, "not GUIDED"
     end
-
     if not flight_ready then
         return false, "flight not established"
     end
-
     if not aircraft_valid then
         return false, "invalid aircraft state"
     end
-
     if not target_fresh then
         return false, "target unavailable/stale"
     end
-
     if state.fault_latched then
         return false, "fault latched"
     end
-
     if entry == nil or math.floor(HVAL_ARM:get() + 0.5) ~= active_arm then
         return false, "algorithm not ready"
     end
-
     -- ADR-011 bank-limit gate (fix 12)
     local roll_ok, roll_msg = roll_limit_ok()
     if not roll_ok then
@@ -606,7 +603,6 @@ local function can_engage(aircraft_valid, flight_ready, target_fresh)
 
     return true
 end
-
 
 -- ============================================================
 -- 6. GUIDANCE DISPATCH
@@ -629,13 +625,14 @@ local function compute_guidance(
         plane_n_m = pn,
         plane_e_m = pe,
         plane_hdg_rad = hdg,
-
+         -- target values
         target_n_m = kn,
         target_e_m = ke,
         target_vn_ms = kvn,
         target_ve_ms = kve,
-
+        -- algorithm values
         algorithm_state = algorithm_state,
+        -- estimates
         target_est = est_proj,
         target_est_raw = est_raw,
     }, cfg)

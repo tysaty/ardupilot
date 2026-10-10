@@ -131,6 +131,18 @@ def build_parser():
         help="Seconds spent ramping between them (default 4). Ramps use "
         "smoothstep, so acceleration is finite.",
     )
+    # Stop-start pace (TASK-064): --kang-mode stopstart, over --elastic-base;
+    # --kang-speed-ms is the nominated speed it starts at.
+    for flag, key, text in (
+            ("--stopstart-slow-factor", "slow_factor",
+             "fraction of --kang-speed-ms held while stopped (default 0.1)"),
+            ("--stopstart-hold-slow-s", "hold_slow_s", "seconds stopped (default 10)"),
+            ("--stopstart-hold-fast-s", "hold_fast_s",
+             "seconds at the nominated speed before slowing (default 10)"),
+            ("--stopstart-ramp-down-s", "ramp_down_s", "seconds slowing (default 3)"),
+            ("--stopstart-ramp-up-s", "ramp_up_s", "seconds speeding up (default 3)")):
+        parser.add_argument(flag, type=float, default=None, dest="stopstart_" + key,
+                            help="Stop-start pace: " + text + ".")
     parser.add_argument(
         "--estimate", action="store_true",
         help="Run the state estimator (TASK-012) and feed algorithms the "
@@ -407,6 +419,13 @@ def _elastic_kwargs(args):
         value = getattr(args, cli, None)
         if value is not None:
             out[key] = value
+    pace = {}
+    for key in ("slow_factor", "hold_slow_s", "hold_fast_s", "ramp_down_s", "ramp_up_s"):
+        value = getattr(args, "stopstart_" + key, None)
+        if value is not None:
+            pace[key] = value
+    if pace:
+        out["stopstart_pace"] = pace
     return out
 
 

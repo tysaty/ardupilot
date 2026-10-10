@@ -11,8 +11,8 @@
 --
 --  Four arms ship their own `guidance_point` (harness_adaptive_db,
 --  harness_adaptive_horizon, harness_rh_geometric, and harness_carrot_shift
---  for arm F, TASK-060, whose held-sense variant is its
---  `guidance_point_hyst`). The baseline and its
+--  for arm F, TASK-060). Arms A and F carry their held-sense variant as
+--  `guidance_point_hyst` (AH added 2026-10-10, FH TASK-060). The baseline and its
 --  hysteresis variant only have the geometry-level `harness_cs_orbit.guidance`,
 --  so the snapshot adapter for them lives HERE -- outside modules/ -- as a
 --  transliteration of algorithms.py's DubinsTargetOrbitAlgorithm and
@@ -23,7 +23,7 @@
 --
 --  Everything without an entry point is REFUSED with a reason, and the
 --  campaign records the cell as a finding (VR-014): no law is edited here to
---  make it fly. Arm D and the A/B/D hysteresis adapters are the known gaps
+--  make it fly. Arm D and the B/D hysteresis adapters are the known gaps
 --  (TASK-006 status; TASK-046 D3).
 --
 --  Stateless. Frame as the harness: snapshot in (north, east) metres, the
@@ -93,6 +93,14 @@ M.REGISTRY = {
     dubins_target_orbit      = { entry = cs_orbit_entry(false), source = "sitl_arms adapter over harness_cs_orbit.guidance" },
     dubins_target_orbit_hyst = { entry = cs_orbit_entry(true),  source = "sitl_arms adapter over harness_cs_orbit.guidance (held sense)" },
     adaptive_db_circle       = { module = "harness_adaptive_db" },
+    -- Arm AH (added 2026-10-10): arm A with the TASK-048 held sense. Gated
+    -- tick for tick against the Python adaptive_db_circle_hyst in
+    -- tests/unit/test_lua_differential.py.
+    adaptive_db_circle_hyst  = { entry = function(snapshot, cfg)
+                                     return require("harness_adaptive_db")
+                                         .guidance_point_hyst(snapshot, cfg)
+                                 end,
+                                 source = "harness_adaptive_db.guidance_point_hyst" },
     adaptive_horizon_cs      = { module = "harness_adaptive_horizon" },
     rh_geometric             = { module = "harness_rh_geometric" },
     -- Arm F (TASK-060, added 2026-10-04): the baseline's carrot led one tick
@@ -110,7 +118,6 @@ M.REGISTRY = {
 M.NOT_PORTED = {
     velocity_db_circle       = "arm D has no Lua module (TASK-043; TASK-046 D3)",
     velocity_db_circle_hyst  = "arm D has no Lua module (TASK-043; TASK-046 D3)",
-    adaptive_db_circle_hyst  = "held-sense adapter for harness_adaptive_db not ported (TASK-006 Tranche 9 note)",
     adaptive_horizon_cs_hyst = "held-sense adapter for harness_adaptive_horizon not ported (TASK-006 Tranche 9 note)",
 }
 

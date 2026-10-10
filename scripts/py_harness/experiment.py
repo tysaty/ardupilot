@@ -63,7 +63,8 @@ from . import series as series_mod
 from . import tangent_error
 from .config import HarnessConfig, InfeasibleConfiguration
 from . import kangaroo as kang
-from .kangaroo import ELASTIC_BASE_FIELD, ELASTIC_BASES, ELASTIC_MODE, LEG_MODES
+from .kangaroo import (ELASTIC_BASE_FIELD, ELASTIC_BASES, LEG_MODES, PACE_FIELD,
+                       PACED_MODES, STOPSTART_MODE)
 
 
 #: Bundle schema version. Bumped whenever a field's **meaning** changes or a
@@ -135,9 +136,9 @@ def default_spec():
             "target_e_m": None,
         },
         "kangaroo": {
-            "radius_m": 150.0,
-            "length_m": 300.0,
-            "width_m": 150.0,
+            "radius_m": kang.DEFAULT_GEOMETRY["radius_m"],
+            "length_m": kang.DEFAULT_GEOMETRY["length_m"],
+            "width_m": kang.DEFAULT_GEOMETRY["width_m"],
             "seed": None,
             # TASK-050: True declares the legs a composite fitted to the zone,
             # and validate_spec then proves it before anything runs.
@@ -157,11 +158,16 @@ def leg_tuple(leg):
     """A spec leg object as the tuple :func:`kangaroo.make_segments` takes.
 
     Four elements, or five when the leg names an ``elastic_base``
-    (`TASK-045` D2) — the base is carried only when present, so a spec without
-    the field builds exactly the legs it did before.
+    (`TASK-045` D2), or six when a ``stopstart`` leg carries a ``pace``
+    (`TASK-064`; the fifth is then the base or ``None``). Optional fields are
+    carried only when present, so a spec without them builds exactly the legs
+    it did before.
     """
     out = (leg["duration_s"], leg["mode"], leg["heading_deg"], leg["speed_ms"])
     base = leg.get(ELASTIC_BASE_FIELD)
+    pace = leg.get(PACE_FIELD)
+    if pace is not None:
+        return out + (base, dict(pace))
     return out if base is None else out + (base,)
 
 
@@ -171,6 +177,8 @@ def leg_dict(leg):
            "speed_ms": leg[3]}
     if len(leg) > 4 and leg[4] is not None:
         out[ELASTIC_BASE_FIELD] = leg[4]
+    if len(leg) > 5 and leg[5] is not None:
+        out[PACE_FIELD] = dict(leg[5])
     return out
 
 
@@ -259,14 +267,27 @@ def validate_spec(spec):
         # than ignored, because an ignored field is a field that lies.
         base = leg.get(ELASTIC_BASE_FIELD)
         if base is not None:
-            if mode != ELASTIC_MODE:
+            if mode not in PACED_MODES:
                 raise SpecError("%s.%s is set on a %r leg; it applies to "
-                                "'elastic' legs only"
-                                % (where, ELASTIC_BASE_FIELD, mode))
+                                "%s legs only"
+                                % (where, ELASTIC_BASE_FIELD, mode,
+                                   " and ".join(repr(m) for m in PACED_MODES)))
             if base not in ELASTIC_BASES:
                 raise SpecError("%s.%s %r is unknown; use one of %s"
                                 % (where, ELASTIC_BASE_FIELD, base,
                                    ", ".join(ELASTIC_BASES)))
+        # Optional (TASK-064): a stop-start leg's profile; stopstart legs only.
+        pace = leg.get(PACE_FIELD)
+        if pace is not None:
+            if mode != STOPSTART_MODE:
+                raise SpecError("%s.%s is set on a %r leg; it applies to %r "
+                                "legs only" % (where, PACE_FIELD, mode, STOPSTART_MODE))
+            if not isinstance(pace, dict):
+                raise SpecError("%s.%s must be an object" % (where, PACE_FIELD))
+            try:
+                kang.stopstart_profile(pace)
+            except ValueError as exc:
+                raise SpecError("%s.%s: %s" % (where, PACE_FIELD, exc))
 
     run = _require(spec, "run", "the specification")
     duration = _require(run, "duration_s", "run")

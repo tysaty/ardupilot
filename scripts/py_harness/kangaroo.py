@@ -36,12 +36,13 @@ MODES = ("point", "straight", "circle", "rectangle")
 RAND_MODE = "kangaroo_rand"
 
 #: Everything selectable via ``--kang-mode``.
-ALL_MODES = MODES + (RAND_MODE, "elastic")
+ALL_MODES = MODES + (RAND_MODE, "elastic", "stopstart")
 
 #: Modes a scripted leg or a GUI control may select. `kangaroo_rand` is excluded
 #: because it is itself a schedule, and nesting one inside a leg would be
-#: ambiguous about which schedule owns the target.
-LEG_MODES = MODES + ("elastic",)
+#: ambiguous about which schedule owns the target. ``stopstart`` (`TASK-064`)
+#: is a pace over a moving base, as ``elastic`` is.
+LEG_MODES = MODES + ("elastic", "stopstart")
 
 
 def heading_frame_offset(heading_deg, fwd_m, disp_m):
@@ -131,7 +132,7 @@ def rectangle_state(t, heading_deg, fwd_m, disp_m, length_m, width_m, speed_ms):
 
 
 def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms,
-                  elastic_base=None):
+                  elastic_base=None, pace=None):
     """A local-time ``state(t) -> (n, e, vn, ve)`` for one segment at the origin.
 
     ``fwd``/``disp`` are 0 — the segment's absolute placement comes from the
@@ -156,6 +157,14 @@ def _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m, speed_ms,
         return lambda t: elastic_state(
             t, base, heading_deg, 0.0, 0.0, radius_m, length_m, width_m,
             speed_ms * ELASTIC_SLOW_FACTOR, speed_ms)
+    if mode == STOPSTART_MODE:
+        # The leg's speed is the nominated (fast) speed; ``pace`` the profile
+        # (TASK-064), validated once here so a bad leg fails when it is built.
+        base = DEFAULT_ELASTIC_BASE if elastic_base is None else elastic_base
+        profile = stopstart_profile(pace)
+        return lambda t: stopstart_state(
+            t, base, heading_deg, 0.0, 0.0, radius_m, length_m, width_m,
+            speed_ms, profile)
     return lambda t: rectangle_state(t, heading_deg, 0.0, 0.0, length_m, width_m,
                                      speed_ms)
 
@@ -378,6 +387,182 @@ def elastic_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m, length_m,
     return n, e, vn * speed, ve * speed
 
 
+# --------------------------------------------------------------------------
+# Stop-start pace (``TASK-064``)
+# --------------------------------------------------------------------------
+# A kangaroo travelling at the nominated speed that slows almost to a stop,
+# waits, and sets off again. Separate from the elastic profile (left exactly as
+# recorded in the campaigns): it starts at the FAST speed, its two holds and
+# its two ramps are independent, and its slow phase defaults to 10 % rather
+# than 30 %. One cycle is: hold fast, ramp down, hold slow, ramp up; repeat.
+# Like elastic it is a modifier over a moving base mode, and its distance is a
+# closed-form integral, so position stays a pure function of t (VR-015).
+# A one-off stop is a stopstart leg one period long followed by a constant leg:
+# the speed at the end of a whole period is the fast speed, so the join is
+# continuous.
+
+#: Mode name of a stop-start leg.
+STOPSTART_MODE = "stopstart"
+
+#: Fraction of the nominated speed held while stopped (``f``).
+STOPSTART_SLOW_FACTOR = 0.1
+
+#: Seconds at the nominated speed before slowing.
+STOPSTART_HOLD_FAST_S = 10.0
+
+#: Seconds spent slowing from the nominated speed to ``f`` times it.
+STOPSTART_RAMP_DOWN_S = 3.0
+
+#: Seconds held at ``f`` times the nominated speed (the stop, "X").
+STOPSTART_HOLD_SLOW_S = 10.0
+
+#: Seconds spent speeding back up to the nominated speed.
+STOPSTART_RAMP_UP_S = 3.0
+
+#: Optional leg field carrying a stop-start leg's profile, a dict over
+#: :data:`PACE_KEYS`; absent keys take the defaults above.
+PACE_FIELD = "pace"
+
+#: Profile keys a ``pace`` dict may carry, with their defaults.
+PACE_DEFAULTS = {
+    "slow_factor": STOPSTART_SLOW_FACTOR,
+    "hold_fast_s": STOPSTART_HOLD_FAST_S,
+    "ramp_down_s": STOPSTART_RAMP_DOWN_S,
+    "hold_slow_s": STOPSTART_HOLD_SLOW_S,
+    "ramp_up_s": STOPSTART_RAMP_UP_S,
+}
+PACE_KEYS = tuple(PACE_DEFAULTS)
+
+
+def stopstart_profile(pace=None):
+    """The full stop-start profile: ``pace`` (a dict, possibly partial, or
+    ``None``) over :data:`PACE_DEFAULTS`, validated.
+
+    Raises:
+        ValueError: For an unknown key, a non-number, ``slow_factor`` outside
+            [0, 1], a negative hold, or a non-positive ramp.
+    """
+    out = dict(PACE_DEFAULTS)
+    for key, value in (pace or {}).items():
+        if key not in PACE_DEFAULTS:
+            raise ValueError("unknown stopstart pace key %r; use %s"
+                             % (key, ", ".join(PACE_KEYS)))
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("stopstart pace %s must be a number, got %r" % (key, value))
+        out[key] = float(value)
+    if not 0.0 <= out["slow_factor"] <= 1.0:
+        raise ValueError("stopstart slow_factor must be in [0, 1], got %r"
+                         % out["slow_factor"])
+    for key in ("hold_fast_s", "hold_slow_s"):
+        if out[key] < 0.0:
+            raise ValueError("stopstart %s must be >= 0, got %r" % (key, out[key]))
+    for key in ("ramp_down_s", "ramp_up_s"):
+        if out[key] <= 0.0:
+            raise ValueError("stopstart %s must be > 0, got %r" % (key, out[key]))
+    return out
+
+
+def stopstart_period_s(pace=None):
+    """One full hold-fast, ramp-down, hold-slow, ramp-up cycle, seconds."""
+    p = stopstart_profile(pace)
+    return p["hold_fast_s"] + p["ramp_down_s"] + p["hold_slow_s"] + p["ramp_up_s"]
+
+
+def stopstart_speed(t, fast_ms, pace=None):
+    """Speed at ``t`` of a stop-start kangaroo nominated at ``fast_ms``.
+
+    Raises:
+        ValueError: For a negative speed or an invalid profile.
+    """
+    if fast_ms < 0.0:
+        raise ValueError("stopstart speed must be >= 0, got %r" % fast_ms)
+    p = stopstart_profile(pace)
+    slow_ms = fast_ms * p["slow_factor"]
+    span = fast_ms - slow_ms
+    u = max(0.0, t) % stopstart_period_s(p)
+    if u < p["hold_fast_s"]:
+        return fast_ms
+    u -= p["hold_fast_s"]
+    if u < p["ramp_down_s"]:
+        return fast_ms - span * smoothstep(u / p["ramp_down_s"])
+    u -= p["ramp_down_s"]
+    if u < p["hold_slow_s"]:
+        return slow_ms
+    u -= p["hold_slow_s"]
+    return slow_ms + span * smoothstep(u / p["ramp_up_s"])
+
+
+def stopstart_distance(t, fast_ms, pace=None):
+    """Distance travelled by ``t`` under :func:`stopstart_speed`, metres.
+
+    Closed form: whole cycles, then each phase of the part cycle, with the
+    smoothstep ramps through :func:`_smoothstep_integral`.
+    """
+    if t <= 0.0:
+        return 0.0
+    p = stopstart_profile(pace)
+    slow_ms = fast_ms * p["slow_factor"]
+    span = fast_ms - slow_ms
+    hf, rd, hs, ru = (p["hold_fast_s"], p["ramp_down_s"], p["hold_slow_s"],
+                      p["ramp_up_s"])
+    period = hf + rd + hs + ru
+    per_cycle = fast_ms * hf + (fast_ms - 0.5 * span) * rd + slow_ms * hs \
+        + (slow_ms + 0.5 * span) * ru
+    whole = math.floor(t / period)
+    u = t - whole * period
+    dist = whole * per_cycle
+
+    take = min(u, hf)                                   # hold fast
+    dist += fast_ms * take
+    u -= take
+    if u <= 0.0:
+        return dist
+    take = min(u, rd)                                   # ramp down
+    dist += fast_ms * take - span * rd * _smoothstep_integral(take / rd)
+    u -= take
+    if u <= 0.0:
+        return dist
+    take = min(u, hs)                                   # hold slow
+    dist += slow_ms * take
+    u -= take
+    if u <= 0.0:
+        return dist
+    take = min(u, ru)                                   # ramp up
+    dist += slow_ms * take + span * ru * _smoothstep_integral(take / ru)
+    return dist
+
+
+def stopstart_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m, length_m,
+                    width_m, fast_ms, pace=None):
+    """``base_mode`` travelled at a stop-start pace (``TASK-064``), as
+    :func:`elastic_state` substitutes its distance and speed into a unit-speed
+    base.
+
+    Raises:
+        ValueError: For ``point``, an unknown base mode or an invalid profile.
+    """
+    base_mode = str(base_mode).lower()
+    if base_mode == "point":
+        raise ValueError("stopstart needs a moving base mode; 'point' is stationary")
+    if base_mode not in MODES:
+        raise ValueError("unknown stopstart base mode %r; use one of %s"
+                         % (base_mode, ", ".join(m for m in MODES if m != "point")))
+    dist = stopstart_distance(t, fast_ms, pace)
+    speed = stopstart_speed(t, fast_ms, pace)
+    if base_mode == "straight":
+        n, e, vn, ve = straight_state(dist, heading_deg, fwd_m, disp_m, 1.0)
+    elif base_mode == "circle":
+        n, e, vn, ve = circle_state(dist, heading_deg, fwd_m, disp_m, radius_m, 1.0)
+    else:
+        n, e, vn, ve = rectangle_state(dist, heading_deg, fwd_m, disp_m,
+                                       length_m, width_m, 1.0)
+    return n, e, vn * speed, ve * speed
+
+
+#: Modes whose leg may name a base mode (``elastic_base``) to travel over.
+PACED_MODES = (ELASTIC_MODE, STOPSTART_MODE)
+
+
 #: One scripted leg. ``speed_ms`` is **per segment** — the whole point of the
 #: scripted form, and the thing `kangaroo_rand` cannot express (it carries one
 #: speed for the entire run).
@@ -395,14 +580,24 @@ def leg_elastic_base(leg):
     return None
 
 
+def leg_pace(leg):
+    """The ``pace`` dict a stop-start leg carries (the optional sixth element,
+    `TASK-064`), or ``None``."""
+    if len(leg) > 5 and leg[5] is not None:
+        return dict(leg[5])
+    return None
+
+
 def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
                   width_m=150.0, t0=0.0):
     """Chain ``legs`` into continuous segments starting at ``(start_n, start_e)``.
 
     ``legs`` is a sequence of ``(duration_s, mode, heading_deg, speed_ms)``, or
     ``(duration_s, mode, heading_deg, speed_ms, elastic_base)`` for an
-    ``elastic`` leg over a non-straight base (`TASK-045` D2; see
-    :data:`ELASTIC_BASES`). Each segment carries a positional offset so it
+    ``elastic`` or ``stopstart`` leg over a non-straight base (`TASK-045` D2;
+    see :data:`ELASTIC_BASES`), or with a sixth element, the ``pace`` dict of
+    a ``stopstart`` leg (`TASK-064`; the fifth may then be ``None``). Each
+    segment carries a positional offset so it
     **begins exactly where the previous ended**: position is continuous across a
     switch and only velocity steps, which is what a manoeuvre is (``TASK-029``).
 
@@ -423,6 +618,7 @@ def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
     for i, leg in enumerate(legs):
         dur, mode, heading_deg, speed_ms = leg[:4]
         elastic_base = leg_elastic_base(leg)
+        pace = leg_pace(leg)
         if dur <= 0.0:
             raise ValueError("leg %d: duration must be > 0, got %r" % (i, dur))
         if speed_ms < 0.0:
@@ -434,8 +630,11 @@ def make_segments(legs, start_n, start_e, radius_m=150.0, length_m=300.0,
         if elastic_base is not None and elastic_base not in ELASTIC_BASES:
             raise ValueError("leg %d: unknown elastic_base %r; use one of %s"
                              % (i, elastic_base, ", ".join(ELASTIC_BASES)))
+        if pace is not None and mode != STOPSTART_MODE:
+            raise ValueError("leg %d: %s is for %r legs only, not %r"
+                             % (i, PACE_FIELD, STOPSTART_MODE, mode))
         sub = _sub_state_fn(mode, heading_deg, radius_m, length_m, width_m,
-                            speed_ms, elastic_base)
+                            speed_ms, elastic_base, pace)
         s0n, s0e, _, _ = sub(0.0)
         off_n, off_e = pos_n - s0n, pos_e - s0e
         segments.append((t, t + dur, sub, off_n, off_e))
@@ -489,7 +688,7 @@ def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
           rand_min_s=5.0, rand_max_s=20.0, rand_horizon_s=3600.0,
           elastic_base="straight", elastic_slow_factor=ELASTIC_SLOW_FACTOR,
           elastic_slow_ms=None, elastic_hold_s=ELASTIC_HOLD_S,
-          elastic_ramp_s=ELASTIC_RAMP_S):
+          elastic_ramp_s=ELASTIC_RAMP_S, stopstart_pace=None):
     """Bind a mode's parameters into a ``kangaroo(t) -> (n, e, vn, ve)`` callable.
 
     The bound parameters are immutable constants (not module state), so the
@@ -526,6 +725,13 @@ def build(mode, heading_deg=0.0, fwd_m=300.0, disp_m=0.0, radius_m=150.0,
         return lambda t: elastic_state(
             t, elastic_base, heading_deg, fwd_m, disp_m, radius_m, length_m,
             width_m, slow, speed_ms, elastic_hold_s, elastic_ramp_s)
+    if mode == STOPSTART_MODE:
+        # `speed_ms` is the nominated speed; `stopstart_pace` the profile over
+        # its defaults (TASK-064). The base is `elastic_base`, as for elastic.
+        profile = stopstart_profile(stopstart_pace)
+        return lambda t: stopstart_state(
+            t, elastic_base, heading_deg, fwd_m, disp_m, radius_m, length_m,
+            width_m, speed_ms, profile)
     raise ValueError(
         "unknown kangaroo mode %r; use one of %s" % (mode, ", ".join(ALL_MODES))
     )
@@ -577,8 +783,17 @@ COMPOSITE_MARGIN_M = 10.0
 #: start range, circle radius, rectangle length and width (metres) and the
 #: `kangaroo_rand` leg bounds (seconds). A 2 km zone therefore reproduces the
 #: `TASK-045` geometry exactly and only a small box shrinks it.
-COMPOSITE_CAPS = {"start_range_m": 300.0, "radius_m": 150.0, "length_m": 300.0,
-                  "width_m": 150.0, "rand_min_s": 5.0, "rand_max_s": 20.0}
+#: The default kangaroo geometry, metres (author, 2026-10-07): sized so the
+#: circle and rectangle stay inside the flight-test fence less the 70 m ring
+#: from the grid start (`ADR-012`), with 17.5 m (rectangle) and 19.2 m
+#: (circle) to spare at every swept speed. The containment rule turns on the
+#: leg's heading and cannot hold a closed mode wider than the fence, so the
+#: geometry has to fit by construction. Was 150 / 300 / 150 for `CAMP-001`
+#: to `CAMP-003` (2 km zone).
+DEFAULT_GEOMETRY = {"radius_m": 60.0, "length_m": 140.0, "width_m": 70.0}
+
+COMPOSITE_CAPS = dict({"start_range_m": 300.0, "rand_min_s": 5.0, "rand_max_s": 20.0},
+                      **DEFAULT_GEOMETRY)
 
 #: A rand-block straight leg may cover at most this fraction of `h`, so one
 #: leg from the centre cannot reach the wall on its own.

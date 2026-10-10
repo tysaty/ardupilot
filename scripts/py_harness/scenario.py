@@ -290,7 +290,12 @@ class ScenarioSession:
         # An elastic leg over a non-straight base (TASK-045 D2) keeps its base
         # through a heading or speed change, exactly as it keeps its mode.
         elastic_base = kang.leg_elastic_base(current)
-        if elastic_base is not None:
+        # A stop-start leg keeps its profile the same way (TASK-064); a turn
+        # restarts the profile at the new leg's start, as it does for elastic.
+        pace = kang.leg_pace(current)
+        if pace is not None:
+            leg = leg + (elastic_base, pace)
+        elif elastic_base is not None:
             leg = leg + (elastic_base,)
 
         tn, te = self.target_position()
@@ -307,6 +312,8 @@ class ScenarioSession:
         }
         if elastic_base is not None:
             entry[kang.ELASTIC_BASE_FIELD] = elastic_base
+        if pace is not None:
+            entry[kang.PACE_FIELD] = dict(pace)
         self.change_log.append(entry)
         self.markers.append(t_now)
         return leg

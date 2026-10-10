@@ -255,13 +255,162 @@ function M.elastic_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m,
 end
 
 -- ---------------------------------------------------------
+-- Stop-start pace -- TASK-064
+-- ---------------------------------------------------------
+--  Ported from py_harness/kangaroo.py (stopstart_*). Starts at the nominated
+--  speed: hold fast, ramp down to slow_factor x speed, hold slow, ramp up,
+--  repeat. Separate from elastic, which is unchanged.
+
+M.STOPSTART_SLOW_FACTOR = 0.1
+M.STOPSTART_HOLD_FAST_S = 10.0
+M.STOPSTART_RAMP_DOWN_S = 3.0
+M.STOPSTART_HOLD_SLOW_S = 10.0
+M.STOPSTART_RAMP_UP_S = 3.0
+
+--- Profile keys and their defaults (kangaroo.PACE_DEFAULTS).
+M.PACE_DEFAULTS = {
+    slow_factor = M.STOPSTART_SLOW_FACTOR,
+    hold_fast_s = M.STOPSTART_HOLD_FAST_S,
+    ramp_down_s = M.STOPSTART_RAMP_DOWN_S,
+    hold_slow_s = M.STOPSTART_HOLD_SLOW_S,
+    ramp_up_s = M.STOPSTART_RAMP_UP_S,
+}
+
+--- The full profile: `pace` (possibly partial, or nil) over the defaults,
+--  validated. Returns the profile, or nil plus a reason.
+function M.stopstart_profile(pace)
+    local out = {}
+    for k, v in pairs(M.PACE_DEFAULTS) do
+        out[k] = v
+    end
+    if pace ~= nil then
+        for k, v in pairs(pace) do
+            if M.PACE_DEFAULTS[k] == nil then
+                return nil, "unknown stopstart pace key " .. tostring(k)
+            end
+            if type(v) ~= "number" then
+                return nil, "stopstart pace " .. tostring(k) .. " must be a number"
+            end
+            out[k] = v
+        end
+    end
+    if out.slow_factor < 0.0 or out.slow_factor > 1.0 then
+        return nil, "stopstart slow_factor must be in [0, 1]"
+    end
+    if out.hold_fast_s < 0.0 or out.hold_slow_s < 0.0 then
+        return nil, "stopstart holds must be >= 0"
+    end
+    if out.ramp_down_s <= 0.0 or out.ramp_up_s <= 0.0 then
+        return nil, "stopstart ramps must be > 0"
+    end
+    return out
+end
+
+--- One full cycle, seconds, of a validated profile.
+function M.stopstart_period_s(p)
+    return p.hold_fast_s + p.ramp_down_s + p.hold_slow_s + p.ramp_up_s
+end
+
+--- Speed at t of a kangaroo nominated at fast_ms, for a validated profile.
+function M.stopstart_speed(t, fast_ms, p)
+    local slow_ms = fast_ms * p.slow_factor
+    local span = fast_ms - slow_ms
+    local u = math.max(0.0, t) % M.stopstart_period_s(p)
+    if u < p.hold_fast_s then
+        return fast_ms
+    end
+    u = u - p.hold_fast_s
+    if u < p.ramp_down_s then
+        return fast_ms - span * geom.smoothstep(u / p.ramp_down_s)
+    end
+    u = u - p.ramp_down_s
+    if u < p.hold_slow_s then
+        return slow_ms
+    end
+    u = u - p.hold_slow_s
+    return slow_ms + span * geom.smoothstep(u / p.ramp_up_s)
+end
+
+--- Distance by t under stopstart_speed, metres (closed form).
+function M.stopstart_distance(t, fast_ms, p)
+    if t <= 0.0 then
+        return 0.0
+    end
+    local slow_ms = fast_ms * p.slow_factor
+    local span = fast_ms - slow_ms
+    local hf, rd, hs, ru = p.hold_fast_s, p.ramp_down_s, p.hold_slow_s, p.ramp_up_s
+    local period = hf + rd + hs + ru
+    local per_cycle = fast_ms * hf + (fast_ms - 0.5 * span) * rd + slow_ms * hs
+        + (slow_ms + 0.5 * span) * ru
+    local whole = math.floor(t / period)
+    local u = t - whole * period
+    local dist = whole * per_cycle
+
+    local take = math.min(u, hf)                            -- hold fast
+    dist = dist + fast_ms * take
+    u = u - take
+    if u <= 0.0 then return dist end
+
+    take = math.min(u, rd)                                  -- ramp down
+    dist = dist + fast_ms * take - span * rd * geom.smoothstep_integral(take / rd)
+    u = u - take
+    if u <= 0.0 then return dist end
+
+    take = math.min(u, hs)                                  -- hold slow
+    dist = dist + slow_ms * take
+    u = u - take
+    if u <= 0.0 then return dist end
+
+    take = math.min(u, ru)                                  -- ramp up
+    dist = dist + slow_ms * take + span * ru * geom.smoothstep_integral(take / ru)
+    return dist
+end
+
+--- `base_mode` travelled at a stop-start pace. Returns n, e, vn, ve, or nil
+--  plus a reason for "point", an unknown base or an invalid profile.
+function M.stopstart_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m,
+                           length_m, width_m, fast_ms, pace)
+    if base_mode == "point" then
+        return nil, "stopstart needs a moving base mode; 'point' is stationary"
+    end
+    if base_mode ~= "straight" and base_mode ~= "circle"
+            and base_mode ~= "rectangle" then
+        return nil, "unknown stopstart base mode"
+    end
+    if fast_ms < 0.0 then
+        return nil, "stopstart speed must be >= 0"
+    end
+    local p, why = M.stopstart_profile(pace)
+    if p == nil then
+        return nil, why
+    end
+    local dist = M.stopstart_distance(t, fast_ms, p)
+    local speed = M.stopstart_speed(t, fast_ms, p)
+    local n, e, vn, ve
+    if base_mode == "straight" then
+        n, e, vn, ve = M.straight_state(dist, heading_deg, fwd_m, disp_m, 1.0)
+    elseif base_mode == "circle" then
+        n, e, vn, ve = M.circle_state(dist, heading_deg, fwd_m, disp_m,
+                                      radius_m, 1.0)
+    else
+        n, e, vn, ve = M.rectangle_state(dist, heading_deg, fwd_m, disp_m,
+                                         length_m, width_m, 1.0)
+    end
+    if n == nil then
+        return nil, e
+    end
+    return n, e, vn * speed, ve * speed
+end
+
+-- ---------------------------------------------------------
 -- Dispatch
 -- ---------------------------------------------------------
 
 --- Evaluate any mode by name. Returns n, e, vn, ve, or nil plus a reason.
 --  `opts` is a table carrying whatever the chosen mode needs: heading_deg,
---  fwd_m, disp_m, speed_ms, radius_m, length_m, width_m, and for elastic
---  base_mode, slow_ms, fast_ms, hold_s, ramp_s.
+--  fwd_m, disp_m, speed_ms, radius_m, length_m, width_m, for elastic
+--  base_mode, slow_ms, fast_ms, hold_s, ramp_s, and for stopstart base_mode
+--  and pace (TASK-064).
 function M.state(mode, t, opts)
     local heading_deg = opts.heading_deg or 0.0
     local fwd_m = opts.fwd_m or 0.0
@@ -286,6 +435,11 @@ function M.state(mode, t, opts)
                                opts.fast_ms or speed_ms,
                                opts.hold_s or M.ELASTIC_HOLD_S,
                                opts.ramp_s or M.ELASTIC_RAMP_S)
+    elseif mode == "stopstart" then
+        return M.stopstart_state(t, opts.base_mode or "straight", heading_deg,
+                                 fwd_m, disp_m, opts.radius_m or 150.0,
+                                 opts.length_m or 300.0, opts.width_m or 150.0,
+                                 speed_ms, opts.pace)
     end
     return nil, "unknown kangaroo mode"
 end

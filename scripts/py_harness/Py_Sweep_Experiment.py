@@ -173,7 +173,7 @@ INITIAL_CONDITIONS = {
 }
 
 #: Circle and rectangle geometry, metres — the experiment spec defaults.
-KANGAROO_GEOMETRY = {"radius_m": 150.0, "length_m": 300.0, "width_m": 150.0}
+KANGAROO_GEOMETRY = dict(kang.DEFAULT_GEOMETRY)      # ADR-012: fits the fence
 
 #: The harness default inclusion zone. The 350 m flight-area repeat (S2) is
 #: not implemented (`D10`).
