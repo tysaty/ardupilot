@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "plan_id": "PV-SV2-2026-10-11",
+  "note": "Physical-validation run plan (docs/Physical_validation.md, TASK-066, TASK-068 D9). Offsets only, in metres from the site reference; no coordinates. Built into one spec.json per arm by pv_plan.py, which refuses a plan whose kangaroo leaves the fence less the orbit radius; flown in SITL with `python3 -m kangaroo_follow.demo --stage --plan --arm <id>`.",
+  "fence_file": "sitl-runs/SV2_fence_line2.txt",
+  "site_reference": "fence_vertex_centroid",
+  "aircraft": {
+    "airspeed_ms": 25.0,
+    "turn_radius_m": 45.0,
+    "orbit_radius_m": 70.0,
+    "look_ahead_m": 30.0,
+    "dt_s": 0.1,
+    "bank_limit_deg": 60.0
+  },
+  "kangaroo": {
+    "speed_ms": 12.5,
+    "laps": 1,
+    "radius_m": 60.0,
+    "length_m": 140.0,
+    "width_m": 70.0,
+    "geometries": ["straight", "circle", "rectangle"],
+    "paces": ["constant", "elastic", "stopstart"],
+    "rest_s": 0.0
+  },
+  "point": {
+    "n_m": 30.0,
+    "e_m": 0.0,
+    "duration_s": 45.0,
+    "note": "Flown first and held once for 45 s (one 70 m orbit at 25 m/s takes 17.6 s), at the fence's deepest point (68 m spare), away from the shared start; the kangaroo then walks to the shared start at the plan speed (an unscored transit). One lap of each run and no rests (author, 2026-10-10): every run starts and ends at the shared start, so the runs chain directly; 459 s (7.7 min) per arm, one battery per arm."
+  },
+  "cycle": {
+    "start_n_m": 90.0,
+    "start_e_m": 10.0,
+    "closed_heading_deg": 180.0,
+    "straight_heading_deg": 200.0,
+    "straight_m": 194.4
+  },
+  "fit_margin_m": 0.0,
+  "arms": {
+    "0H": {
+      "label": "baseline",
+      "algorithm": "dubins_target_orbit_hyst",
+      "hval_arm": 0,
+      "estimate": false,
+      "lookahead_steps": 0,
+      "overrides": {"cs_sense_margin_m": 10.0}
+    },
+    "FH": {
+      "label": "adaptive carrot",
+      "algorithm": "carrot_shift_cs_hyst",
+      "hval_arm": 2,
+      "estimate": true,
+      "lookahead_steps": 0,
+      "overrides": {"cs_sense_margin_m": 10.0, "af_step_ticks": 1}
+    },
+    "AH": {
+      "label": "adaptive baseline",
+      "algorithm": "adaptive_db_circle_hyst",
+      "hval_arm": 1,
+      "estimate": true,
+      "lookahead_steps": 25,
+      "replan_every": 1,
+      "hold_policy": "plan",
+      "overrides": {"cs_sense_margin_m": 10.0}
+    }
+  },
+  "order": ["0H", "FH", "AH"],
+  "hval_out": 1,
+  "flight_card": {
+    "ROLL_LIMIT_DEG": 60,
+    "SCR_HEAP_SIZE_min_bytes": 1048576,
+    "ADSB_TYPE": 0,
+    "note": "Active only (HVAL_OUT 1), one arm across every run before the next arm. SCR_HEAP_SIZE: set the maximum of its range, 1048576 (1 MiB). Measured 2026-10-10 in SITL with both scripts (hardware_val.lua on HVAL_TGT 3 and kangaroo_source.lua) flying arm AH through the whole plan: peak 928 kB of a 1 MB heap, about 120 kB of headroom at the maximum. 0H and FH not yet measured in the two-script layout. Confirm on the board (SCR_DEBUG_OPTS 2) before flight; hardware_val.lua alone needed more than 692 kB on 2026-10-07, and Follow-03 flew in 350 kB."
+  }
+}

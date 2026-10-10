@@ -12,12 +12,12 @@ SCR_ENABLE        1
 SCR_HEAP_SIZE     2097152
 SCR_VM_I_COUNT    1000000
 
-# --- Aircraft: the harness's V and the flight code's bank limit -----------
+# --- Aircraft: the harness's V and its bank limit (ADR-011; spec.json) -----
 AIRSPEED_CRUISE   25
 AIRSPEED_MIN      10
 AIRSPEED_MAX      30
 ARSPD_USE         1
-ROLL_LIMIT_DEG    45
+ROLL_LIMIT_DEG    60
 
 # --- Navigation: the SITL plane model's L1 tuning, unchanged --------------
 WP_LOITER_RAD     80

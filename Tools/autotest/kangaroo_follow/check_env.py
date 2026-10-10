@@ -25,6 +25,7 @@ import subprocess
 import sys
 
 from . import paths
+from . import fence as fence_mod
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
@@ -188,6 +189,17 @@ def run_checks(env=None, dry_run=False, allow_commit=False,
                         ("parameter sources", os.path.join(paths.PARAMS_DIR, "SOURCES.md"))):
         rows.append(_row(OK if os.path.isfile(path) else FAIL, label,
                          live=paths.rel(path)))
+    fence_path = fence_mod.environment_fence_path(env)
+    if fence_path is not None:
+        try:
+            vertices = fence_mod.load(fence_path)
+            rows.append(_row(OK, "flight-test fence (ADR-012)",
+                             live="%s, %d vertices" % (paths.rel(fence_path),
+                                                       len(vertices))))
+        except fence_mod.FenceError as exc:
+            rows.append(_row(FAIL, "flight-test fence (ADR-012)", live=str(exc),
+                             hint="environment.json flight_area.fence_file must name "
+                                  "a convex QGC WPL 110 inclusion polygon"))
     for name in env["lua"]["modules"]:
         path = os.path.join(paths.MODULES_DIR, name)
         rows.append(_row(OK if os.path.isfile(path) else FAIL,

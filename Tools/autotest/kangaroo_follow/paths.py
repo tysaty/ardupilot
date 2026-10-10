@@ -47,12 +47,19 @@ CAMPAIGN_ENV = "KANGAROO_FOLLOW_CAMPAIGN"
 #: this task's; the modules are TASK-006's ported libraries, staged unchanged.
 RUNNER_SCRIPT = "sitl_harness_runner.lua"
 ARMS_MODULE = "sitl_arms.lua"
-CELL_MODULE = "sitl_cell.lua"
+#: The shared vehicle configuration (`ADR-011`): written into the scripting
+#: directory (scripts/spec.json), read through SPEC_MODULE by the runner, the
+#: demonstration and the hardware validation script. Replaces the per-cell
+#: sitl_cell.lua and the demonstration's kangaroo_demo_cfg.lua.
+SPEC_FILE = "spec.json"
+SPEC_MODULE = "sitl_spec.lua"
 HARNESS_MODULES = (
     "harness_geom.lua", "harness_dubins.lua", "harness_orbit.lua",
     "harness_cs_orbit.lua", "harness_kangaroo.lua", "harness_segments.lua",
     "harness_estimator.lua", "harness_adaptive_db.lua",
     "harness_adaptive_horizon.lua", "harness_rh_geometric.lua",
+    "harness_carrot_shift.lua",     # arm F (TASK-060)
+    "harness_zone.lua",             # fence containment (ADR-012)
 )
 #: Scripts that would fight the runner for the vehicle and are moved aside
 #: for the duration of a cell (`stage_scripts.py`).

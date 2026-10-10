@@ -59,16 +59,13 @@
       "harness_estimator.lua",
       "harness_adaptive_db.lua",
       "harness_adaptive_horizon.lua",
-      "harness_rh_geometric.lua"
+      "harness_rh_geometric.lua",
+      "harness_carrot_shift.lua",
+      "harness_zone.lua"
     ]
   },
   "flight_area": {
-    "box_e_m": 600.0,
-    "box_n_m": 800.0,
-    "centre_offset_ne_m": [
-      337.0,
-      183.0
-    ],
+    "fence_file": "sitl-runs/springvalley2-test-fence.txt",
     "anchor_offset_ne_m": [
       -250.0,
       0.0
@@ -76,6 +73,6 @@
     "alt_m": 60.0,
     "window_s": 60.0,
     "fence_action": 0,
-    "note": "The rough flight boundary from the thesis figure: approximately 600 m across (East-West) by 800 m along (North-South), axis-aligned, centred `centre_offset_ne_m` North/East of home (the centroid of the 2026-07-18 log's GUIDED segment). Grid cells open the window with the aircraft `anchor_offset_ne_m` from the box centre (250 m South, so the kangaroo, 300 m North of the aircraft, starts 50 m North of centre with 280 m to the box edge); composite cells anchor at the centre (their fit is about the origin). Take-off and the window are flown at `alt_m` above home (the 2026-07-18 flight held 60 to 70 m in GUIDED); every cell's window is `window_s`. `fence_action` 0 is report only: a breach is logged, never acted on (TASK-046 D7 recommendation), and the Python zone is the same box in the anchor frame so breaches are measured identically on both sides."
+    "note": "ADR-012 (2026-10-07): the kangaroo is contained in the flight-test fence `fence_file`, a QGC WPL 110 convex inclusion polygon, in the SITL campaign, the demonstration and the hardware validation script. The planner converts it to North/East metres from the site's home with ArduPilot's own get_distance_NE formula, re-runs each Python counterpart contained against it in the aircraft's anchor frame, and the test uploads the file's vertices as the report-only fence (`fence_action` 0: a breach is logged, never acted on, TASK-046 D7). Grid cells open the window with the aircraft `anchor_offset_ne_m` from the fence's area centroid (250 m South; the kangaroo, 300 m North of the aircraft, starts 50 m North of it); composite cells anchor at the centroid and are fitted to the largest square there that the fence holds. Take-off and the window are flown at `alt_m` above home for `window_s`. Until 2026-10-07 the area was an axis-aligned 600 x 800 m box centred 337 m N, 183 m E of home (box_e_m, box_n_m, centre_offset_ne_m), still accepted when `fence_file` is absent."
   }
 }

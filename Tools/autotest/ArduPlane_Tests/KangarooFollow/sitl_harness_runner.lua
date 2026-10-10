@@ -16,19 +16,27 @@
 --  and the estimator is the ported harness_estimator with the spec's noise.
 --
 --  What is deliberately NOT here: any guidance geometry, any parameter that
---  is a flight limit, any decision the task files reserve. The bank limit,
---  airspeed and L1 tuning are in sitl/params/kangaroo-follow.parm (SR-004).
+--  is a flight limit, any decision the task files reserve. Airspeed and L1
+--  tuning are in kangaroo-follow.parm (SR-004); the bank limit is the
+--  spec's roll_limit_deg, which the driver sets as ROLL_LIMIT_DEG and this
+--  script only checks (ADR-011).
 --
 --  Inputs
 --  ------
---    modules/sitl_cell.lua   generated per cell by sitl/schedule.py from the
---                            Python spec.json. Fields: cell_id, algorithm,
---                            cfg (the flattened HarnessConfig), legs,
---                            geometry {radius_m, length_m, width_m},
---                            target_n_m, target_e_m, duration_s, dt_s,
---                            estimate, lookahead_steps, estimator
+--    scripts/spec.json       the shared configuration (ADR-011), generated
+--                            per cell by kangaroo_follow/schedule.py
+--                            (spec_cfg) from the Python cell's spec.json and
+--                            read through modules/sitl_spec.lua as `cfg`,
+--                            one flat table: the flattened HarnessConfig the
+--                            arm reads, and at the same level cell_id,
+--                            algorithm, legs, geometry {radius_m, length_m,
+--                            width_m}, target_n_m, target_e_m, duration_s,
+--                            dt_s, estimate, lookahead_steps, estimator
 --                            {process_noise, measurement_noise},
---                            heading_source ("course" | "yaw").
+--                            heading_source ("course" | "yaw"),
+--                            roll_limit_deg. The demonstration and the
+--                            hardware validation script read the same file.
+--                            Until 2026-10-04: modules/sitl_cfg.lua.
 --    SHR_START (param)       the AutoTest driver sets 1 when the aircraft is
 --                            at the D6 pose in GUIDED; the window starts on
 --                            the next tick and the local frame is anchored
@@ -127,9 +135,13 @@ local function fail_load(why)
     return nil
 end
 
-local ok_cell, cell = pcall(require, "sitl_cell")
-if not ok_cell then
-    return fail_load("require('sitl_cell'): " .. tostring(cell))
+local ok_spec, spec_mod = pcall(require, "sitl_spec")
+if not ok_spec then
+    return fail_load("require('sitl_spec'): " .. tostring(spec_mod))
+end
+local cfg, cfg_where = spec_mod.load()
+if cfg == nil then
+    return fail_load("spec.json: " .. tostring(cfg_where))
 end
 local ok_seg, segs = pcall(require, "harness_segments")
 if not ok_seg then
@@ -140,21 +152,21 @@ if not ok_arms then
     return fail_load("require('sitl_arms'): " .. tostring(arms))
 end
 
-local entry, entry_source = arms.resolve(cell.algorithm)
+local entry, entry_source = arms.resolve(cfg.algorithm)
 if entry == nil then
-    return fail_load("algorithm '" .. tostring(cell.algorithm) .. "': " ..
+    return fail_load("algorithm '" .. tostring(cfg.algorithm) .. "': " ..
                      tostring(entry_source))
 end
 
 local segments, seg_reason = segs.make_segments(
-    cell.legs, cell.target_n_m, cell.target_e_m, cell.geometry, 0.0)
+    cfg.legs, cfg.target_n_m, cfg.target_e_m, cfg.geometry, 0.0)
 if segments == nil then
     return fail_load("make_segments: " .. tostring(seg_reason))
 end
 
 local estimator = nil
 local est_mod = nil
-if cell.estimate then
+if cfg.estimate then
     local ok_est, mod = pcall(require, "harness_estimator")
     if not ok_est then
         return fail_load("require('harness_estimator'): " .. tostring(mod))
@@ -162,16 +174,22 @@ if cell.estimate then
     est_mod = mod
 end
 
-local cfg = cell.cfg
-local dt_s = cell.dt_s or 0.1
+local dt_s = cfg.dt_s or 0.1
 local period_ms = math.floor(dt_s * 1000 + 0.5)
-local duration_s = cell.duration_s
-local lookahead_steps = cell.lookahead_steps or 0
-local heading_source = cell.heading_source or "course"
+local duration_s = cfg.duration_s
+local lookahead_steps = cfg.lookahead_steps or 0
+local heading_source = cfg.heading_source or "course"
 
 gcs:send_text(MAV_SEVERITY.WARNING, string.format(
-    "SHR: loaded cell %s arm %s via %s", tostring(cell.cell_id),
-    tostring(cell.algorithm), tostring(entry_source)))
+    "SHR: loaded cell %s arm %s via %s", tostring(cfg.cell_id),
+    tostring(cfg.algorithm), tostring(entry_source)))
+-- ADR-011: the driver sets ROLL_LIMIT_DEG to cfg.roll_limit_deg; a mismatch
+-- means the cell is not flying the configuration it was generated for.
+do
+    local ok_roll, _live, roll_msg = spec_mod.roll_limit_check(cfg)
+    gcs:send_text(ok_roll and MAV_SEVERITY.INFO or MAV_SEVERITY.WARNING,
+                  "SHR: " .. roll_msg)
+end
 
 -- ---------------------------------------------------------------------
 -- Run state
@@ -230,10 +248,10 @@ local function anchor(now_ms, pos, vel)
     t0_ms = now_ms
     tick = 0
     algorithm_state = {}
-    if cell.estimate then
-        estimator = est_mod.new(cell.estimator.process_noise,
-                                cell.estimator.measurement_noise)
-        estimator:init(cell.target_n_m, cell.target_e_m)
+    if cfg.estimate then
+        estimator = est_mod.new(cfg.estimator.process_noise,
+                                cfg.estimator.measurement_noise)
+        estimator:init(cfg.target_n_m, cfg.target_e_m)
     end
     sent_alt_m = nil
     local hdg, yaw = heading_from(vel)

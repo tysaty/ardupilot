@@ -35,7 +35,6 @@ import os
 from . import paths
 
 from py_harness import experiment, scenario
-from py_harness import zone as zone_mod
 from py_harness.config import HarnessConfig
 
 RECORD_MESSAGES = ("HANC", "HREC", "HEST", "HALG", "HAIR")
@@ -207,9 +206,11 @@ class RecordedSession:
         # Operator markers exist only in an interactive Python session
         # (experiment.marker_times falls back to the schedule's changes).
         self.markers = []
-        zone_spec = spec.get("zone") or {}
-        self.zone = (None if zone_spec.get("side_m") is None
-                     else zone_mod.InclusionZone(side_m=zone_spec["side_m"]))
+        # The Python zone as the session built it: rectangle (height and
+        # centre included, which until 2026-10-07 were dropped, so a site-box
+        # cell was measured against a square about the anchor) or the
+        # flight-test polygon (`ADR-012`).
+        self.zone = experiment.zone_from_spec(spec.get("zone")) or None
 
     def export_legs(self):
         return list(self.legs)

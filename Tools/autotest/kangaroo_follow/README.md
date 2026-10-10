@@ -109,28 +109,43 @@ groundspeed and ring radius by bearing relative to the wind, and the velocity
 error along and across the wind. `wind-compare.csv` lays each direction
 against the calm SITL cell and the Python cell.
 
-## 3b. The site (`environment.json` `flight_area`, 2026-09-17)
+## 3b. The site and the fence (`environment.json` `flight_area`; `ADR-012`, 2026-10-07)
 
-Cells fly at **Spring Valley Farm** (`SpringValley2` in `locations.txt`, the
-home of the 2026-07-18 flight log) inside the thesis's rough boundary: a
-**600 m (East-West) x 800 m (North-South)** box centred 337 m N, 183 m E of
-home (the log's GUIDED centroid), uploaded per cell as a **report-only**
-polygon fence (`FENCE_TYPE 4`, `FENCE_ACTION 0`). The window is flown at
-**60 m** above home (`TKOFF_ALT`, `SHR_ALT_M`) for **60 s**.
+Cells fly at **Spring Valley Farm** (`SpringValley2` in `locations.txt`). The
+kangaroo is contained in the **flight-test fence**
+`sitl-runs/springvalley2-test-fence.txt` (`flight_area.fence_file`), a convex
+QGC WPL 110 inclusion polygon about 281 to 329 m East-West by 570 m
+North-South. The fence is the one boundary for all three paths:
 
-Like-for-like is kept by re-running every selected Python cell **inside the
-same box** as the SITL cell's counterpart (`campaign.box_counterpart`, into
-`<campaign>/sitl/python/`): its zone is the box placed where the fence is
-relative to the aircraft at the window's start, its duration the window,
-and its `legs_flown` (with the box's containment turns) are what the vehicle
-replays. Grid cells open the window with the aircraft 250 m South of the box
-centre on the spec's heading (the kangaroo, 300 m North of the aircraft,
-starts 50 m North of centre); composite cells are re-fitted to the box's
-600 m side and anchor at the centre. The test flies a 1 km run-in through
-the anchor point so position and heading are both established.
-`--no-box` plans the original 2 km cells instead; `--window-s`, `--alt-m`
-and `--location` override the pins. `plan.json` names the site and carries
-no coordinates.
+- **This campaign.** Each selected Python cell is re-run (`campaign.box_counterpart`,
+  into `<campaign>/sitl/python/`) with the fence as its zone, converted to
+  North/East metres from home with ArduPilot's `get_distance_NE` formula and
+  placed in the aircraft's anchor frame:
+  - grid cells: the aircraft starts 250 m South of the fence's area centroid,
+    with the kangaroo 300 m North of it;
+  - composite cells: anchored at the centroid and fitted to the largest square
+    there (284 m).
+
+  The vehicle replays its `legs_flown`, containment turns included, and the
+  test uploads the file's own vertices as a **report-only** fence
+  (`FENCE_TYPE 4`, `FENCE_ACTION 0`). A cell whose kangaroo would leave the
+  fence is refused ("the kangaroo leaves the fence"), as a composite that does
+  not fit is. The window is flown at **60 m** above home for **60 s**.
+- **The demo** (`demo.py --stage`; `--fence <file>` or `--no-fence`) and
+  **`hardware_val.lua`** read the same vertices from `spec.json` `fence` and
+  contain the kangaroo with `harness_zone.lua`, the gated port of the Python
+  rule.
+
+`check_env` reports the fence. `--no-box` plans the original 2 km cells
+instead; `--window-s`, `--alt-m` and `--location` override the pins.
+`plan.json` names the site and the fence file, and carries no coordinates.
+Without `fence_file`, the 600 x 800 m box of 2026-09-17 (`box_e_m`,
+`box_n_m`, `centre_offset_ne_m`) is still accepted.
+
+The default kangaroo geometry (circle radius 60 m, rectangle 140 x 70 m,
+`kangaroo.DEFAULT_GEOMETRY`) fits the fence less the ring from the grid start.
+The cells planned before 2026-10-07 carry 150 m and 300 x 150 m, and their
+circles leave the fence. Values actually run: `docs/CAMPAIGN_RUN_VALUES.md`.
 
 ## 4. What a cell does (`KangarooFollowCell`)
 
@@ -156,6 +171,16 @@ no coordinates.
 The scripts directory is restored after every cell (`stage_scripts.py`),
 including on failure. If a run was killed hard, `python3 -m kangaroo_follow.stage_scripts --restore`.
 
+Restore deletes only what staging created. A support module (`sitl_arms.lua`,
+`sitl_spec.lua`, the demo's `sitl_adsb.lua`) already in `scripts/modules/` and
+identical to its source here is left in place (`kept` in `.sitl-staged.json`);
+one that differs is set aside as `<name>.sitl-off` and put back. So
+`scripts/modules/sitl_arms.lua`, which `hardware_val.lua` requires, survives a
+campaign or demo run. A state file written before 2026-10-07 (no `kept` key)
+is restored the same way: a module it lists that is identical to its source is
+not deleted. Top-level scripts in `scripts/` (including `hardware_val.lua`) are
+still renamed to `.sitl-off` for the run: save them first.
+
 ## 4b. The live demonstration (`TASK-058`)
 
 Not a cell and not evidence: the baseline flown against a kangaroo whose mode
@@ -168,7 +193,9 @@ from where it is whenever a `KDEM_*` parameter changes.
 ```bash
 # by hand, changing the mode from MAVProxy
 cd src/ardupilot/Tools/autotest               # kangaroo_follow is a package here: -m fails elsewhere
+python3 -m kangaroo_follow.demo --restore     # only if scripts/.sitl-staged.json exists (stage refuses otherwise)
 python3 -m kangaroo_follow.demo --stage       # prints the sim_vehicle.py command and the KDEM_ cheat sheet
+                                              #   stages the test fence into spec.json (ADR-012); --no-fence for the KDEM_BOUND_M circle
                                               #   add --look-ahead-m 5 for the short-carrot baseline
 cd ../..                                      # sim_vehicle.py runs from src/ardupilot
 Tools/autotest/sim_vehicle.py -v ArduPlane -L SpringValley2 --console --map -N \
@@ -182,7 +209,18 @@ python3 -m kangaroo_follow.demo --restore     # put control_cont.lua and kangaro
 ./Tools/autotest/autotest.py --map test.Plane.KangarooFollowDemo
 # options: KANGAROO_DEMO_LOOK_AHEAD_M=25 (carrot, m), KANGAROO_DEMO_ROLL_LIMIT_DEG=60
 # (the harness's bank; default the parameter file's 45), KANGAROO_DEMO_SPEEDUP=10
+
+# the physical-validation run plan (pv_plan.json, docs/Physical_validation.md), one arm at a time
+python3 -m kangaroo_follow.pv_plan                        # run table and fence check, every arm
+python3 -m kangaroo_follow.demo --stage --plan --arm 0H   # suite mode (KDEM_MODE 5); then FH, AH
 ```
+
+With `--plan`, the kangaroo is placed from the site reference (the mean of the
+plan fence's vertices), not ahead of the aircraft, and flies the arm's fixed
+schedule: the point run, the transit, then the nine shared-start runs. The
+console announces each run and ends with `KDEM: suite complete; least spare
+... m`. The plan is not turned at the fence; a pass of the orbit-radius limit is
+warned instead.
 
 The autotest is also the demonstration's certification: every mode at five
 speeds plus elastic pace, judged against five criteria fixed in `arduplane.py`
@@ -190,10 +228,12 @@ speeds plus elastic pace, judged against five criteria fixed in `arduplane.py`
 at or below 12.5 m/s; no script fault). It clears `src/ardupilot/logs/` when it
 starts, so copy a flight log out before the next run.
 
-`KDEM_LOOK` sets the carrot look-ahead in flight (50 m, the thesis default;
+`KDEM_LOOK` sets the carrot look-ahead in flight (30 m in the physical-validation plan, set by `--plan`; 50 m, the thesis default;
 5 m, the short-carrot baseline). `KDEM_MODE` 0 point, 1 straight, 2 circle,
 3 rectangle, 4 rand; `KDEM_PACE`
-0 constant, 1 elastic; `KDEM_SPD` m/s; `KDEM_HDG` degrees (-1 = the aircraft's
+0 constant, 1 elastic, 2 stopstart (`TASK-064`: slows to `KDEM_PSLOW` x
+`KDEM_SPD`, holds `KDEM_PHOLD` s, speeds up, holds `KDEM_PFAST` s, ramps
+`KDEM_PRAMP` s); `KDEM_SPD` m/s; `KDEM_HDG` degrees (-1 = the aircraft's
 heading at start); `KDEM_RESET` 1 re-places the kangaroo ahead; `KDEM_BOUND_M`
 turns a straight kangaroo back towards the start.
 

@@ -42,14 +42,18 @@ or a manifest row with its error, never an absent row (`VR-012`).
 import argparse
 import datetime
 import json
+import math
 import os
 import subprocess
 import sys
 import time
 
 from . import paths, schedule, stage_scripts, check_env, extract_bundle, wind_frame
+from . import fence as fence_mod
 
 from py_harness import experiment, plotter
+from py_harness import kangaroo as kang
+from py_harness import zone as zone_mod
 from py_harness import Py_Sweep_Experiment as sweep
 
 SUB_MAIN = "main"
@@ -203,15 +207,85 @@ def _spec_duration(directory, entry):
         return json.load(handle)["run"]["duration_s"]
 
 
-def box_from_env(env):
-    """The flight-area box the environment pins, as the planner's dict."""
+#: A fence farther than this from the planned site's home is the wrong site.
+FENCE_MAX_RANGE_M = 5000.0
+
+
+def box_from_env(env, location=None):
+    """The flight area the environment pins, as the planner's dict.
+
+    With ``flight_area.fence_file`` (`ADR-012`, the default since 2026-10-07)
+    it is the fence polygon: ``polygon_ne_m`` its vertices North/East of the
+    site's home (as the vehicle converts them), ``centre_offset_ne_m`` its
+    area centroid, which the grid placement is measured from, and ``e_m`` /
+    ``n_m`` its bounding box (informational). The fence file itself, not
+    these numbers, is what ``arduplane.py`` uploads. Without one it is the
+    axis-aligned box of 2026-09-17 (``box_e_m``, ``box_n_m``).
+
+    Raises:
+        fence.FenceError: The fence is unusable or far from the site's home.
+    """
     fa = env.get("flight_area")
     if not fa:
         return None
-    return {"e_m": float(fa["box_e_m"]), "n_m": float(fa["box_n_m"]),
-            "centre_offset_ne_m": [float(v) for v in fa["centre_offset_ne_m"]],
-            "anchor_offset_ne_m": [float(v) for v in fa["anchor_offset_ne_m"]],
-            "fence_action": int(fa.get("fence_action", 0))}
+    anchor = [float(v) for v in fa["anchor_offset_ne_m"]]
+    action = int(fa.get("fence_action", 0))
+    path = fence_mod.environment_fence_path(env)
+    if path is None:
+        return {"e_m": float(fa["box_e_m"]), "n_m": float(fa["box_n_m"]),
+                "centre_offset_ne_m": [float(v) for v in fa["centre_offset_ne_m"]],
+                "anchor_offset_ne_m": anchor, "fence_action": action}
+    home = home_from_locations(location or env["location"]["name"])
+    polygon = fence_mod.polygon_ne_m(path, home["lat_deg"], home["lng_deg"])
+    far = max(math.hypot(n, e) for n, e in polygon)
+    if far > FENCE_MAX_RANGE_M:
+        raise fence_mod.FenceError(
+            "fence %s reaches %.0f m from the %s home: not this site's fence"
+            % (paths.rel(path), far, home["name"]))
+    zone = zone_mod.PolygonZone(polygon)
+    ns = [v[0] for v in polygon]
+    es = [v[1] for v in polygon]
+    return {"kind": "polygon", "fence_file": paths.rel(path),
+            "polygon_ne_m": polygon,
+            "centre_offset_ne_m": list(zone.centroid()),
+            "e_m": max(es) - min(es), "n_m": max(ns) - min(ns),
+            "anchor_offset_ne_m": anchor, "fence_action": action}
+
+
+def _is_polygon(box):
+    return bool(box) and box.get("kind") == "polygon"
+
+
+def _composite_side_m(box, orbit_radius_m, margin_m):
+    """The square side a composite is fitted to inside ``box``.
+
+    A rectangle: its shorter side, as before. A polygon: the largest square
+    about the centroid (where a composite anchors) whose contained region
+    (``side/2 - R - margin``, ``kangaroo.contained_half_m``) lies inside every
+    wall moved ``R + margin`` in. The fitted schedule is then checked against
+    the polygon itself by ``experiment.validate_spec``.
+    """
+    if not _is_polygon(box):
+        return min(box["e_m"], box["n_m"])
+    zone = zone_mod.PolygonZone(box["polygon_ne_m"])
+    cn, ce = box["centre_offset_ne_m"]
+    inset = float(orbit_radius_m) + float(margin_m)
+    return 2.0 * (zone.square_half_m(cn, ce, inset) + inset)
+
+
+def _zone_in_anchor_frame(box, anchor_n, anchor_e):
+    """The Python counterpart's ``zone`` block: the site area placed where it
+    lies relative to the aircraft when the window opens, the aircraft being
+    ``(anchor_n, anchor_e)`` from the area's centre."""
+    common = {"contain_target": True, "containment_margin_m": None}
+    if _is_polygon(box):
+        on = box["centre_offset_ne_m"][0] + anchor_n
+        oe = box["centre_offset_ne_m"][1] + anchor_e
+        return dict(common, polygon_ne_m=[[n - on, e - oe]
+                                          for n, e in box["polygon_ne_m"]])
+    return dict(common, side_m=box["e_m"], height_m=box["n_m"],
+                centre_n_m=0.0 - anchor_n if anchor_n else 0.0,
+                centre_e_m=0.0 - anchor_e if anchor_e else 0.0)
 
 
 def box_counterpart(python_dir, entry, box, window_s, out_dir):
@@ -234,26 +308,35 @@ def box_counterpart(python_dir, entry, box, window_s, out_dir):
     cid = entry["python_cell_id"] if "python_cell_id" in entry else spec["experiment_id"]
     anchor_n, anchor_e = box["anchor_offset_ne_m"]
     if spec["kangaroo"].get("composite"):
+        side = _composite_side_m(box, spec["aircraft"]["orbit_radius_m"],
+                                 spec["kangaroo"].get("composite_margin_m",
+                                                      kang.COMPOSITE_MARGIN_M))
         try:
             spec, _fit = sweep.build_composite_spec(
                 entry["arm"], entry["ratio_name"], entry["speed_ratio"],
-                min(box["e_m"], box["n_m"]), arm_set=entry.get("arm_set") or sweep.DEFAULT_ARM_SET)
+                side, arm_set=entry.get("arm_set") or sweep.DEFAULT_ARM_SET)
         except ValueError as exc:
-            return None, None, "composite does not fit the %.0f m box: %s" % (
-                min(box["e_m"], box["n_m"]), exc)
+            return None, None, "composite does not fit the %s: %s" % (
+                "fence" if _is_polygon(box) else "%.0f m box" % side, exc)
         anchor_n, anchor_e = 0.0, 0.0
     spec = json.loads(json.dumps(spec))
     spec["experiment_id"] = cid
-    spec["zone"] = {"side_m": box["e_m"], "height_m": box["n_m"],
-                    "centre_n_m": 0.0 - anchor_n if anchor_n else 0.0,
-                    "centre_e_m": 0.0 - anchor_e if anchor_e else 0.0,
-                    "contain_target": True, "containment_margin_m": None}
+    spec["zone"] = _zone_in_anchor_frame(box, anchor_n, anchor_e)
     spec["run"]["duration_s"] = min(float(spec["run"]["duration_s"]), float(window_s))
+    if _is_polygon(box):
+        where = "fence %s, centroid (%.0f N, %.0f E) of the aircraft" % (
+            box["fence_file"], -anchor_n, -anchor_e)
+    else:
+        where = "%.0f x %.0f m box centred (%.0f N, %.0f E) of the aircraft" % (
+            box["e_m"], box["n_m"], -anchor_n, -anchor_e)
     spec["objective"] = (spec.get("objective") or "") + (
-        " | TASK-052 site counterpart: %.0f x %.0f m box centred (%.0f N, %.0f E) "
-        "of the aircraft, %.0f s window" % (box["e_m"], box["n_m"], -anchor_n,
-                                           -anchor_e, spec["run"]["duration_s"]))
-    spec = experiment.validate_spec(spec)
+        " | TASK-052 site counterpart: %s, %.0f s window" % (
+            where, spec["run"]["duration_s"]))
+    try:
+        spec = experiment.validate_spec(spec)
+    except experiment.SpecError as exc:
+        return None, None, "does not fit the %s: %s" % (
+            "fence" if _is_polygon(box) else "box", exc)
     session = experiment.run_spec(spec)
     py_dir = os.path.join(out_dir, "python")
     os.makedirs(os.path.join(py_dir, "spec"), exist_ok=True)
@@ -266,6 +349,17 @@ def box_counterpart(python_dir, entry, box, window_s, out_dir):
                             n_a_max_steps=entry.get("n_a_max_steps"))
     with open(os.path.join(py_dir, cid, "record.json")) as handle:
         record = json.load(handle)
+    # ADR-012: the containment rule turns on the leg's heading, so a closed
+    # mode wider than the fence (a 150 m circle in a 280 m fence) can carry
+    # the kangaroo out of it. Such a cell is not a contained cell: refused,
+    # not flown, as a composite that does not fit is (TASK-050 D2).
+    zone_report = (record.get("metrics") or {}).get("zone") or {}
+    if zone_report.get("target_breaches"):
+        return None, None, (
+            "the kangaroo leaves the %s (%d excursions, %.1f m deep): its %s "
+            "geometry does not fit inside the containment margin"
+            % ("fence" if _is_polygon(box) else "box", zone_report["target_breaches"],
+               zone_report.get("target_max_depth_m") or 0.0, entry.get("mode_base")))
     return spec, record, None
 
 
@@ -299,7 +393,7 @@ def plan(python_dir, sub=SUB_MAIN, only=None, reference=False,
     out_dir = sitl_dir(python_dir, sub)
     fa = env.get("flight_area") or {}
     if box is None:
-        box = box_from_env(env)
+        box = box_from_env(env, location)
     elif box is False:
         box = None
     if alt_m is None:
@@ -426,7 +520,8 @@ def _provenance(manifest, entry, staging, env_rows, allow_commit, result=None):
         "alt_m": manifest["alt_m"],
         "heading_source": manifest["heading_source"],
         "command_channel": _command_channel(manifest),
-        "roll_limit_deg": manifest.get("roll_limit_deg"),
+        "roll_limit_deg": ((staging or {}).get("cell_table") or {}).get(
+            "roll_limit_deg", manifest.get("roll_limit_deg")),
         "ardupilot_commit": live_commit,
         "ardupilot_commit_pinned": manifest["ardupilot_commit_pinned"],
         "ardupilot_allow_commit": bool(allow_commit),
@@ -465,12 +560,25 @@ def _command_channel(manifest):
     return manifest.get("command_channel", "location")
 
 
-def _cell_params(manifest, entry):
+def roll_limit_deg(manifest, spec):
+    """The bank limit a cell flies at (`ADR-011`): the manifest's
+    ``--roll-limit-deg`` override if planned with one, else the cell
+    configuration's ``bank_limit_deg`` (60, `ADR-002`, the demonstration's
+    value). Written into the vehicle spec.json and set as ROLL_LIMIT_DEG, so
+    the parameter and the file always agree."""
+    if manifest.get("roll_limit_deg") is not None:
+        return float(manifest["roll_limit_deg"])
+    return float(experiment.config_from_spec(spec).bank_limit_deg)
+
+
+def _cell_params(manifest, entry, roll_deg=None):
     params = {"SHR_ALT_M": manifest["alt_m"], "SHR_REPORT": 5,
               "SHR_CHAN": COMMAND_CHANNELS[_command_channel(manifest)],
               "TKOFF_ALT": manifest["alt_m"]}
-    if manifest.get("roll_limit_deg") is not None:
-        params["ROLL_LIMIT_DEG"] = float(manifest["roll_limit_deg"])
+    if roll_deg is None:
+        roll_deg = manifest.get("roll_limit_deg")
+    if roll_deg is not None:
+        params["ROLL_LIMIT_DEG"] = float(roll_deg)
     wind = entry.get("wind")
     if wind is not None:
         params.update({"SIM_WIND_SPD": wind["spd_ms"], "SIM_WIND_DIR": wind["dir_from_deg"],
@@ -527,7 +635,7 @@ def run_cell(cid, entry, manifest, out_dir, dry_run=False, allow_commit=False,
         # experiments/ must not carry a machine's home directory.
         "binary": paths.rel(paths.SITL_BINARY),
         "param_file": paths.rel(paths.PARAM_FILE),
-        "params": _cell_params(manifest, entry),
+        "params": _cell_params(manifest, entry, roll_limit_deg(manifest, spec)),
         "alt_m": manifest["alt_m"],
         "plane_heading_deg": float(spec["initial_conditions"].get("plane_heading_deg", 0.0)),
         "airspeed_ms": float(spec["aircraft"]["airspeed_ms"]),
@@ -545,20 +653,17 @@ def run_cell(cid, entry, manifest, out_dir, dry_run=False, allow_commit=False,
     staging = None
     result = None
     try:
-        staging = stage_scripts.stage(spec, cid, heading_source=manifest["heading_source"])
+        # The vehicle spec.json carries the legs actually flown and the bank
+        # limit the cell flies at (ADR-011).
+        staging = stage_scripts.stage(spec, cid, heading_source=manifest["heading_source"],
+                                      legs=legs,
+                                      roll_limit_deg=roll_limit_deg(manifest, spec))
         # The schedule the vehicle carries must be the Python cell's, tick for
         # tick, against the recorded history, before anything flies.
         if sandbox is not None:
             _name, history, _meta = plotter.load_run(os.path.join(
                 paths.REPO_ROOT, entry["python_dir"], entry["python_bundle"], "history.json"))
             schedule.check_against_lua(spec, sandbox, legs=legs, history=history)
-        # Regenerate the staged cell module with the legs actually flown.
-        schedule.write_cell_module(
-            spec, cid, os.path.join(paths.MODULES_DIR, paths.CELL_MODULE),
-            manifest["heading_source"], legs=legs)
-        staging["hashes"]["modules/%s" % paths.CELL_MODULE] = stage_scripts.sha256(
-            os.path.join(paths.MODULES_DIR, paths.CELL_MODULE))
-        staging["cell_table"]["legs_source"] = "legs_flown"
         if dry_run:
             entry.update({"status": STATUS_DRY_RUN_OK, "error": None,
                           "wall_clock_s": time.time() - t_wall,
