@@ -16,11 +16,11 @@
  "ah_w_radial": 0.05,
  "ah_w_switch": 2.0,
  "ah_w_tangent": 1.0,
- "airspeed_ms": 25.0,
+ "airspeed_ms": 22.0,
  "algorithm": "dubins_target_orbit_hyst",
  "alt_m": 60.0,
  "bank_limit_deg": 60.0,
- "bank_limited_turn_radius_m": 36.79583937873956,
+ "bank_limited_turn_radius_m": 28.494698014895913,
  "bound_m": 1000.0,
  "cell_id": "pv-0H",
  "cs_coarse_m": 10.0,
@@ -29,7 +29,7 @@
  "delta_d_m": 0.5,
  "delta_psi_rad": 0.08726646259971647,
  "dt_s": 0.1,
- "duration_s": 459.2134415230265,
+ "duration_s": 517.8152817101932,
  "estimate": false,
  "estimator": {
   "measurement_noise": 5.0,
@@ -74,97 +74,97 @@
    "speed_ms": 0.0
   },
   {
-   "duration_s": 4.866210024238576,
+   "duration_s": 5.529784118452927,
    "heading_deg": 9.462322208025617,
    "mode": "straight",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 15.552,
+   "duration_s": 17.672727272727272,
    "heading_deg": 200.0,
    "mode": "straight",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 15.552,
+   "duration_s": 17.672727272727272,
    "heading_deg": 20.0,
    "mode": "straight",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 23.840579096254988,
+   "duration_s": 30.909090909090903,
    "elastic_base": "straight",
    "heading_deg": 200.0,
    "mode": "elastic",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 23.840579096254988,
+   "duration_s": 30.909090909090903,
    "elastic_base": "straight",
    "heading_deg": 20.0,
    "mode": "elastic",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 27.252000000000002,
+   "duration_s": 29.372727272727275,
    "elastic_base": "straight",
    "heading_deg": 200.0,
    "mode": "stopstart",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 27.252000000000002,
+   "duration_s": 29.372727272727275,
    "elastic_base": "straight",
    "heading_deg": 20.0,
    "mode": "stopstart",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 30.15928947446201,
+   "duration_s": 34.27191985734319,
    "heading_deg": 180.0,
    "mode": "circle",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 45.739494357353955,
+   "duration_s": 57.68711242250848,
    "elastic_base": "circle",
    "heading_deg": 180.0,
    "mode": "elastic",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 53.55928947446201,
+   "duration_s": 57.67191985734319,
    "elastic_base": "circle",
    "heading_deg": 180.0,
    "mode": "stopstart",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 33.6,
+   "duration_s": 38.18181818181818,
    "heading_deg": 180.0,
    "mode": "rectangle",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 55.99999999999999,
+   "duration_s": 61.98181818181818,
    "elastic_base": "rectangle",
    "heading_deg": 180.0,
    "mode": "elastic",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   },
   {
-   "duration_s": 57.0,
+   "duration_s": 61.58181818181818,
    "elastic_base": "rectangle",
    "heading_deg": 180.0,
    "mode": "stopstart",
-   "speed_ms": 12.5
+   "speed_ms": 11.0
   }
  ],
  "legs_source": "spec",
  "look_ahead_m": 30.0,
  "lookahead_steps": 0,
  "mode_code": 5,
- "orbit_bank_deg": 42.31663658618714,
+ "orbit_bank_deg": 35.18616831974484,
  "orbit_precompensate": true,
  "orbit_radius_m": 70.0,
  "pace_code": 0,
@@ -183,7 +183,7 @@
  "roll_limit_deg": 60.0,
  "source_cell": "pv-0H",
  "spec_schema": 1,
- "speed_ms": 12.5,
+ "speed_ms": 11.0,
  "start_range_m": 30.0,
  "suite_runs": [
   {
@@ -193,58 +193,58 @@
   },
   {
    "name": "transit",
-   "t_end_s": 49.866210024238576,
+   "t_end_s": 50.52978411845292,
    "t_start_s": 45.0
   },
   {
    "name": "straight-constant",
-   "t_end_s": 80.97021002423858,
-   "t_start_s": 49.866210024238576
+   "t_end_s": 85.87523866390747,
+   "t_start_s": 50.52978411845292
   },
   {
    "name": "straight-elastic",
-   "t_end_s": 128.65136821674855,
-   "t_start_s": 80.97021002423858
+   "t_end_s": 147.69342048208927,
+   "t_start_s": 85.87523866390747
   },
   {
    "name": "straight-stopstart",
-   "t_end_s": 183.15536821674857,
-   "t_start_s": 128.65136821674855
+   "t_end_s": 206.43887502754382,
+   "t_start_s": 147.69342048208927
   },
   {
    "name": "circle-constant",
-   "t_end_s": 213.31465769121058,
-   "t_start_s": 183.15536821674857
+   "t_end_s": 240.710794884887,
+   "t_start_s": 206.43887502754382
   },
   {
    "name": "circle-elastic",
-   "t_end_s": 259.05415204856456,
-   "t_start_s": 213.31465769121058
+   "t_end_s": 298.3979073073955,
+   "t_start_s": 240.710794884887
   },
   {
    "name": "circle-stopstart",
-   "t_end_s": 312.61344152302655,
-   "t_start_s": 259.05415204856456
+   "t_end_s": 356.0698271647387,
+   "t_start_s": 298.3979073073955
   },
   {
    "name": "rectangle-constant",
-   "t_end_s": 346.2134415230266,
-   "t_start_s": 312.61344152302655
+   "t_end_s": 394.25164534655687,
+   "t_start_s": 356.0698271647387
   },
   {
    "name": "rectangle-elastic",
-   "t_end_s": 402.2134415230266,
-   "t_start_s": 346.2134415230266
+   "t_end_s": 456.23346352837507,
+   "t_start_s": 394.25164534655687
   },
   {
    "name": "rectangle-stopstart",
-   "t_end_s": 459.2134415230266,
-   "t_start_s": 402.2134415230266
+   "t_end_s": 517.8152817101933,
+   "t_start_s": 456.23346352837507
   }
  ],
  "target_e_m": 0.0,
  "target_n_m": 30.0,
- "turn_radius_bank_deg": 54.77489533735427,
+ "turn_radius_bank_deg": 47.64221353066848,
  "turn_radius_m": 45.0,
  "vd_step_ticks": 1,
  "weave_a_cap_m": 40.0,

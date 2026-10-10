@@ -113,6 +113,9 @@ def flight_parm(plan):
         "SCR_VM_I_COUNT    1000000    # as SITL; measure on the bench",
         "ROLL_LIMIT_DEG    %d    # must equal spec.json roll_limit_deg (the script checks)"
         % int(card.get("ROLL_LIMIT_DEG", 60)),
+        "AIRSPEED_CRUISE   %g    # pv_plan.json aircraft.airspeed_ms, the speed the plan assumes;"
+        % float(plan["aircraft"]["airspeed_ms"]),
+        "#                    keep it within the airframe's AIRSPEED_MIN / AIRSPEED_MAX",
         "GUIDED_P          15000    # the heading-command gain the SITL runs used",
         "RC7_OPTION        303    # activation switch (HVAL_ACT_FN 303); any free channel",
         "ADSB_TYPE         %d    # the aircraft must ignore its own kangaroo"
