@@ -59,7 +59,7 @@ local function cs_orbit_entry(hyst)
                                       cfg.orbit_radius_m, cfg.turn_radius_m,
                                       cfg.look_ahead_m, cfg.delta_psi_rad,
                                       cfg.delta_d_m, cfg.orbit_precompensate,
-                                      previous, margin)
+                                      previous, margin, cs.sampling(cfg))
         if g == nil then
             return nil, reason
         end
