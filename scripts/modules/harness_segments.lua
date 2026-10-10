@@ -1,9 +1,9 @@
 -- =========================================================
 --  harness_segments -- scripted leg chaining, and the kangaroo_rand replay
 --  created 2026-09-03
---  TASK-006 Tranche 7 (forward port).
+--  Lua port of the harness's leg chaining, gated against the Python.
 --
---  Chains legs into continuous segments (TASK-029) and evaluates the chain at a
+--  Chains legs into continuous segments and evaluates the chain at a
 --  time t, so the scripted and interactive kangaroo schedules -- and
 --  kangaroo_rand's -- are all one mechanism.
 --
@@ -12,18 +12,16 @@
 --  kangaroo_rand has a problem that is NOT a porting problem. It draws from
 --  Python's random.Random(seed) -- a Mersenne Twister. Lua's math.random is a
 --  different generator (in 5.3, the C library's rand or an xoshiro in 5.4), so
---  THE SAME SEED CANNOT PRODUCE THE SAME TRAJECTORY, and PR-004's "identical
---  seed gives identical output" cannot hold across the two languages by
---  transliteration alone. A-SW-003 is already recorded as Challenged; this is
---  the concrete instance.
+--  THE SAME SEED CANNOT PRODUCE THE SAME TRAJECTORY, and "identical seed gives
+--  identical output" cannot hold across the two languages by
+--  transliteration alone.
 --
---  TASK-006 gives three options and requires one to be chosen and its limitation
---  recorded before the tranche opens.
+--  There were three options; one had to be chosen and its limitation recorded.
 --
 --    (a) Port a small deterministic PRNG so both sides share a generator.
 --        REJECTED for now: kangaroo.py would have to stop using random.Random,
 --        which is a change to a harness algorithm during a port -- exactly what
---        TASK-006's no-behaviour-change rule forbids, and it would silently
+--        the port's no-behaviour-change rule forbids, and it would silently
 --        invalidate every previously recorded seeded run.
 --    (b) Drive the Lua from a RECORDED sequence emitted by the Python, making it
 --        a REPLAY rather than a re-generation.  <-- CHOSEN.
@@ -51,11 +49,11 @@ local M = {}
 --- Build continuous segments from a leg list.
 --
 --  `legs` is a 1-indexed array of {duration_s, mode, heading_deg, speed_ms}
---  or, for an elastic leg over a non-straight base (TASK-045 D2),
+--  or, for an elastic leg over a non-straight base,
 --  {duration_s, "elastic", heading_deg, speed_ms, elastic_base}; the named
 --  form uses the keys duration_s, mode, heading_deg, speed_ms, elastic_base.
---  A four-element leg keeps the pre-TASK-045 straight base. (Found by
---  TASK-050, 2026-09-15: the composite schedule's elastic-circle and
+--  A four-element leg keeps the original straight base. (Found 2026-09-15:
+--  the composite schedule's elastic-circle and
 --  elastic-rectangle legs diverged from the Python until the base was
 --  carried here; the differential test now gates it.)
 --  Each segment records its own start time, end time, mode parameters and the

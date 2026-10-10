@@ -2,8 +2,8 @@
 --  harness_geom -geometric primitives  
 --  created 2026-09-03
 --
---  Angle wrapping, frame conversion and the small helpers every later tranche
---  depends on. Ported from the python harness
+--  Angle wrapping, frame conversion and the small helpers every other ported
+--  module depends on. Ported from the python harness
 --  state.wrap_pi,
 --  geometry/dubins.py's helpers,
 --   (north, east) <-> (x = East, y = North) convention
@@ -13,8 +13,8 @@
 --    * math_helpers.wrap_pi uses a while-loop and is HALF-OPEN AT -pi
 --      (an input of exactly +pi returns +pi). The harness wraps to [-pi, +pi)
 --      with (a + pi) % (2*pi) - pi, so exactly +pi returns -pi. Both are
---      defensible; they are not the same function, and IR-003 requires the
---      interval to be documented. wrap_pi below is the HARNESS convention.
+--      defensible; they are not the same function, and the interval must be
+--      documented. wrap_pi below is the HARNESS convention.
 --    * math_helpers has no (north, east) <-> (x, y) conversion at all, which is
 --      where every prototype defect in this area came from.
 --
@@ -34,13 +34,13 @@ M.PI = PI
 -- Angles
 -- ---------------------------------------------------------
 
---- Wrap an angle to [-pi, +pi), the harness interval (IR-003).
+--- Wrap an angle to [-pi, +pi), the harness interval.
 --  Half-open at +pi: an input of exactly -pi or +pi returns -pi.
 --
 --  Lua's `%` on floats matches Python's: the result takes the sign of the
 --  divisor, so `-1.0 % 2.0` is 1.0 in both. `math.fmod` does NOT -- it returns
 --  -1.0 -- so this must not be written with fmod. Measured on the target
---  runtime by the Tranche 0 semantics record.
+--  runtime (Lua 5.3) by the differential tests.
 
 function M.wrap_pi(a)
     return (a + PI) % (2.0 * PI) - PI

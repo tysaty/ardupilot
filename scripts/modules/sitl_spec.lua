@@ -1,7 +1,7 @@
 -- =========================================================
 --  sitl_spec -- read spec.json, the one configuration the campaign runner,
 --  the live demonstration and the hardware validation script share
---  created 2026-10-04 (ADR-011)
+--  created 2026-10-04
 --
 --  spec.json is GENERATED, never typed: kangaroo_follow/schedule.py
 --  (spec_cfg / write_spec) flattens a Python campaign cell's spec.json into
@@ -17,10 +17,10 @@
 --  lua_common_defs.h). M.paths lists the candidates in order; a test may
 --  replace it before the first load.
 --
---  roll_limit_deg (ADR-011) is the bank limit the geometry was generated
+--  roll_limit_deg is the bank limit the geometry was generated
 --  for. M.roll_limit_check compares it with the live ROLL_LIMIT_DEG; SITL
 --  staging sets the parameter to it, the hardware script refuses to engage
---  on a mismatch and never sets the parameter itself (SR-004).
+--  on a mismatch and never sets the parameter itself (it is a flight limit).
 --
 --  The JSON reader below covers what json.dump writes for a spec: objects,
 --  arrays, strings (with the standard escapes), numbers, true, false and
@@ -183,7 +183,7 @@ function M.reset()
 end
 
 --- Whether ROLL_LIMIT_DEG matches the bank limit the spec was generated
---  for (ADR-011). Returns ok, live_deg, message.
+--  for. Returns ok, live_deg, message.
 M.ROLL_TOLERANCE_DEG = 0.5
 function M.roll_limit_check(cfg)
     local want = cfg and cfg.roll_limit_deg
@@ -196,7 +196,7 @@ function M.roll_limit_check(cfg)
     end
     if math.abs(live - want) > M.ROLL_TOLERANCE_DEG then
         return false, live, string.format(
-            "ROLL_LIMIT_DEG %.1f, spec %.1f (ADR-011)", live, want)
+            "ROLL_LIMIT_DEG %.1f, spec %.1f: set it to the spec's", live, want)
     end
     return true, live, string.format("ROLL_LIMIT_DEG %.1f matches spec", live)
 end

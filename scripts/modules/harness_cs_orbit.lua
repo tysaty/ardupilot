@@ -41,8 +41,8 @@
 --  as is an aircraft at the ring centre, as is a start inside the ring.
 --  Each returns nil plus a reason -- the Lua equivalent of the harness raising,
 --  per the interface contract's transliteration note. A refusal that did not
---  transfer would be a safety divergence, not a numeric one, so the Tranche 5
---  gate requires each to trigger identically.
+--  transfer would be a safety divergence, not a numeric one, so the differential
+--  tests require each to trigger identically.
 
 -- Frame of reference
 --  Frame x = East, y = North, psi from North clockwise. 
@@ -71,7 +71,7 @@ function M.reach_path(px, py, psi_i, tx, ty, R, rho, s1, s2, delta_psi, delta_d)
     -- for a heading in the harness's range, [-pi, pi). A heading outside it
     -- (the SITL scripts passed [0, 2 pi) until 2026-09-24) gave the
     -- right-turn candidate a negative sweep, a phantom turn-in cost and a
-    -- path starting away from the aircraft (TASK-058 finding 3). Only an
+    -- path starting away from the aircraft. Only an
     -- out-of-range heading is wrapped, so every in-range heading is
     -- unchanged bit for bit. Mirrors dubins_target_circle._reach_path.
     if psi_i >= PI or psi_i < -PI then
@@ -154,7 +154,7 @@ end
 
 --- The least turn-in cost CS path onto the ring.
 --  Returns the same table shape as reach_path, or nil plus a reason.
---  preferred_direction / sense_margin_m (optional; TASK-047): hold the
+--  preferred_direction / sense_margin_m (optional; orbit-sense hysteresis): hold the
 --  previous tick's orbit sense unless the other is cheaper by more than the
 --  margin. Both nil reproduces the pre-2026-09-14 argmin exactly.
 function M.shortest_path(px, py, psi_i, tx, ty, orbit_radius_m, turn_radius_m,
@@ -241,8 +241,8 @@ function M.choose_sense(costs, preferred_direction, sense_margin_m)
     return costs.argmin
 end
 
---- One guidance point a look-ahead along the shortest CS path (TASK-024 only,
---  no orbit continuation). Returns a table, or nil plus a reason.
+--- One guidance point a look-ahead along the shortest CS path (the approach
+--  only, no orbit continuation). Returns a table, or nil plus a reason.
 
 function M.approach_guidance(px, py, psi_i, tx, ty, orbit_radius_m,
                              turn_radius_m, look_ahead_m, delta_psi, delta_d,
@@ -273,7 +273,7 @@ end
 --  `phase` is "approach" (outside) or "orbit" (on/inside) -- a DISCRETE
 --  geometric switch on d against R, never a blended ramp weight. It is
 --  continuous without a ramp because the approach arrives tangent to the ring,
---  which is the property TASK-025 exists to exploit and the one a port could
+--  which is the property the orbit continuation relies on and the one a port could
 --  most easily lose.
 --
 --  Returns a table {gx, gy, phase, direction, curvature, ring_angle_rad?} or

@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_zone -- the kangaroo's containment in the flight-test fence
---  created 2026-10-07 (ADR-012)
+--  created 2026-10-07
 --
 --  Port of py_harness/zone.py PolygonZone and its containment rule
 --  (InclusionZone.containment_heading_deg, as ScenarioSession._contain_target
@@ -16,8 +16,8 @@
 --  rest of the schedule is replaced by one leg on the new heading
 --  (turned_leg). Convex fences only: polygon() refuses a concave one.
 --
---  Gated against the Python by tests/unit/test_lua_differential.py
---  (Tranche 10). Frame: (north, east) metres. Stateless.
+--  Gated against the Python by tests/unit/test_fence_containment.py.
+--  Frame: (north, east) metres. Stateless.
 -- =========================================================
 
 local M = {}

@@ -8,8 +8,8 @@
 --
 --     Arm       Name                            Lua                                      Needs
 --     Baseline  dubins_target_orbit (or _hyst)  sitl_arms adapter over harness_cs_orbit  target or estimate
---     A         adaptive_db_circle              harness_adaptive_db.guidance_point       target_est, lookahead_steps 25
---     F         carrot_shift_cs                 harness_carrot_shift.guidance_point      target_est_raw, lookahead_steps 0
+--     A         adaptive_db_circle              harness_adaptive_db.guidance_point       target_est, lookahead_steps <find>
+--     F         carrot_shift_cs                 harness_carrot_shift.guidance_point      target_est_raw, lookahead_steps 1
 --
 -- Before use:
 --   * Write it from shared code, not copies: heading_from, command, release,
@@ -20,7 +20,7 @@
 --
 -- SD card requirements (APM/ on the card; HARDWARE_VAL_BOOT_REVIEW.md)
 -- APM/scripts/hardware_val.lua
--- APM/scripts/spec.json            generated, never typed (ADR-011)
+-- APM/scripts/spec.json            generated, never typed (one file for every script)
 -- APM/scripts/modules/: sitl_spec.lua, sitl_arms.lua and the HARNESS_MODULES
 -- files (harness_geom, harness_dubins, harness_orbit, harness_cs_orbit,
 -- harness_kangaroo, harness_segments, harness_estimator, harness_adaptive_db,
@@ -32,6 +32,11 @@
 -- Arm A implementation was 252k to 846k instructions per tick range.
 -- On a flight controller SCR_HEAP_SIZE is limited to 1 MiB by its range and
 -- by the board's RAM; measure heap and instructions on the bench (rung 2).
+-- With kangaroo_source.lua on the same board (HVAL_TGT 3) the two scripts
+-- share the heap: arm AH through the whole plan in SITL (2026-10-10) peaked
+-- at 928 kB, so set SCR_HEAP_SIZE to its 1 MiB maximum. Update time in that
+-- run (PC SITL): median 12.5 ms, 95th percentile 27 ms, worst 84 ms for this
+-- script, against the 100 ms tick; a board is slower, so time it on the bench.
 --
 -- Validation ladder (the same file all the way):
 --   1. SITL: a KangarooFollowHardwareVal autotest modelled on KangarooFollowDemo,
@@ -49,14 +54,13 @@
 -- ============================================================
 -- 1. Configuration
 -- ============================================================
--- PLAN: do not retype constants. demo.py --stage --campaign <CAMP-002>
--- --cell A-straight-constant-half --look-ahead-m 30 already writes
--- spec.json from a campaign cell's spec (cfg, dt_s, estimate,
--- lookahead_steps, estimator noise) (ADR-011).
+-- PLAN: do not retype constants. demo.py --stage (from a campaign cell, or
+-- --plan --arm <id> for the physical-validation plan) writes spec.json
+-- (cfg, dt_s, estimate, lookahead_steps, estimator noise).
 
 -- PLAN: live settings as a parameter table, like SHR_ / KDEM_: HVAL_ENABLE
 -- (default 0), HVAL_ARM (0 baseline, 1 A, 2 F), HVAL_OUT (0 shadow, 1 active),
--- HVAL_TGT (0 virtual point, 1 virtual moving, 2 live), HVAL_ALT_M,
+-- HVAL_TGT (0 virtual point, 1 virtual moving, 2 live, 3 bus), HVAL_ALT_M,
 -- HVAL_BOUND_M, HVAL_ACT_FN.
 
 -- Algorithm IDs/names, test altitude and altitude reference.
@@ -68,7 +72,7 @@
 local MAV_SEVERITY = { ERROR = 3, WARNING = 4, INFO = 6 }
 
 -- Modules, declared here so every function below sees them as upvalues;
--- assigned in section 12 through load() (fix 6, 2026-10-04).
+-- assigned in section 12 through load().
 local arms, est_mod, segs
 local zone_mod              -- harness_zone, only when spec.json carries a fence
 
@@ -85,7 +89,8 @@ local state = {
     run_id = 0,
 }
 
--- SHARED CONFIGURATION: spec.json, read as `cfg` (ADR-011)
+-- SHARED CONFIGURATION: spec.json, read as `cfg` (the same file the SITL
+-- runner, the demo and kangaroo_source.lua read)
 -- ============================================================
 -- The same file, in the same format, the SITL campaign runner and the live
 -- demonstration read: generated from a campaign cell's spec by
@@ -111,7 +116,7 @@ local state = {
 --   cfg.bank_limit_deg          the bank the configuration was built for
 --   cfg.roll_limit_deg          the ROLL_LIMIT_DEG it must be flown at (60)
 --
--- Bank limit (ADR-011): this script never sets ROLL_LIMIT_DEG (SR-004). It
+-- Bank limit: this script never sets ROLL_LIMIT_DEG (it is a flight limit). It
 -- refuses to engage unless the live ROLL_LIMIT_DEG equals
 -- cfg.roll_limit_deg, so the aircraft only ever flies the configuration
 -- that SITL and the demonstration flew. Approving 60 deg on the aircraft is
@@ -129,7 +134,7 @@ if cfg == nil then
     gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: no configuration: " .. tostring(cfg_where))
 end
 
---- ADR-011 gate for section 5: true only when the live ROLL_LIMIT_DEG is the
+--- Bank-limit gate for section 5: true only when the live ROLL_LIMIT_DEG is the
 --  bank limit spec.json was generated for.
 local function roll_limit_ok()
     if cfg == nil then return false, "no spec.json" end
@@ -137,6 +142,7 @@ local function roll_limit_ok()
     return ok, msg
 end
 
+-- ============================================================
 -- PARAM table
 -- ============================================================
 -- Live settings only: everything that shapes the guidance is in cfg above.
@@ -181,8 +187,8 @@ local HVAL_OUT = bind("OUT", 3, 0)
 --[[
     // @Param: HVAL_TGT
     // @DisplayName: Hardware validation target source
-    // @Description: 0 virtual stationary point at the spec's target start and 1 virtual moving target on the spec's legs (harness_segments, as the campaign runner), both in the anchor's north/east frame; 2 live target from AP_Follow (FOLL_SYSID), not implemented yet and refused.
-    // @Values: 0:Virtual point,1:Virtual moving,2:Live
+    // @Description: 0 virtual stationary point at the spec's target start and 1 virtual moving target on the spec's legs (harness_segments, as the campaign runner), both in the anchor's north/east frame; 2 live target from AP_Follow (FOLL_SYSID), not implemented yet and refused; 3 the on-board bus written by kangaroo_source.lua (KBUS_), in the site frame (the fence's vertex centroid), which becomes this script's frame.
+    // @Values: 0:Virtual point,1:Virtual moving,2:Live,3:Bus (kangaroo_source.lua)
 --]]
 local HVAL_TGT = bind("TGT", 4, 0)
 
@@ -215,7 +221,7 @@ local HVAL_BOUND_M = bind("BOUND_M", 7, 400)
 --[[
     // @Param: HVAL_TGT_TMO
     // @DisplayName: Hardware validation target timeout
-    // @Description: A live target sample older than this is stale: the script disengages (or refuses to engage) and latches a fault. Measured from follow:get_last_update_ms(). Unused until HVAL_TGT 2 is implemented.
+    // @Description: A live target sample older than this is stale: the script disengages (or refuses to engage) and latches a fault. HVAL_TGT 3: the age of the KBUS_ sample (now minus KBUS_T_S). HVAL_TGT 2 (not implemented): from follow:get_last_update_ms().
     // @Range: 0.2 10
     // @Units: s
 --]]
@@ -251,7 +257,8 @@ local period_ms = math.floor(dt_s * 1000 + 0.5)
 -- ============================================================
 -- PLAN: reuse heading_from(vel) from the runner / demo (course from
 -- math.atan(ve, vn) in (-pi, pi], yaw when slow); that wrapping fixed
--- TASK-058's phantom right turn. Local frame: origin:get_distance_NE(pos),
+-- the demo's phantom right turn (a [0, 2 pi) heading gave the right-turn
+-- candidate a negative sweep). Local frame: origin:get_distance_NE(pos),
 -- anchored at engagement, as anchor() does.
 -- Read pilot enable and algorithm-selection inputs.
 -- Read actual flight mode, arming/flying state and aircraft pose.
@@ -263,7 +270,7 @@ local period_ms = math.floor(dt_s * 1000 + 0.5)
 local AIRSPEED_MIN = Parameter('AIRSPEED_MIN')
 local ROLL_LIMIT_DEG = Parameter('ROLL_LIMIT_DEG')
 local GRAVITY_MSS = 9.80665
--- The requested turn radius is cfg.turn_radius_m from spec.json (ADR-011),
+-- The requested turn radius is cfg.turn_radius_m from spec.json,
 -- no longer a parameter (was HVAL_RHO_M).
 
 --- Below this ground speed, m/s, the course is undefined and the yaw is
@@ -318,18 +325,19 @@ end
 -- Update estimator only when an accepted measurement arrives.
 -- Predict to the required horizon using measured elapsed time.
 
--- Run state, set by anchor() at engagement (section 10).
+-- Run state, set by anchor() at engagement (section 10)
 local origin = nil          -- Location at the anchor
 local t0_ms = nil
 local segments = nil        -- the virtual kangaroo's schedule
 local target_legs_now = nil -- the named legs `segments` was built from
-local zone = nil            -- the fence in the anchor frame (ADR-012)
+local zone = nil            -- the fence in this script's frame
 local estimator = nil
 
 --- The virtual kangaroo's legs for HVAL_TGT, in the spec's frame (target
 --  start cfg.target_n_m / cfg.target_e_m north/east of the anchor).
 local function target_legs()
     local source = math.floor(HVAL_TGT:get() + 0.5)
+    -- update
     if source == 0 then
         return { { duration_s = cfg.duration_s, mode = "point",
                    heading_deg = 0.0, speed_ms = 0.0 } }
@@ -341,14 +349,13 @@ local function target_legs()
 end
 
 --- Build the schedule once at test start (replaces the demo's
---  settings()/rebuild() at the top level, fix 3).
+--  settings()/rebuild() at the top level).
 local function build_target()
     local legs, why = target_legs()
     if legs == nil then
         return false, why
     end
-    local built, reason = segs.make_segments(legs, cfg.target_n_m, cfg.target_e_m,
-                                             cfg.geometry, 0.0)
+    local built, reason = segs.make_segments(legs, cfg.target_n_m, cfg.target_e_m, cfg.geometry, 0.0)
     if built == nil then
         return false, "could not build virtual target: " .. tostring(reason)
     end
@@ -357,12 +364,15 @@ local function build_target()
     return true
 end
 
---- The fence in the anchor frame (ADR-012), built at engagement from
+--- The fence in the anchor frame, built at engagement from
 --  cfg.fence's vertices through the vehicle's own get_distance_NE. The
 --  kangaroo must start inside it less the containment margin (the orbit
 --  radius): otherwise the ring would start across the fence, so engagement
 --  is refused. Returns true, or false and why. No fence: nothing to do.
-local function build_zone()
+--  start_n, start_e: where the kangaroo starts in this frame (HVAL_TGT 0/1:
+--  the spec's target start from the aircraft; HVAL_TGT 3: the bus sample,
+--  from the site reference).
+local function build_zone(start_n, start_e)
     zone = nil
     if cfg.fence == nil then
         return true
@@ -372,14 +382,31 @@ local function build_zone()
         return false, "fence: " .. tostring(why)
     end
     local margin = cfg.fence.containment_margin_m
-    if not zone_mod.contains(built, cfg.target_n_m, cfg.target_e_m, margin) then
+    if not zone_mod.contains(built, start_n, start_e, margin) then
         return false, string.format(
             "kangaroo start (%.0f N, %.0f E) is not inside the fence less %.0f m",
-            cfg.target_n_m, cfg.target_e_m, margin)
+            start_n, start_e, margin)
     end
     zone = built
     return true
 end
+
+--- The SITE reference for HVAL_TGT 3: the fence's vertex centroid, the same
+--  point kangaroo_source.lua and pv_plan.py use, so the bus's metres are
+--  metres in this script's frame (origin = site).
+local function site_reference(alt_cm)
+    local v = cfg.fence.vertices_latlng
+    local lat, lng = 0.0, 0.0
+    for i = 1, #v do lat = lat + v[i][1]; lng = lng + v[i][2] end
+    local site = Location()
+    site:lat(math.floor(lat / #v * 1e7 + 0.5))
+    site:lng(math.floor(lng / #v * 1e7 + 0.5))
+    site:alt(alt_cm)
+    return site
+end
+
+
+
 
 --- Index of the segment active at t (the last one past the end).
 local function active_index(t)
@@ -422,8 +449,64 @@ local function contain(t, kn, ke)
     return nil
 end
 
---- Each callback: the kangaroo at t, s. Returns kn, ke, kvn, kve or nil, why.
-local function target_at(t)
+----------------------------------------------------------------------------
+-- Inserting the kangaroo from the kangaroo_source.lua lgoirthm
+-----------------------------------------------------------------------------
+   --  hardware_val.lua, HVAL_TGT 3: read the bus. Bound lazily, since
+   --      kangaroo_source.lua may load after hardware_val.lua.
+    
+    local kbus = nil
+    local function kbus_bind()
+        if kbus ~= nil then return true end
+        local t = {}
+        for _, name in ipairs({ "SEQ", "T_S", "N_M", "E_M", "VN", "VE" }) do
+            local p = Parameter()
+            if not p:init("KBUS_" .. name) then return false end
+            t[name] = p
+        end
+        kbus = t
+        return true
+    end
+    
+    local bus_last_t = nil      -- previous sample's time (s), for the estimator's dt
+    local last_seq = nil
+    --- n, e (from SITE), vn, ve, t_s, fresh  |  nil, why
+    local function read_bus(now_s)
+
+        if not kbus_bind() then return nil, "no kangaroo bus (kangaroo_source.lua not loaded)" end
+        local s1 = kbus.SEQ:get()
+        if s1 % 2 ~= 0 then return nil, "kangaroo bus being written" end
+        local t_s, n, e = kbus.T_S:get(), kbus.N_M:get(), kbus.E_M:get()
+        local vn, ve = kbus.VN:get(), kbus.VE:get()
+        if kbus.SEQ:get() ~= s1 then return nil, "kangaroo bus torn read" end
+        if now_s - t_s > HVAL_TGT_TMO:get() then return nil, "kangaroo bus stale" end
+        local fresh = (s1 ~= last_seq)
+        last_seq = s1
+        return n, e, vn, ve, t_s, fresh
+    end
+
+--- Each callback: the kangaroo at t, s.
+--  Returns kn, ke, kvn, kve, fresh, dt  |  nil, why.
+--  fresh: a new sample (the estimator updates only then); dt: the time since
+--  the previous sample, s.
+local function target_at(t, now_ms)
+    if math.floor(HVAL_TGT:get() + 0.5) == 3 then
+        -- the bus (kangaroo_source.lua), already in this frame (origin = site)
+        local now_s = now_ms * 0.001
+        local n, e, vn, ve, t_s, fresh = read_bus(now_s)
+        if n == nil then return nil, e end           -- stale / torn / not loaded: fault
+        local age = now_s - t_s                      -- up to one period
+        local kn, ke = n + vn * age, e + ve * age
+        -- kangaroo_source.lua contains the kangaroo; no turn here, but never
+        -- follow it out of the fence
+        if zone ~= nil and not zone_mod.contains(zone, kn, ke, 0.0) then
+            return nil, string.format("kangaroo left the fence at (%.0f N, %.0f E)", kn, ke)
+        end
+        local dt = (bus_last_t ~= nil and fresh) and (t_s - bus_last_t) or dt_s
+        if fresh then bus_last_t = t_s end
+        return kn, ke, vn, ve, fresh, dt
+    end
+    -- HVAL_TGT 0 / 1: the virtual kangaroo's schedule
     local kn, ke, kvn, kve = segs.state_at(segments, t)
     if kn == nil then
         -- state_at returns its failure reason in the second value.
@@ -434,26 +517,28 @@ local function target_at(t)
         return nil, why
     end
     -- The rule turns on the leg's heading, so a circle or rectangle wider
-    -- than the fence less the ring can still carry the kangaroo out (ADR-012).
+    -- than the fence less the ring can still carry the kangaroo out.
     -- Following it out is never wanted: fault, which stops commanding.
     if zone ~= nil and not zone_mod.contains(zone, kn, ke, 0.0) then
         return nil, string.format("kangaroo left the fence at (%.0f N, %.0f E)", kn, ke)
     end
-    return kn, ke, kvn, kve
+    return kn, ke, kvn, kve, true, dt_s
 end
 
---- Estimator, exactly the runner's sequence: update, then project.
+
+--- Estimator, exactly the runner's sequence: update, then project. On the
+--  bus (HVAL_TGT 3) it updates only on a fresh sample, with the measured
+--  interval, and otherwise returns the last estimate (framework 7.2).
 --  Returns est_proj, est_raw (both nil when cfg.estimate is off).
-local function estimate(kn, ke)
-    if estimator == nil then
-        return nil, nil
-    end
-    local out = estimator:update(kn, ke, dt_s)
-    if out == nil then
-        return nil, nil
-    end
+local last_est_proj, last_est_raw = nil, nil
+local function estimate(kn, ke, fresh, dt)
+    if estimator == nil then return nil, nil end
+    if fresh == false and last_est_raw ~= nil then return last_est_proj, last_est_raw end
+    local out = estimator:update(kn, ke, dt or dt_s)
+    if out == nil then return nil, nil end
     local est_raw = { n_m = out.x, e_m = out.y, vn_ms = out.vx, ve_ms = out.vy }
     local est_proj = est_mod.predict(est_raw, dt_s, cfg.lookahead_steps or 0)
+    last_est_proj, last_est_raw = est_proj, est_raw
     return est_proj, est_raw
 end
 
@@ -595,7 +680,7 @@ local function can_engage(aircraft_valid, flight_ready, target_fresh)
     if entry == nil or math.floor(HVAL_ARM:get() + 0.5) ~= active_arm then
         return false, "algorithm not ready"
     end
-    -- ADR-011 bank-limit gate (fix 12)
+    -- bank-limit gate: ROLL_LIMIT_DEG must be the spec's
     local roll_ok, roll_msg = roll_limit_ok()
     if not roll_ok then
         return false, roll_msg
@@ -767,7 +852,7 @@ end
 -- PLAN: reuse the runner's command() (GUIDED_CHANGE_ALTITUDE once, then
 -- GUIDED_CHANGE_HEADING as COG, acceleration g * tan(ROLL_LIMIT_DEG)) and
 -- release(); shadow = the same tick without command(). Needs GUIDED_P ~15000.
--- PLAN: bank limit (TASK-061): at 45 deg the 70 m ring was not held in SITL
+-- PLAN: bank limit: at 45 deg the 70 m ring was not held in SITL
 -- (36.7 m RMS on the stationary point); at 60 deg about 6 m. Fly a larger R at
 -- 45 deg or get a higher limit approved; ROLL_LIMIT_DEG is a safety parameter.
 -- SHADOW: compute and log outputs, but issue no flight commands.
@@ -949,7 +1034,7 @@ local function handle_fault(reason)
         return
     end
 
-    -- Read when needed, so a change on the ground takes effect (fix 13).
+    -- Read when needed, so a change on the ground takes effect.
     local recovery_mode = math.floor(HVAL_FAIL_MODE:get() + 0.5)
     if recovery_mode <= 0 or recovery_mode == MODE_GUIDED then
         gcs:send_text(MAV_SEVERITY.ERROR, "HVAL: recovery mode not configured")
@@ -991,7 +1076,7 @@ end
 -- PLAN: write the runner's log_tick rows (HANC once; HREC / HEST / HALG / HAIR
 -- each tick) so extract_bundle.py and the metrics read a flight log unchanged
 -- and it lands in the same compare.csv as Python and SITL. Replay logged poses
--- through Python to check the carrot tick for tick (TASK-058: 1 cm). Add one
+-- through Python to check the carrot tick for tick (the demo agreed to 1 cm). Add one
 -- HVAL row: run id, arm, enable, mode, target age, command accepted.
 -- Log timestamp, run ID, algorithm, enable state and flight mode.
 -- Log actual dt, target age, estimate, prediction and guidance point.
@@ -1010,15 +1095,29 @@ local function num(v)
     return v
 end
 
---- Anchor the run at engagement (fix 5): origin, clock, estimator, target
+--- Anchor the run at engagement: origin, clock, estimator, target
 --  schedule, then HANC once, as the runner's anchor().
 local function anchor(now_ms, pos, vel)
-    local ok, why = build_target()
-    if not ok then
-        return false, why
+    local source = math.floor(HVAL_TGT:get() + 0.5)
+    local start_n, start_e = cfg.target_n_m, cfg.target_e_m
+    if source == 3 then
+        if cfg.fence == nil then return false, "HVAL_TGT 3 needs the fence (site frame)" end
+        last_seq, bus_last_t = nil, nil
+        local n, e = read_bus(now_ms * 0.001)
+        if n == nil then return false, "kangaroo bus: " .. tostring(e) end
+        -- the start check must not use up the sample: the first tick's read
+        -- is then fresh, so the estimator has an estimate from tick one
+        last_seq = nil
+        origin = site_reference(pos:alt())          -- the SITE frame, as kangaroo_source.lua
+        start_n, start_e = n, e
+    else
+        local ok, why = build_target()
+        if not ok then
+            return false, why
+        end
+        origin = pos:copy()
     end
-    origin = pos:copy()
-    local zone_ok, zone_why = build_zone()
+    local zone_ok, zone_why = build_zone(start_n, start_e)
     if not zone_ok then
         origin = nil
         return false, zone_why
@@ -1027,11 +1126,12 @@ local function anchor(now_ms, pos, vel)
     algorithm_state = {}
     sent_alt_m = nil
     estimator = nil
+    last_est_proj, last_est_raw = nil, nil
     if cfg.estimate then
-        estimator = est_mod.new(cfg.estimator.process_noise,
-                                cfg.estimator.measurement_noise)
-        estimator:init(cfg.target_n_m, cfg.target_e_m)
+        estimator = est_mod.new(cfg.estimator.process_noise, cfg.estimator.measurement_noise)
+        estimator:init(start_n, start_e)
     end
+
     state.run_id = state.run_id + 1
     local hdg, yaw = course(vel)
     logger:write('HANC', 't0ms,Lat,Lng,Alt,Hdg,Yaw,AltCmd', 'Iiiffff',
@@ -1108,7 +1208,7 @@ local function step(now_ms)
     if HVAL_ENABLE:get() == 0 then
         disengage("experimental guidance disabled")
         -- HVAL_ENABLE 0 is the deliberate act that clears a latched fault
-        -- (not at boot when spec.json is missing: fix 9).
+        -- (not at boot when spec.json is missing).
         if state.fault_latched and cfg ~= nil and entry ~= nil then
             state.fault_latched = false
             state.fault_reason = nil
@@ -1132,8 +1232,11 @@ local function step(now_ms)
     local v_min = AIRSPEED_MIN:get() or 0
     local flight_ready = vehicle:get_likely_flying()
         and finite(true_airspeed_ms) and true_airspeed_ms >= v_min
-    -- Virtual targets are always fresh; live is refused in target_legs().
-    local target_fresh = math.floor(HVAL_TGT:get() + 0.5) ~= 2
+    -- Virtual targets (0, 1) are always fresh; the bus (3) is fresh when
+    -- read_bus accepts it (not stale, torn or missing); 2 is refused.
+    local source = math.floor(HVAL_TGT:get() + 0.5)
+    local target_fresh = (source == 0 or source == 1)
+    if source == 3 then target_fresh = (read_bus(now_ms * 0.001) ~= nil) end
 
     -- 4. Engage: anchor once per run before converting local positions.
     if not state.enabled then
@@ -1158,7 +1261,9 @@ local function step(now_ms)
     end
 
     local t = (now_ms - t0_ms) * 0.001
-    if cfg.duration_s ~= nil and t > cfg.duration_s then
+    -- HVAL_TGT 3: the plan runs on kangaroo_source.lua's clock (KSRC_RUN 5),
+    -- not from engagement, so no time limit here: the switch ends the run.
+    if source ~= 3 and cfg.duration_s ~= nil and t > cfg.duration_s then
         disengage(string.format("run %d complete, %.1f s", state.run_id, t))
         return
     end
@@ -1168,12 +1273,12 @@ local function step(now_ms)
     local hdg, yaw = course(vel)
 
     -- Acquire target and update estimator.
-    local kn, ke, kvn, kve = target_at(t)
+    local kn, ke, kvn, kve, fresh, tdt = target_at(t, now_ms)
     if kn == nil then
         handle_fault("target: " .. tostring(ke))
         return
     end
-    local est_proj, est_raw = estimate(kn, ke)
+    local est_proj, est_raw = estimate(kn, ke, fresh, tdt)
 
     -- 5. Compute guidance.
     local result, reason = compute_guidance(
@@ -1222,7 +1327,7 @@ local function step(now_ms)
     end
 end
 
---- One tick inside pcall (fix 10), as the runner: an error is reported and
+--- One tick inside pcall, as the runner: an error is reported and
 --  latched as a fault instead of silently stopping the script while a
 --  heading command is still in effect.
 local function update()
@@ -1280,7 +1385,7 @@ if cfg == nil then
     return
 end
 
--- Assign the shared variables declared near the top (fixes 7 and 8: the
+-- Assign the shared variables declared near the top (the
 -- configuration is spec.json, not kangaroo_demo_cfg).
 arms = load("sitl_arms")
 est_mod = load("harness_estimator")

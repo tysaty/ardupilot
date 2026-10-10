@@ -1,21 +1,21 @@
 -- =========================================================
 --  harness_estimator -- constant-velocity target estimator and look-ahead
 --  created 2026-09-03
---  TASK-006 Tranche 3 (reverse check, plus a small forward port).
+--  Lua port check of the harness estimator (reverse check, plus a small forward port).
 --
 --  A Kalman filter over [x, y, vx, vy] estimating target velocity from position
---  measurements alone, plus the look-ahead projection (TASK-017).
+--  measurements alone, plus the look-ahead projection.
 --
 --  Direction of work
 --  -----------------
 --  The FILTER is a reverse check: py_harness/estimator.py was transliterated
---  FROM modules/state_estimator.lua under TASK-012, so this compares two Lua
+--  FROM modules/state_estimator.lua, so this compares two Lua
 --  implementations of the same filter through a Python intermediary. The
 --  LOOK-AHEAD is a forward port -- roughly ten lines, and n_steps = 0 must be
 --  exactly the identity.
 --
 --  This preserves the original's APPROXIMATIONS. It is not a correct Kalman
---  filter and must not be improved here (TASK-006's no-behaviour-change rule):
+--  filter and must not be improved here (a port changes no behaviour):
 --
 --    * simplified covariance update P = (I - K.H).P_pred, NOT the numerically
 --      stable Joseph form -- the original author's own comment says "this is
@@ -30,13 +30,13 @@
 --
 --  The four guards -- singular S, covariance not SPD, overflow, NaN -- are the
 --  cases most likely to diverge, because each depends on a floating-point
---  comparison against a threshold. The Tranche 3 gate requires at least one run
+--  comparison against a threshold. The differential tests require at least one run
 --  that trips each.
 --
 --  Statefulness: this is the ONE ported module that legitimately holds state,
 --  and it holds it in an EXPLICIT filter object the caller owns, never at module
 --  level. `new()` returns that object; the module itself stays a table of
---  functions (VR-015, A-VAL-003).
+--  functions.
 -- =========================================================
 
 local M = {}
@@ -45,7 +45,7 @@ local M = {}
 -- Matrix helpers
 -- ---------------------------------------------------------
 -- Local rather than taken from modules/math_helpers.lua: that module is the
--- SHIPPING controller's and TASK-006 must not couple a port to flight code it
+-- SHIPPING controller's and a port must not be coupled to flight code it
 -- is not also porting. The implementations are equivalent; invert_22's
 -- singularity threshold differs and is called out below.
 
@@ -285,12 +285,12 @@ end
 M.Filter = Filter
 
 -- ---------------------------------------------------------
--- Look-ahead -- TASK-017, forward port
+-- Look-ahead (forward port)
 -- ---------------------------------------------------------
 
 --- Project a target estimate n_steps control intervals ahead on constant
 --  velocity: pos(k+n) = pos(k) + v*n*dt. Velocity is carried through unchanged
---  (A-TGT-002).
+--  (the target is assumed to hold its velocity over the horizon).
 --
 --  n_steps = 0 is EXACTLY the identity, which is what makes the look-ahead
 --  opt-in and off by default. Returns nil for a nil estimate, and nil plus a

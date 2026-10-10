@@ -30,7 +30,7 @@
 --    sitl_arms.lua cs_orbit_entry -- the existing baseline adapter. Steps 1
 --        to 4 of guidance_point below follow it line for line; read it first.
 --
---  The Python harness is normative . TASK-060 builds the Python arm
+--  The Python harness is normative: the Python arm was built
 --  first; this Lua module must then match it tick for tick under
 --  tests/unit/test_lua_differential.py before it is registered anywhere.
 --
@@ -94,7 +94,7 @@ end
 --  vd_step_ticks, arm D's equivalent).
 
 --
---  `hyst` selects the held orbit sense (TASK-047), the way sitl_arms'
+--  `hyst` selects the held orbit sense, the way sitl_arms'
 --  cs_orbit_entry(hyst) and the Python _SenseHysteresisMixin do: it is a
 --  property of the arm, not a config value, so it is passed in, not read from
 --  cfg. M.guidance_point and M.guidance_point_hyst below are the two entries.
@@ -178,8 +178,8 @@ local function guidance(snapshot, cfg, hyst)
             carrot_lead_s = shifted and (cfg.dt_s * cfg.af_step_ticks) or 0.0,
             carrot_shifted = shifted,
             -- the open decisions, recorded so every bundle says which ran
-            path_about = "estimate",        -- D5 (alternative: "truth")
-            carrot_shift_phases = "both",   -- D6 (alternative: "approach")
+            path_about = "estimate",        -- the path about the estimate (alternative: "truth")
+            carrot_shift_phases = "both",   -- shift in both phases (alternative: "approach")
         }
         -- managing hysteresis: set on EVERY tick of the _hyst variant, false
         -- when there is no previous sense yet -- as sitl_arms and the Python
@@ -201,7 +201,7 @@ end
 
 --- The two entries, as sitl_arms' contract expects: (snapshot, cfg).
 --  carrot_shift_cs      -> M.guidance_point       (no held sense)
---  carrot_shift_cs_hyst -> M.guidance_point_hyst  (held sense, TASK-047)
+--  carrot_shift_cs_hyst -> M.guidance_point_hyst  (held sense)
 function M.guidance_point(snapshot, cfg)
     return guidance(snapshot, cfg, false)
 end

@@ -1,14 +1,8 @@
 --  kangaroo_source.lua -- live streaming the kangaroo position via AP_Follow
---  created 2026-10-07
--- implmeneted from KANGAROO_AP_FOLLOW_FRAMEWORK.md
+--  created 7 October 2026
+-- implmeneted based on the prior physcial flight architecture
 --
---  (TASK-065, completed 2026-10-07 inside the structure above.) Runs on a
---  SEPARATE ArduPilot instance, the kangaroo host (a SITL instance, or a
---  ground flight controller that is never armed): not on the aircraft and not
---  on a companion computer. Every dt_s it sends the ported kangaroo
---  (harness_segments over harness_kangaroo) as one FOLLOW_TARGET under this
---  host's system id (MAV_SYSID); the aircraft sets FOLL_SYSID to it, and
---  AP_Follow then ignores this host's own GLOBAL_POSITION_INT.
+--  Kanagaroo position read directly from the bus into hardware_val.lua
 --  Frame: north/east metres from the host's home (site-fixed anchor).
 --
 --  KSRC_RUN 0 hold (where the kangaroo is), 1 case (spec.json's legs),
@@ -22,20 +16,25 @@
 --  harness_zone (only with a fence), MAVLink/mavlink_msgs and
 --  MAVLink/mavlink_msg_FOLLOW_TARGET (libraries/AP_Scripting/modules/MAVLink).
 
-
--- requireis
+-- requires
 local mavlink_msgs = require("MAVLink/mavlink_msgs")
 local spec_mod = require("sitl_spec")
 local segs = require("harness_segments")
-local kang = require("harness_kangaroo")   -- stopstart defaults (TASK-064)
+local kang = require("harness_kangaroo")
 -- same spec.json as the aircraft
 local cfg = assert(spec_mod.load())
+-- taking configuration of the floor offset 
 local PERIOD_MS = math.floor((cfg.dt_s or 0.1) * 1000 + 0.5)
--- the fence (ADR-012), for live mode only; case legs already carry its turns
+-- projecting the fence
 local zone_mod = cfg.fence and require("harness_zone") or nil
 
 local MAV_SEVERITY = { ERROR = 3, WARNING = 4, INFO = 6 }
-local LEG_S = 36000.0        -- hold and live legs never reach their end
+-- hold and live legs never reach their end
+local LEG_S = 36000.0        
+
+-----------------------------------------------------------------------------
+-- 1. Parameters
+----------------------------------------------------------------------------
 
 -- KSRC_ parameter table (own key), KSRC_RUN, KSRC_CHAN, KSRC_MODE ... as KDEM_
 -- add in the parameter table
@@ -50,9 +49,13 @@ local function bind(name, idx, default)
     return p
 end
 local geometry = cfg.geometry or {}
-local KSRC_ENABLE = bind("ENABLE", 1, 1)  -- 0: stop sending (stale-target test)
-local KSRC_CHAN   = bind("CHAN",   2, 0)  -- MAVLink channel of the link to the aircraft
-local KSRC_RUN    = bind("RUN",    3, 0)  -- 0 hold, 1 case, 2 live
+
+-- 0: stop sending (stale-target test)
+local KSRC_ENABLE = bind("ENABLE", 1, 1)  
+-- MAVLink channel of the link to the aircraft
+local KSRC_CHAN   = bind("CHAN",   2, 0)  
+-- 0 hold, 1 case, 2 live
+local KSRC_RUN    = bind("RUN",    3, 0)  
 local KSRC_MODE   = bind("MODE",   4, 1)
 local KSRC_PACE   = bind("PACE",   5, 0)
 local KSRC_SPD    = bind("SPD",    6, cfg.speed_ms or 6.25)
@@ -68,161 +71,322 @@ local MODE_NAMES = { [0] = "point", "straight", "circle", "rectangle" }
 local PACE_NAMES = { [0] = "constant", "elastic", "stopstart" }
 local RUN_NAMES = { [0] = "hold", "case", "live" }
 
-local anchor, segments, t0_ms, running = nil, nil, nil, false
--- running: the KSRC_RUN the schedule was built for (false until the first
--- run); legs, signature: what the schedule was built from; kn, ke: the
--- kangaroo last tick; stopped: a refused schedule ends the stream
-local legs, signature, kn, ke, zone, stopped = nil, nil, nil, nil, nil, false
+-----------------------------------------------------------------------------
+-- 1.1  New KSRC_ parameters (next free indices in the KSRC_ table, size 16)
+-----------------------------------------------------------------------------
+    KSRC_OUT   (idx 15, default 1)  
+    -- bit 0: on-board bus (KBUS_)
+    --  bit 1: FOLLOW_TARGET on KSRC_CHAN (TASK-065)
+    -- 1 = bus only (Follow-03), 2 = remote only,
+    -- 3 = both
+    KSRC_ADSB  (idx 16, default 1)  0 off, 1 broadcast ADSB_VEHICLE every 200 ms
 
--- point leg at the spec's start until KSRC_RUN
-local function hold_start(t)
-    segments = segs.make_segments({ { duration_s = 1e6, mode = "point",
-        heading_deg = 0.0, speed_ms = 0.0 } }, cfg.target_n_m, cfg.target_e_m,
-        cfg.geometry, t)
-end
+-----------------------------------------------------------------------------
+-- 1. 2. The bus: its own parameter table
+-----------------------------------------------------------------------------
+    KBUS_ table, key 143 (hardware_val 141, KSRC_ 142), 8 entries:
+      KBUS_SEQ   sequence: odd while writing, even when stable
+      KBUS_T_S   sample time, s since boot (float32: about 0.25 ms resolution
+                 after an hour, enough for a 100 ms tick)
+      KBUS_N_M   kangaroo north of SITE, m      -- metres, NOT degrees:
+      KBUS_E_M   kangaroo east of SITE, m       -- float32 degrees were 0.4 m N /
+                                                --  1.4 m E at the site (Follow-03);
+                                                --  metres are < 0.1 mm at 1 km
+      KBUS_VN    velocity north, m/s
+      KBUS_VE    velocity east, m/s
+      KBUS_RUN   KSRC_RUN in force (0 hold, 1 case, 2 live)
+      KBUS_REB   rebuild count (a jump in it marks a mode change or fence turn)
 
--- the live settings, as the demo's KDEM_ (TASK-058, TASK-064)
-local function settings()
-    local mode = math.floor(KSRC_MODE:get() + 0.5)
-    if MODE_NAMES[mode] == nil then mode = 1 end
-    local pace = math.floor(KSRC_PACE:get() + 0.5)
-    if PACE_NAMES[pace] == nil then pace = 0 end
-    return {
-        mode = mode, pace = pace,
-        speed_ms = math.max(0.0, KSRC_SPD:get()),
-        heading_deg = KSRC_HDG:get() % 360.0,
-        geometry = { radius_m = KSRC_RAD:get(), length_m = KSRC_LEN:get(),
-                     width_m = KSRC_WID:get() },
-        pace_profile = { slow_factor = KSRC_PSLOW:get(), hold_slow_s = KSRC_PHOLD:get(),
-                         hold_fast_s = KSRC_PFAST:get(), ramp_down_s = KSRC_PRAMP:get(),
-                         ramp_up_s = KSRC_PRAMP:get() },
+    local bus_seq = 0
+    function publish_bus(t_s, n, e, vn, ve)
+        bus_seq = bus_seq + 1
+        -- odd: writing
+        KBUS_SEQ:set(2 * bus_seq - 1)          
+        KBUS_T_S:set(t_s)
+        -- in this script's frame: from SITE
+        KBUS_N_M:set(n);  KBUS_E_M:set(e)      
+        KBUS_VN:set(vn);  KBUS_VE:set(ve)
+        KBUS_RUN:set(running or 0)
+        -- count kept in rebuild()
+        KBUS_REB:set(rebuild_count)        
+         -- even: stable    
+        KBUS_SEQ:set(2 * bus_seq)             
+    end
+    -- use :set(), never :set_and_save(): nothing is written to storage
+
+
+----------------------------------------------------------------------------
+-- 2. ADS-B for the ground station 
+-----------------------------------------------------------------------------
+    local adsb = require("sitl_adsb")
+    local ADSB_PERIOD_MS = 200
+    local last_adsb_ms = 0
+    function broadcast(now_ms, loc, vn, ve)
+        if KSRC_ADSB:get() == 0 then return end
+        if now_ms - last_adsb_ms < ADSB_PERIOD_MS then return end
+        last_adsb_ms = now_ms
+        -- every channel; missing ones dropped
+        adsb.send(loc, vn, ve)                 
+    end
+
+----------------------------------------------------------------------------
+-- 2. Fence gemoetry
+-----------------------------------------------------------------------------
+
+    -- Site reference (section 13a): the fence's vertex centroid from
+    --     spec.json. Same point every sortie; never home, never the aircraft.
+    local function site_reference(cfg, alt_cm)
+        local fence = cfg.fence
+        if fence == nil or type(fence.vertices_latlng) ~= "table"
+                or #fence.vertices_latlng < 3 then
+            return nil, "spec.json has no fence: no site reference"
+        end
+        -- addiing site reference
+        local v = fence.vertices_latlng
+        local lat, lng = 0.0, 0.0
+        for i = 1, #v do
+            lat = lat + v[i][1]
+            lng = lng + v[i][2]
+        end
+        local site = Location()
+        site:lat(math.floor(lat / #v * 1e7 + 0.5))
+        site:lng(math.floor(lng / #v * 1e7 + 0.5))
+        site:alt(alt_cm)                  -- ground AMSL, cm (display and FOLLOW_TARGET only)
+        return site
+    end
+
+    -- [Deconflict] New KSRC_ parameters (the table already has 16 slots; 15 and 16 free)
+    local KSRC_OUT  = bind("OUT",  15, 1)  -- bit 0: on-board bus, bit 1: FOLLOW_TARGET
+    local KSRC_ADSB = bind("ADSB", 16, 1)  -- 1: ADSB_VEHICLE every 200 ms (display only)
+
+    -- [Deconflict - if this is simpler] The on-board bus: its own table, written only by this script
+    -- hardware_val 141, KSRC_ 142
+    local KBUS_TABLE_KEY = 143            
+    local KBUS_PREFIX = "KBUS_"
+    assert(param:add_table(KBUS_TABLE_KEY, KBUS_PREFIX, 8), "KSRC: could not add KBUS table")
+    local function bus_bind(name, idx)
+        assert(param:add_param(KBUS_TABLE_KEY, idx, name, 0), "KSRC: could not add KBUS_" .. name)
+        local p = Parameter()
+        assert(p:init(KBUS_PREFIX .. name), "KSRC: could not bind KBUS_" .. name)
+        return p
+    end
+    local KBUS = {
+        -- odd while writing, even when stable
+        SEQ = bus_bind("SEQ", 1),   
+        -- sample time, s since boot
+        T_S = bus_bind("T_S", 2),   
+        -- kangaroo north of SITE, m
+        N_M = bus_bind("N_M", 3),   
+        -- kangaroo east of SITE, m
+        E_M = bus_bind("E_M", 4),  
+        -- m/s 
+        VN  = bus_bind("VN",  5),
+        VE  = bus_bind("VE",  6), 
+        -- KSRC_RUN in force
+        RUN = bus_bind("RUN", 7),  
+        -- rebuild count 
+        REB = bus_bind("REB", 8),
     }
-end
+    local bus_seq = 0
+    -- publish bus
+    local function publish_bus(t_s, n, e, vn, ve, run, rebuilds)
+        bus_seq = bus_seq + 1
+        KBUS.SEQ:set(2 * bus_seq - 1)
+        KBUS.T_S:set(t_s)
+        KBUS.N_M:set(n)
+        KBUS.E_M:set(e)
+        KBUS.VN:set(vn)
+        KBUS.VE:set(ve)
+        KBUS.RUN:set(run)
+        KBUS.REB:set(rebuilds)
+        -- :set, never :set_and_save
+        KBUS.SEQ:set(2 * bus_seq)         
+    end
 
-local function signature_of(s)
-    local p, g = s.pace_profile, s.geometry
-    return string.format("%d|%d|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f",
-                         s.mode, s.pace, s.speed_ms, s.heading_deg, g.radius_m,
-                         g.length_m, g.width_m, p.slow_factor, p.hold_slow_s,
-                         p.hold_fast_s, p.ramp_down_s)
-end
+----------------------------------------------------------------------------
+-- 2. ADBS for ground station
+-----------------------------------------------------------------------------
+    local ok_adsb, adsb = pcall(require, "sitl_adsb")
+    local ADSB_PERIOD_MS = 200
+    local last_adsb_ms = nil
+    local function broadcast(now_ms, loc, vn, ve)
+        if not ok_adsb or KSRC_ADSB:get() <= 0 then
+            return
+        end
+        if last_adsb_ms ~= nil and (now_ms - last_adsb_ms) < ADSB_PERIOD_MS then
+            return
+        end
+        last_adsb_ms = now_ms
+        adsb.send(loc, vn, ve)
+    end
 
--- the one live leg, by the demo's rules: elastic and stopstart travel over
--- the chosen base; point has no pace
-local function live_legs(s)
-    local name = MODE_NAMES[s.mode]
-    if name == "point" then
-        return { { duration_s = LEG_S, mode = "point", heading_deg = s.heading_deg,
-                   speed_ms = 0.0 } }
-    end
-    if s.pace == 1 then
-        return { { duration_s = LEG_S, mode = "elastic", heading_deg = s.heading_deg,
-                   speed_ms = s.speed_ms, elastic_base = name } }
-    end
-    if s.pace == 2 then
-        return { { duration_s = LEG_S, mode = "stopstart", heading_deg = s.heading_deg,
-                   speed_ms = s.speed_ms, elastic_base = name, pace = s.pace_profile } }
-    end
-    return { { duration_s = LEG_S, mode = name, heading_deg = s.heading_deg,
-               speed_ms = s.speed_ms } }
-end
+----------------------------------------------------------------------------
+-- 3. Geometry runs
+-----------------------------------------------------------------------------
+    -- The geometry suite, shared-start cycle (sections 12 and 13). The spec.json carries a separate config
+    local SUITE_RUNS = 3
+    -- add point
+    local SUITE_PACES = { "constant", "elastic", "stopstart" }
+    local SUITE_GEOMETRIES = { "straight", "circle", "rectangle" }
+    local SUITE_PLAN_DEFAULT = {
+        -- from SITE
+        start_n_m = 90.0, start_e_m = 10.0,   
+        -- circle and rectangle
+        closed_hdg = 180.0,         
+        -- out; back is +180          
+        straight_hdg = 200.0,              
+        -- to 10 m short of the 70 m limit   
+        straight_m = 194.4,                 
+        -- point leg between runs  
+        rest_s = 10.0,                        
+    }
 
--- rebuild from where the kangaroo is (position continuous, only velocity
--- steps); why: 1 run change, 2 live change, 3 fence turn. False on refusal.
-local function rebuild(t, new_legs, geom, why)
-    local built, reason = segs.make_segments(new_legs, kn, ke, geom, t)
-    if built == nil then
-        stopped = true
-        gcs:send_text(MAV_SEVERITY.ERROR, "KSRC: stopped streaming: schedule refused: "
-                      .. tostring(reason))
-        return false
+    -- time for a monotone closed form distance to reach d (bisection)
+    local function time_for_distance(dist_fn, d)
+        local lo, hi = 0.0, 1.0
+        while dist_fn(hi) < d do
+            hi = hi * 2.0
+        end
+        for _ = 1, 60 do
+            local mid = 0.5 * (lo + hi)
+            if dist_fn(mid) < d then lo = mid else hi = mid end
+        end
+        return hi
     end
-    segments, legs = built, new_legs
-    logger:write('HKSB', 't,Run,Spd,Hdg,Why', 'fffff', t, running or 0,
-                 new_legs[1].speed_ms or 0.0, new_legs[1].heading_deg or 0.0, why)
-    return true
-end
 
-local function active_index(t)
-    for i = 1, #segments do
-        if segments[i].t_start <= t and t < segments[i].t_end then
-            return i
+----------------------------------------------------------------------------
+-- 4. Speed variations
+-----------------------------------------------------------------------------
+    local function paced_leg(base, pace, hdg, V, dist_m)
+        if pace == "constant" then
+            return { duration_s = dist_m / V, mode = base, heading_deg = hdg,
+                     speed_ms = V }
+        elseif pace == "elastic" then
+            local slow = V * kang.ELASTIC_SLOW_FACTOR
+            local dur = time_for_distance(function(t)
+                return kang.elastic_distance(t, slow, V, kang.ELASTIC_HOLD_S, kang.ELASTIC_RAMP_S)
+            end, dist_m)
+            return { duration_s = dur, mode = "elastic", heading_deg = hdg,
+                     speed_ms = V, elastic_base = base }
         end
+        local p = assert(kang.stopstart_profile(nil))
+        local dur = time_for_distance(function(t)
+            return kang.stopstart_distance(t, V, p)
+        end, dist_m)
+        return { duration_s = dur, mode = "stopstart", heading_deg = hdg,
+                 speed_ms = V, elastic_base = base, pace = {} }
     end
-    return #segments
-end
 
-local function update()
-    if stopped then return update, 1000 end
-    if anchor == nil then
-        if not ahrs:home_is_set() then return update, 1000 end
-        anchor = ahrs:get_home(); t0_ms = millis(); hold_start(0.0)
-        kn, ke = cfg.target_n_m, cfg.target_e_m
-        if zone_mod ~= nil then
-            zone = assert(zone_mod.from_latlng(anchor, cfg.fence.vertices_latlng))
+
+ ----------------------------------------------------------------------------
+-- 4. Combining geometries
+-----------------------------------------------------------------------------
+    -- one geometry at one pace: three runs, ending where it started
+    local function geometry_run_legs(geometry, pace, V, geom, plan)
+        -- <add point per the plan>
+        if geometry == "straight" then
+            local legs = {}
+            for i = 1, 2 * SUITE_RUNS do      -- out, back, out, back, out, back
+                local hdg = (plan.straight_hdg + ((i % 2 == 0) and 180.0 or 0.0)) % 360.0
+                legs[#legs + 1] = paced_leg("straight", pace, hdg, V, plan.straight_m)
+            end
+            return legs
         end
-        gcs:send_text(MAV_SEVERITY.INFO, string.format(
-            "KSRC: streaming FOLLOW_TARGET from sysid %d on chan %d",
-            param:get("MAV_SYSID") or 0, KSRC_CHAN:get()))
-    end
-    local t = (millis() - t0_ms):tofloat() * 0.001
-    local run = math.floor(KSRC_RUN:get() + 0.5)
-    if RUN_NAMES[run] == nil then run = 0 end
-    -- case mode
-    if run == 1 and running ~= 1 then
-        running = 1
-        if not rebuild(t, cfg.legs, cfg.geometry, 1) then return update, 1000 end
-        gcs:send_text(MAV_SEVERITY.INFO, "KSRC: case")
-    end
-    -- live mode: on a KSRC_* change, kangaroo_live.rebuild(t, n, e, ...)
-    -- (the demo's rules carried here; kangaroo_live.lua is a follow-up, K9)
-    if run == 2 then
-        local s = settings()
-        if running ~= 2 or signature ~= signature_of(s) then
-            local why = (running == 2) and 2 or 1
-            running, signature = 2, signature_of(s)
-            if not rebuild(t, live_legs(s), s.geometry, why) then return update, 1000 end
-            gcs:send_text(MAV_SEVERITY.INFO, string.format("KSRC: live %s %s %.2f m/s hdg %.0f",
-                MODE_NAMES[s.mode], PACE_NAMES[s.pace], s.speed_ms, s.heading_deg))
+        local per
+        if geometry == "circle" then
+            per = 2.0 * math.pi * geom.radius_m
+        else
+            per = 2.0 * (geom.length_m + geom.width_m)
         end
+        return { paced_leg(geometry, pace, plan.closed_hdg, V, SUITE_RUNS * per) }
     end
-    -- hold: KSRC_RUN 0 after a run stands the kangaroo where it is
-    if run == 0 and running then
-        running = false
-        if not rebuild(t, { { duration_s = LEG_S, mode = "point", heading_deg = 0.0,
-                              speed_ms = 0.0 } }, cfg.geometry, 1) then
-            return update, 1000
+
+----------------------------------------------------------------------------
+-- 5. Full package
+-----------------------------------------------------------------------------
+    -- the nine runs, with a rest between them
+    local function suite_legs(V, geom, plan)
+        local legs = {}
+        for _, geometry in ipairs(SUITE_GEOMETRIES) do
+            for _, pace in ipairs(SUITE_PACES) do
+                for _, leg in ipairs(geometry_run_legs(geometry, pace, V, geom, plan)) do
+                    legs[#legs + 1] = leg
+                end
+                if plan.rest_s > 0 then
+                    legs[#legs + 1] = { duration_s = plan.rest_s, mode = "point",
+                                        heading_deg = 0.0, speed_ms = 0.0 }
+                end
+            end
         end
-        gcs:send_text(MAV_SEVERITY.INFO, "KSRC: hold")
+        return legs
     end
-    local n, e, vn, ve = segs.state_at(segments, t)
-    kn, ke = n, e
-    -- live mode only: turn back at the fence by the harness's rule (harness_zone)
-    if zone ~= nil and running == 2 then
-        local leg = legs[active_index(t)]
-        local turned = zone_mod.contain_heading(zone, n, e, leg.heading_deg or 0.0,
-                                                leg.speed_ms or 0.0, PERIOD_MS * 0.001,
-                                                cfg.fence.containment_margin_m)
-        if turned ~= nil then
-            local new_leg = zone_mod.turned_leg(leg, turned)
-            new_leg.duration_s = LEG_S
-            if not rebuild(t, { new_leg }, settings().geometry, 3) then return update, 1000 end
+
+
+----------------------------------------------------------------------------
+-- 6. Running the suite
+-----------------------------------------------------------------------------
+
+    -- [F] KSRC_RUN 5: the geometry suite from the shared start. The kangaroo
+    --     is placed at the start once (logged), then the nine runs chain;
+    --     each ends back at the start. In update(), after the live block:
+    
+        if run == 5 and running ~= 5 then
+            running = 5
+            local plan = cfg.suite or SUITE_PLAN_DEFAULT
+            kn, ke = plan.start_n_m, plan.start_e_m          -- from SITE
+            if not rebuild(t, suite_legs(KSRC_SPD:get(), settings().geometry, plan),
+                           settings().geometry, 5) then
+                return update, 1000
+            end
+            gcs:send_text(MAV_SEVERITY.INFO, "KSRC: suite")
         end
-    end
-    if KSRC_ENABLE:get() <= 0 then return update, PERIOD_MS end
-    local loc = anchor:copy(); loc:offset(n, e)
-    local msg = { timestamp = millis():toint(), est_capabilities = 3,
-                  lat = loc:lat(), lon = loc:lng(), alt = anchor:alt() * 0.01,
-                  vel = { vn, ve, 0 }, acc = { 0, 0, 0 },
-                  attitude_q = { 1, 0, 0, 0 }, rates = { 0, 0, 0 },
-                  position_cov = { 0, 0, 0 }, custom_state = 0 }
-    local sent = mavlink:send_chan(KSRC_CHAN:get(),
-                                   mavlink_msgs.encode("FOLLOW_TARGET", msg))
-    logger:write('HKSR', 't,Run,N,E,VN,VE,Sent', 'fffffff',
-                 t, running and 1 or 0, n, e, vn, ve, sent and 1 or 0)
-    return update, PERIOD_MS
-end
-return update, 1000
+        -- and RUN_NAMES gains [5] = "suite"; the fence turn stays off for
+        -- case (1) and suite (5): their legs are fence-checked in Python
+
+----------------------------------------------------------------------------
+-- 7. Adjusting outputs for site reference offset
+-----------------------------------------------------------------------------
+    -- the outputs, replacing the single FOLLOW_TARGET send at the end of
+    --     update(); `anchor` is now the SITE reference ([A]), set once:
+    --         anchor = assert(site_reference(cfg, ahrs:get_home():alt()))
+    
+        if KSRC_ENABLE:get() <= 0 then return update, PERIOD_MS end
+        local now_ms = millis():toint()
+        local loc = anchor:copy(); loc:offset(n, e)
+        local out = math.floor(KSRC_OUT:get() + 0.5)
+        local sent = false
+        if (out & 1) ~= 0 then
+            publish_bus(now_ms * 0.001, n, e, vn, ve, running or 0, rebuild_count)
+        end
+        if (out & 2) ~= 0 then
+            (the existing FOLLOW_TARGET msg and mavlink:send_chan, unchanged;
+             sent = its result)
+        end
+        broadcast(now_ms, loc, vn, ve)
+        logger:write('HKSR', 't,Run,N,E,VN,VE,Sent', 'fffffff',
+                     t, running and 1 or 0, n, e, vn, ve, sent and 1 or 0)
+        return update, PERIOD_MS
+    
+        (rebuild_count: add `rebuild_count = rebuild_count + 1` in rebuild())
+
+
+
+    
+    -- at anchor(): the SITE reference (the same function as [A], from the
+    -- same spec.json) and its offset to the engagement origin, once
+    --     site = assert(site_reference(cfg, origin:alt()))
+    --     site_to_origin = site:get_distance_NE(origin)
+    -- each tick, in target_at(t) for HVAL_TGT 3:
+    --     local n, e, vn, ve, t_s, fresh_or_why = read_bus(millis():toint() * 0.001)
+    --     if n == nil then return nil, fresh_or_why end     -- existing fault path
+    --     local age = millis():toint() * 0.001 - t_s        -- sample up to one period old
+    --     local kn = n - site_to_origin:x() + vn * age
+    --     local ke = e - site_to_origin:y() + ve * age
+    --     return kn, ke, vn, ve
+    -- and the estimator updates only on `fresh` samples, dt = sample-time
+    -- interval (KANGAROO_AP_FOLLOW_FRAMEWORK section 7.2)
+
+
 
 
 --[==[
@@ -232,20 +396,16 @@ Not code: a long comment after the return, so nothing here runs. Plan only,
 for the author to review and implement.
 =============================================================================
 
-Layout on the AIRCRAFT's flight controller (no ground host, no companion):
-
-    APM/scripts/kangaroo_source.lua   computes the kangaroo from boot,
-                                      broadcasts ADS-B, writes the bus
+Layout on the AIRCRAFT's flight controller (for no ground host, no companion):
+    APM/scripts/kangaroo_source.lua   computes the kangaroo from boot, broadcasts ADS-B, writes the bus
     APM/scripts/hardware_val.lua      reads the bus (HVAL_TGT 3), flies the arm
-    APM/scripts/modules/              sitl_spec, harness_*, sitl_adsb,
-                                      MAVLink/mavlink_msgs (+ FOLLOW_TARGET def)
+    APM/scripts/modules/              sitl_spec, harness_*, sitl_adsb, MAVLink/mavlink_msgs (+ FOLLOW_TARGET def)
 
     kangaroo_source.lua --(KBUS_ parameters, same board)--> hardware_val.lua
-           |
            +--(ADSB_VEHICLE, every MAVLink channel)--> ground station map
            +--(FOLLOW_TARGET, optional)--> a remote aircraft's AP_Follow
 
-Note: ArduPilot runs every script in ONE scripting thread, one update() at a
+-- ArduPilot runs every script in ONE scripting thread, one update() at a
 time, so a read cannot interleave with a write inside one update(). The
 sequence counter below is kept anyway (Follow-03 had it): it still catches a
 ground station writing a KBUS_ parameter, and a reader that runs before the
@@ -551,7 +711,7 @@ writer has published anything.
       cover 250 m in 40 s, so a 40 s straight can reach the fence and turn.
 
 -----------------------------------------------------------------------------
-12. Geometry suite: each geometry, three full runs, at each of the three paces
+12. Geometry suite: each geometry, two full runs, at each of the three paces
 -----------------------------------------------------------------------------
     Requested 2026-10-10. Order (9 runs):
 
@@ -1060,4 +1220,245 @@ writer has published anything.
     -- -- and the estimator updates only on `fresh` samples, dt = sample-time
     -- -- interval (KANGAROO_AP_FOLLOW_FRAMEWORK section 7.2)
 =============================================================================
+15. DECISIONS FROM THE OPEN ITEMS (author, 2026-10-10) AND WHAT THEY CHANGE
+=============================================================================
+docs/Physical_validation.md "Open items before flying this", as answered:
+
+  * AH: ported (harness_adaptive_db.guidance_point_hyst, both sitl_arms
+    copies); validated in the SITL demo from the plan config (below).
+  * Python suite builder: NOT a separate tool; the plan is checked in SITL.
+    The legs are still generated in Python, once, by
+    Tools/autotest/kangaroo_follow/pv_plan.py from pv_plan.json, and carried
+    in spec.json -- so [E] (an on-board suite builder) is SUPERSEDED: the
+    aircraft plays the spec's legs, it does not build them. pv_plan.py also
+    refuses a plan that leaves the fence less the orbit radius (the spec's
+    own composite check), so a spec that exists has been checked.
+  * Turn radius: bank 60 deg in the configuration (pv_plan.json
+    aircraft.bank_limit_deg -> spec bank_limit_deg and roll_limit_deg 60;
+    flight card ROLL_LIMIT_DEG 60). At 25 m/s that is a 36.8 m turn, inside
+    the 45 m the arms plan with; hardware_val's floor faults above about
+    27.6 m/s true airspeed.
+  * Script heap: SCR_HEAP_SIZE at least 800 kB for hardware_val.lua alone;
+    the two-script total is measured on the board (flight card).
+  * Sortie plan: arm-major. One arm flies the whole plan (point, transit,
+    nine runs) before the next arm: 0H, then FH, then AH. Active only
+    (HVAL_OUT 1). One spec.json per arm: demo.py --plan --arm <id> in SITL,
+    the same file hardware_val.lua reads (ADR-011), with HVAL_ARM to match
+    (0H -> 0, FH -> 2, AH -> 1).
+  * Geometry sizes: the defaults stand (circle 60 m, rectangle 140 x 70 m).
+  * Point mode added: flown FIRST, held 120 s at 30 m N, 0 m E of the site
+    reference (the fence's deepest point, 68 m spare), away from the shared
+    start; then an unscored transit at the plan speed to the shared start
+    (90 m N, 10 m E), then the nine runs (two laps / two out-and-backs,
+    12.5 m/s), each followed by a 10 s rest. 17.3 min per arm.
+  * Carrot look-ahead 25 m (Physical_validation.md common set-up).
+
+The tested reference for [I] below is kangaroo_demo.lua's suite mode
+(KDEM_MODE 5; anchor() and suite_watch()), gated against the Python schedule
+in tests/unit/test_pv_plan.py. Port it here rather than re-deriving it.
+
+-- [I] KSRC_RUN 5 from the spec's legs (replaces [E]). In the SITE frame the
+--     schedule's (n, e) ARE metres from the site reference, so the bus
+--     ([C]) is written with them directly and ADS-B places them with
+--     site:offset(n, e).
+--
+-- local function plan_legs(cfg)
+--     if cfg.legs == nil or #cfg.legs == 0 then
+--         return nil, "spec.json has no legs: stage it with demo.py --plan --arm"
+--     end
+--     local out = {}
+--     for i = 1, #cfg.legs do
+--         local l = cfg.legs[i]
+--         out[i] = { duration_s = l.duration_s, mode = l.mode,
+--                    heading_deg = l.heading_deg, speed_ms = l.speed_ms,
+--                    elastic_base = l.elastic_base, pace = l.pace }
+--     end
+--     return out
+-- end
+--
+-- -- at start (boot, or KSRC_RUN set to 5):
+-- --     site = assert(site_reference(cfg, home_alt_cm))         -- [A]
+-- --     local legs = assert(plan_legs(cfg))
+-- --     segments = assert(segs.make_segments(legs, cfg.target_n_m, cfg.target_e_m,
+-- --                                          cfg.geometry, 0.0))
+-- --     t0_ms = millis():toint(); suite_run = 0
+-- -- each tick:
+-- --     local n, e, vn, ve = segs.state_at(segments, (millis():toint() - t0_ms) * 0.001)
+-- --     publish_bus(t_s, n, e, vn, ve, 5, 0)                    -- [C]
+-- --     local loc = site:copy(); loc:offset(n, e)
+-- --     broadcast(now_ms, loc, vn, ve)                          -- [D]
+-- --     announce each run from cfg.suite_runs (name, t_start_s, t_end_s)
+-- --     NO containment turn (it would change the checked plan); track the
+-- --     least spare to the orbit radius and warn past it, as suite_watch().
+--
+-- Start time: the demo starts the plan when the aircraft enters GUIDED; on
+-- the aircraft the kangaroo runs from boot (Option B). D-open: start the
+-- plan on a pilot switch (KSRC_RUN 5 set from the ground) so the point run
+-- is not spent before the aircraft is engaged. Recommended.
+=============================================================================
 ]==]
+
+
+
+-- old code - before 10 October
+
+
+
+
+
+
+local anchor, segments, t0_ms, running = nil, nil, nil, false
+-- running: the KSRC_RUN the schedule was built for (false until the first
+-- run); legs, signature: what the schedule was built from; kn, ke: the
+-- kangaroo last tick; stopped: a refused schedule ends the stream
+local legs, signature, kn, ke, zone, stopped = nil, nil, nil, nil, nil, false
+
+-- point leg at the spec's start until KSRC_RUN
+local function hold_start(t)
+    segments = segs.make_segments({ { duration_s = 1e6, mode = "point",
+        heading_deg = 0.0, speed_ms = 0.0 } }, cfg.target_n_m, cfg.target_e_m,
+        cfg.geometry, t)
+end
+
+-- the live settings, as the demo's KDEM_ (TASK-058, TASK-064)
+local function settings()
+    local mode = math.floor(KSRC_MODE:get() + 0.5)
+    if MODE_NAMES[mode] == nil then mode = 1 end
+    local pace = math.floor(KSRC_PACE:get() + 0.5)
+    if PACE_NAMES[pace] == nil then pace = 0 end
+    return {
+        mode = mode, pace = pace,
+        speed_ms = math.max(0.0, KSRC_SPD:get()),
+        heading_deg = KSRC_HDG:get() % 360.0,
+        geometry = { radius_m = KSRC_RAD:get(), length_m = KSRC_LEN:get(),
+                     width_m = KSRC_WID:get() },
+        pace_profile = { slow_factor = KSRC_PSLOW:get(), hold_slow_s = KSRC_PHOLD:get(),
+                         hold_fast_s = KSRC_PFAST:get(), ramp_down_s = KSRC_PRAMP:get(),
+                         ramp_up_s = KSRC_PRAMP:get() },
+    }
+end
+
+local function signature_of(s)
+    local p, g = s.pace_profile, s.geometry
+    return string.format("%d|%d|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f|%.3f",
+                         s.mode, s.pace, s.speed_ms, s.heading_deg, g.radius_m,
+                         g.length_m, g.width_m, p.slow_factor, p.hold_slow_s,
+                         p.hold_fast_s, p.ramp_down_s)
+end
+
+-- the one live leg, by the demo's rules: elastic and stopstart travel over
+-- the chosen base; point has no pace
+local function live_legs(s)
+    local name = MODE_NAMES[s.mode]
+    if name == "point" then
+        return { { duration_s = LEG_S, mode = "point", heading_deg = s.heading_deg,
+                   speed_ms = 0.0 } }
+    end
+    if s.pace == 1 then
+        return { { duration_s = LEG_S, mode = "elastic", heading_deg = s.heading_deg,
+                   speed_ms = s.speed_ms, elastic_base = name } }
+    end
+    if s.pace == 2 then
+        return { { duration_s = LEG_S, mode = "stopstart", heading_deg = s.heading_deg,
+                   speed_ms = s.speed_ms, elastic_base = name, pace = s.pace_profile } }
+    end
+    return { { duration_s = LEG_S, mode = name, heading_deg = s.heading_deg,
+               speed_ms = s.speed_ms } }
+end
+
+-- rebuild from where the kangaroo is (position continuous, only velocity
+-- steps); why: 1 run change, 2 live change, 3 fence turn. False on refusal.
+local function rebuild(t, new_legs, geom, why)
+    local built, reason = segs.make_segments(new_legs, kn, ke, geom, t)
+    if built == nil then
+        stopped = true
+        gcs:send_text(MAV_SEVERITY.ERROR, "KSRC: stopped streaming: schedule refused: "
+                      .. tostring(reason))
+        return false
+    end
+    segments, legs = built, new_legs
+    logger:write('HKSB', 't,Run,Spd,Hdg,Why', 'fffff', t, running or 0,
+                 new_legs[1].speed_ms or 0.0, new_legs[1].heading_deg or 0.0, why)
+    return true
+end
+
+local function active_index(t)
+    for i = 1, #segments do
+        if segments[i].t_start <= t and t < segments[i].t_end then
+            return i
+        end
+    end
+    return #segments
+end
+
+local function update()
+    if stopped then return update, 1000 end
+    if anchor == nil then
+        if not ahrs:home_is_set() then return update, 1000 end
+        anchor = ahrs:get_home(); t0_ms = millis(); hold_start(0.0)
+        kn, ke = cfg.target_n_m, cfg.target_e_m
+        if zone_mod ~= nil then
+            zone = assert(zone_mod.from_latlng(anchor, cfg.fence.vertices_latlng))
+        end
+        gcs:send_text(MAV_SEVERITY.INFO, string.format(
+            "KSRC: streaming FOLLOW_TARGET from sysid %d on chan %d",
+            param:get("MAV_SYSID") or 0, KSRC_CHAN:get()))
+    end
+    local t = (millis() - t0_ms):tofloat() * 0.001
+    local run = math.floor(KSRC_RUN:get() + 0.5)
+    if RUN_NAMES[run] == nil then run = 0 end
+    -- case mode
+    if run == 1 and running ~= 1 then
+        running = 1
+        if not rebuild(t, cfg.legs, cfg.geometry, 1) then return update, 1000 end
+        gcs:send_text(MAV_SEVERITY.INFO, "KSRC: case")
+    end
+    -- live mode: on a KSRC_* change, kangaroo_live.rebuild(t, n, e, ...)
+    -- (the demo's rules carried here; kangaroo_live.lua is a follow-up, K9)
+    if run == 2 then
+        local s = settings()
+        if running ~= 2 or signature ~= signature_of(s) then
+            local why = (running == 2) and 2 or 1
+            running, signature = 2, signature_of(s)
+            if not rebuild(t, live_legs(s), s.geometry, why) then return update, 1000 end
+            gcs:send_text(MAV_SEVERITY.INFO, string.format("KSRC: live %s %s %.2f m/s hdg %.0f",
+                MODE_NAMES[s.mode], PACE_NAMES[s.pace], s.speed_ms, s.heading_deg))
+        end
+    end
+    -- hold: KSRC_RUN 0 after a run stands the kangaroo where it is
+    if run == 0 and running then
+        running = false
+        if not rebuild(t, { { duration_s = LEG_S, mode = "point", heading_deg = 0.0,
+                              speed_ms = 0.0 } }, cfg.geometry, 1) then
+            return update, 1000
+        end
+        gcs:send_text(MAV_SEVERITY.INFO, "KSRC: hold")
+    end
+    local n, e, vn, ve = segs.state_at(segments, t)
+    kn, ke = n, e
+    -- live mode only: turn back at the fence by the harness's rule (harness_zone)
+    if zone ~= nil and running == 2 then
+        local leg = legs[active_index(t)]
+        local turned = zone_mod.contain_heading(zone, n, e, leg.heading_deg or 0.0,
+                                                leg.speed_ms or 0.0, PERIOD_MS * 0.001,
+                                                cfg.fence.containment_margin_m)
+        if turned ~= nil then
+            local new_leg = zone_mod.turned_leg(leg, turned)
+            new_leg.duration_s = LEG_S
+            if not rebuild(t, { new_leg }, settings().geometry, 3) then return update, 1000 end
+        end
+    end
+    if KSRC_ENABLE:get() <= 0 then return update, PERIOD_MS end
+    local loc = anchor:copy(); loc:offset(n, e)
+    local msg = { timestamp = millis():toint(), est_capabilities = 3,
+                  lat = loc:lat(), lon = loc:lng(), alt = anchor:alt() * 0.01,
+                  vel = { vn, ve, 0 }, acc = { 0, 0, 0 },
+                  attitude_q = { 1, 0, 0, 0 }, rates = { 0, 0, 0 },
+                  position_cov = { 0, 0, 0 }, custom_state = 0 }
+    local sent = mavlink:send_chan(KSRC_CHAN:get(),
+                                   mavlink_msgs.encode("FOLLOW_TARGET", msg))
+    logger:write('HKSR', 't,Run,N,E,VN,VE,Sent', 'fffffff',
+                 t, running and 1 or 0, n, e, vn, ve, sent and 1 or 0)
+    return update, PERIOD_MS
+end
+return update, 1000

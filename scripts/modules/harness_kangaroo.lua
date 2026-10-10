@@ -1,10 +1,10 @@
 -- =========================================================
 --  harness_kangaroo -- target motion models  |  created 2026-09-03
---  TASK-006 Tranche 2 (deterministic modes) and Tranche 7 (elastic).
+--  Lua port of the harness kangaroo, gated against the Python.
 --
 --  point / straight / circle / rectangle / elastic, as PURE FUNCTIONS OF t:
 --  no state, no aircraft, no estimator. Ported from py_harness/kangaroo.py
---  (TASK-009, TASK-030), which was itself ported from kangaroo_MAV.lua -- so
+--  (its modes and elastic pace), which was itself ported from kangaroo_MAV.lua -- so
 --  the deterministic modes are a REVERSE CHECK against work already relied on,
 --  and any disagreement is a finding about that work, not only about this port.
 --
@@ -12,14 +12,14 @@
 --  --------------------------
 --  The target trajectory is the INPUT to every later comparison. If the two
 --  implementations disagree about where the kangaroo is, every downstream
---  tranche compares two different scenarios and no result means anything.
+--  comparison is between two different scenarios and no result means anything.
 --
 --  Frame: positions and velocities are (north, east) in metres and m/s --
 --  NOT the geometry frame. The kangaroo lives in the harness's history frame,
---  and harness_geom.ne_to_xy is the documented boundary (IR-008). Headings are
---  degrees at this boundary only (IR-005), converted on entry.
+--  and harness_geom.ne_to_xy is the documented boundary. Headings are
+--  degrees at this boundary only, converted on entry.
 --
---  Stateless (VR-015, A-VAL-003).
+--  Stateless: no module-level state.
 -- =========================================================
 
 local geom = require("harness_geom")
@@ -53,7 +53,7 @@ function M.heading_frame_offset(heading_deg, fwd_m, disp_m)
 end
 
 -- ---------------------------------------------------------
--- Deterministic modes -- Tranche 2
+-- Deterministic modes
 -- ---------------------------------------------------------
 
 --- Stationary point. t is ignored; velocity is zero.
@@ -140,7 +140,7 @@ function M.rectangle_state(t, heading_deg, fwd_m, disp_m, length_m, width_m,
 end
 
 -- ---------------------------------------------------------
--- Elastic -- Tranche 7
+-- Elastic pace
 -- ---------------------------------------------------------
 
 --- One full slow-ramp-fast-ramp cycle, seconds.
@@ -180,7 +180,7 @@ end
 
 --- Distance travelled by time t under elastic_speed, metres.
 --  Closed-form integral of the profile, so position stays a pure function of t
---  with no accumulator (VR-015, A-VAL-003). Over a whole cycle the mean speed
+--  with no accumulator (no state). Over a whole cycle the mean speed
 --  is exactly (slow + fast)/2.
 function M.elastic_distance(t, slow_ms, fast_ms, hold_s, ramp_s)
     if t <= 0.0 then
@@ -215,7 +215,7 @@ function M.elastic_distance(t, slow_ms, fast_ms, hold_s, ramp_s)
     return dist
 end
 
---- `base_mode` travelled at an elastic pace (TASK-030).
+--- `base_mode` travelled at an elastic pace.
 --
 --  The base mode is evaluated at UNIT SPEED, so its time argument is arc length
 --  directly and its velocity is the unit tangent; the elastic distance and
@@ -255,7 +255,7 @@ function M.elastic_state(t, base_mode, heading_deg, fwd_m, disp_m, radius_m,
 end
 
 -- ---------------------------------------------------------
--- Stop-start pace -- TASK-064
+-- Stop-start pace
 -- ---------------------------------------------------------
 --  Ported from py_harness/kangaroo.py (stopstart_*). Starts at the nominated
 --  speed: hold fast, ramp down to slow_factor x speed, hold slow, ramp up,
@@ -410,7 +410,7 @@ end
 --  `opts` is a table carrying whatever the chosen mode needs: heading_deg,
 --  fwd_m, disp_m, speed_ms, radius_m, length_m, width_m, for elastic
 --  base_mode, slow_ms, fast_ms, hold_s, ramp_s, and for stopstart base_mode
---  and pace (TASK-064).
+--  and pace.
 function M.state(mode, t, opts)
     local heading_deg = opts.heading_deg or 0.0
     local fwd_m = opts.fwd_m or 0.0

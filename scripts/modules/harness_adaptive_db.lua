@@ -1,6 +1,6 @@
 -- =========================================================
 --  harness_adaptive_db -- CS-orbit about a PREDICTED target  |  created 2026-09-03
---  TASK-006 Tranche 6 (forward port).  Algorithm: adaptive_db_circle (TASK-033).
+--  Lua port of the harness's adaptive_db_circle (arm A), gated against the Python.
 --
 --  THE FIRST STATEFUL ALGORITHM PORTED. It carries algorithm_state across ticks
 --  -- the committed pose, the held centre, the replan clock -- so the
@@ -19,10 +19,10 @@
 --       scoring of the new plan against the active one, no hysteresis and no
 --       cooldown. The tick counter reaching n_replan is the only thing that
 --       changes the path. This is a COMMITMENT INTERVAL, not the replanning
---       DECISION that ADR-001 removed, and the distinction is the reason this
---       algorithm was allowed to exist (ADR-004).
+--       DECISION that the continuous design removed, and the distinction is the
+--       reason this algorithm was allowed to exist.
 --
---  Hold policies (TASK-033 D5)
+--  Hold policies
 --  ---------------------------
 --  "plan"        -- the predicted centre AND the committed CS curve are both
 --                   held. Progress along the committed curve is found by
@@ -37,16 +37,16 @@
 --
 --  The committed plan is rebuilt each tick from the COMMIT POSE and HELD CENTRE
 --  rather than stored as a sampled point list: shortest_path is deterministic,
---  so re-running it on the stored inputs returns the identical path (PR-004),
+--  so re-running it on the stored inputs returns the identical path,
 --  and algorithm_state stays a handful of numbers instead of a few hundred
 --  points. A vehicle port would cache the sampled path instead; this
 --  re-derives it because the harness is measuring GEOMETRY, not planning cost.
 --  The replan interval therefore changes WHICH plan is flown, not how much
 --  computation happens.
 --
---  Frame x = East, y = North, psi from North clockwise (IR-008).
+--  Frame x = East, y = North, psi from North clockwise.
 --  Stateless at module level: everything carried between ticks travels through
---  algorithm_state (VR-015, A-VAL-003).
+--  algorithm_state.
 -- =========================================================
 
 local dubins = require("harness_dubins")
@@ -104,7 +104,7 @@ M.orbit_hold = orbit_hold
 --  Returns a table {gx, gy, phase, direction, curvature, ring_angle_rad?,
 --  plan?} or nil plus a reason. `plan` is present in the approach phase only:
 --  the orbit phase commits no curve.
---  preferred_direction / sense_margin_m (optional; TASK-048): orbit-sense
+--  preferred_direction / sense_margin_m (optional): orbit-sense
 --  hysteresis on the CS solve, passed through to harness_cs_orbit. Both nil
 --  reproduces the pre-2026-09-14 behaviour exactly.
 function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
@@ -127,7 +127,7 @@ function M.guidance(px, py, psi_i, cx, cy, plan, orbit_radius_m, turn_radius_m,
 
     if d <= R then
         -- On / inside the ring: continue around the held centre. No ramp -- the
-        -- tangent arrival of the TASK-024 approach makes the switch continuous.
+        -- tangent arrival of the CS approach makes the switch continuous.
         return orbit_hold(px, py, cx, cy, psi_i, R, look_ahead_m, precompensate)
     end
 
@@ -200,7 +200,7 @@ end
 --  algorithm, and without one the run would quietly become plain CS-orbit under
 --  a different name and be mistaken for evidence.
 --
---  `hyst` selects the held orbit sense (TASK-048, arm AH), the way sitl_arms'
+--  `hyst` selects the held orbit sense (arm AH), the way sitl_arms'
 --  cs_orbit_entry(hyst) and the Python _SenseHysteresisMixin do: it is a
 --  property of the arm, not a config value, so it is passed in, not read from
 --  cfg (which then also carries cs_sense_margin_m). M.guidance_point and
@@ -229,7 +229,7 @@ local function guidance_point(snapshot, cfg, hyst)
     local cx, cy, plan, ticks
     if replanned then
         cx, cy = est.e_m, est.n_m
-        plan = nil          -- commit the live pose, unconditionally (D4)
+        plan = nil          -- commit the live pose, unconditionally
         ticks = 0
     else
         cx, cy = st.centre_e_m, st.centre_n_m
@@ -241,7 +241,7 @@ local function guidance_point(snapshot, cfg, hyst)
         -- the live pose, which the phase test guarantees is outside. The
         -- aircraft crosses the boundary repeatedly while settling, so this is
         -- the ordinary case, not a rare one -- it is the regression that
-        -- stopped a 180 s run at 35.8 s during TASK-033.
+        -- stopped a 180 s run at 35.8 s during development.
         if st.plan_valid then
             plan = { px = st.plan_e_m, py = st.plan_n_m, psi = st.plan_psi_rad }
         else
@@ -304,7 +304,7 @@ local function guidance_point(snapshot, cfg, hyst)
         state.ring_angle_rad = g.ring_angle_rad
     end
 
-    -- The FR-011 / PR-008 quantity: the guidance-point jump caused by THE PLAN
+    -- The plan-change jump: the guidance-point jump caused by THE PLAN
     -- CHANGING, isolated from the aircraft's own motion by evaluating the OLD
     -- plan at the SAME pose. Omitted -- rather than faked as 0.0 -- when there
     -- is no old plan or it no longer solves from here. The old plan is
@@ -345,7 +345,7 @@ end
 
 --- The two entries, as sitl_arms' contract expects: (snapshot, cfg).
 --  adaptive_db_circle      -> M.guidance_point       (no held sense)
---  adaptive_db_circle_hyst -> M.guidance_point_hyst  (held sense, TASK-048)
+--  adaptive_db_circle_hyst -> M.guidance_point_hyst  (held sense)
 function M.guidance_point(snapshot, cfg)
     return guidance_point(snapshot, cfg, false)
 end

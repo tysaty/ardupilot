@@ -1,5 +1,5 @@
 -- =========================================================
---  sitl_adsb -- show the virtual kangaroo on a ground station map (TASK-058)
+--  sitl_adsb -- show the virtual kangaroo on a ground station map
 --  created 2026-09-24
 --
 --  The SITL runner and the demonstration script evaluate the kangaroo inside
