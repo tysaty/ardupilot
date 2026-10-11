@@ -5,15 +5,15 @@
   "fence_file": "sitl-runs/SV2_fence_line2.txt",
   "site_reference": "fence_vertex_centroid",
   "aircraft": {
-    "airspeed_ms": 22.0,
-    "turn_radius_m": 45.0,
+    "airspeed_ms": 16.0,
+    "turn_radius_m": 30.0,
     "orbit_radius_m": 70.0,
-    "look_ahead_m": 30.0,
+    "look_ahead_m": 15.0,
     "dt_s": 0.1,
     "bank_limit_deg": 60.0
   },
   "kangaroo": {
-    "speed_ms": 11.0,
+    "speed_ms": 6.0,
     "laps": 1,
     "radius_m": 60.0,
     "length_m": 140.0,
@@ -26,7 +26,7 @@
     "n_m": 30.0,
     "e_m": 0.0,
     "duration_s": 45.0,
-    "note": "Flown first and held once for 45 s (one 70 m orbit at 22 m/s takes 20.0 s), at the fence's deepest point (68 m spare), away from the shared start; the kangaroo then walks to the shared start at the plan speed (an unscored transit). One lap of each run and no rests (author, 2026-10-10): every run starts and ends at the shared start, so the runs chain directly; 518 s (8.6 min) per arm at 11 m/s, one battery per arm."
+    "note": "Flown first and held once for 45 s (one 70 m orbit at 16 m/s takes 27.5 s), at the fence's deepest point (68 m spare), away from the shared start; the kangaroo then walks to the shared start at the plan speed (an unscored transit). One lap of each run and no rests (author, 2026-10-10): every run starts and ends at the shared start, so the runs chain directly; 914 s (15.2 min) per arm at 6 m/s (was 518 s at 11 m/s; kangaroo slowed to 6 m/s on 2026-10-11 after flight 44, where the 12.5 m/s kangaroo outran the Bixler), one battery per arm to be confirmed."
   },
   "cycle": {
     "start_n_m": 90.0,
@@ -39,7 +39,7 @@
   "cs_sampling": {
     "fine_m": 100.0,
     "coarse_m": 10.0,
-    "note": "Heap (2026-10-10): the guidance samples its CS approach path's straights every delta_d_m (0.5 m) only for the first fine_m metres of the path (the carrot is read 30 m along it; AH replans every tick) and every coarse_m after, so a far approach no longer costs about 1.25 kB per metre. Leaves the guidance unchanged (tests/unit/test_hardware_val_merged.py). Remove this block to sample the whole path, as the Python harness."
+    "note": "Heap (2026-10-10): the guidance samples its CS approach path's straights every delta_d_m (0.5 m) only for the first fine_m metres of the path (the carrot is read 15 m along it; AH replans every tick) and every coarse_m after, so a far approach no longer costs about 1.25 kB per metre. Leaves the guidance unchanged (tests/unit/test_hardware_val_merged.py). Remove this block to sample the whole path, as the Python harness."
   },
   "arms": {
     "0H": {
