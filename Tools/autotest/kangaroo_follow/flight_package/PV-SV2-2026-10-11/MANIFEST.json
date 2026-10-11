@@ -18,7 +18,7 @@
   }
  },
  "source": {
-  "ardupilot_commit": "76a5a01951",
+  "ardupilot_commit": "7c810dccd0",
   "dirty": true
  },
  "files": {
@@ -36,7 +36,7 @@
   "0H/APM/scripts/modules/sitl_adsb.lua": "caeb9944b4106ffa64117f18eb93df2a6881cc2ebce131b549312e05f72984ff",
   "0H/APM/scripts/modules/sitl_arms.lua": "e2e33c015d5456fc9ec0c500b7f4d1583c32e3628bec6deb3aeeb79ddab791d2",
   "0H/APM/scripts/modules/sitl_spec.lua": "dc457299c283414ee48fca268bd90ca143c62b9868cd611a03383949c31ba20e",
-  "0H/APM/scripts/spec.json": "db3b397a4a9b08274d9339a42c3eb0c5a158b03d68c25f1e29d1f78a4b74cddf",
+  "0H/APM/scripts/spec.json": "4259e8772a5e5f141bb7593db824aac15d8b30977d248ee3b7c9b519be9cad36",
   "AH/APM/scripts/hardware_val.lua": "f720dae79a99a506a5be2c06325972228b42272d901e5d745f7807b04acfa330",
   "AH/APM/scripts/modules/harness_adaptive_db.lua": "38ca37fe2f20a712832edbeab28ab1d2a61c731d994f16baa39e80eabe1ac2b0",
   "AH/APM/scripts/modules/harness_carrot_shift.lua": "8632f447d6ff3e0095e7adc8c711eb177f0b01fc40039233639df136053074db",
@@ -51,7 +51,7 @@
   "AH/APM/scripts/modules/sitl_adsb.lua": "caeb9944b4106ffa64117f18eb93df2a6881cc2ebce131b549312e05f72984ff",
   "AH/APM/scripts/modules/sitl_arms.lua": "e2e33c015d5456fc9ec0c500b7f4d1583c32e3628bec6deb3aeeb79ddab791d2",
   "AH/APM/scripts/modules/sitl_spec.lua": "dc457299c283414ee48fca268bd90ca143c62b9868cd611a03383949c31ba20e",
-  "AH/APM/scripts/spec.json": "70c883b0718386822f5ca83f9639d63d93e01a491b90c0530b3a589c0f178803",
+  "AH/APM/scripts/spec.json": "28a9fd0c38b68509addd49d357604b91ae08b79c57c5308c6972d1df77b7851d",
   "FH/APM/scripts/hardware_val.lua": "f720dae79a99a506a5be2c06325972228b42272d901e5d745f7807b04acfa330",
   "FH/APM/scripts/modules/harness_adaptive_db.lua": "38ca37fe2f20a712832edbeab28ab1d2a61c731d994f16baa39e80eabe1ac2b0",
   "FH/APM/scripts/modules/harness_carrot_shift.lua": "8632f447d6ff3e0095e7adc8c711eb177f0b01fc40039233639df136053074db",
@@ -66,7 +66,7 @@
   "FH/APM/scripts/modules/sitl_adsb.lua": "caeb9944b4106ffa64117f18eb93df2a6881cc2ebce131b549312e05f72984ff",
   "FH/APM/scripts/modules/sitl_arms.lua": "e2e33c015d5456fc9ec0c500b7f4d1583c32e3628bec6deb3aeeb79ddab791d2",
   "FH/APM/scripts/modules/sitl_spec.lua": "dc457299c283414ee48fca268bd90ca143c62b9868cd611a03383949c31ba20e",
-  "FH/APM/scripts/spec.json": "38bda9ac97b716caf787efc3fcebf92726cabca9fa51fdbaf4f9ccfceae73851",
+  "FH/APM/scripts/spec.json": "da1802a4a0fdc67e1e9018e426909ab5500b30baa76ec748860fcc0b648eee39",
   "fence/SV2_fence_line2.txt": "1d1be8bce2c2d0b65e875c4571ec68ebf1f457e24f9e913c11ca69437a8bf7b4",
   "flight.parm": "3f847f8b5216424570c8c620689bca1c5dbbd09803e1360ed3bf8023d7027ac9"
  }

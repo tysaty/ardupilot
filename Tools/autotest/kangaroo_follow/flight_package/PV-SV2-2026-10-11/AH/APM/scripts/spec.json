@@ -161,7 +161,7 @@
   }
  ],
  "legs_source": "spec",
- "look_ahead_m": 15.0,
+ "look_ahead_m": 30.0,
  "lookahead_steps": 25,
  "mode_code": 5,
  "orbit_bank_deg": 20.451732213167606,

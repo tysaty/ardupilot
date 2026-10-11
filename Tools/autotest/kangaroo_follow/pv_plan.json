@@ -8,7 +8,7 @@
     "airspeed_ms": 16.0,
     "turn_radius_m": 30.0,
     "orbit_radius_m": 70.0,
-    "look_ahead_m": 15.0,
+    "look_ahead_m": 30.0,
     "dt_s": 0.1,
     "bank_limit_deg": 60.0
   },
@@ -39,7 +39,7 @@
   "cs_sampling": {
     "fine_m": 100.0,
     "coarse_m": 10.0,
-    "note": "Heap (2026-10-10): the guidance samples its CS approach path's straights every delta_d_m (0.5 m) only for the first fine_m metres of the path (the carrot is read 15 m along it; AH replans every tick) and every coarse_m after, so a far approach no longer costs about 1.25 kB per metre. Leaves the guidance unchanged (tests/unit/test_hardware_val_merged.py). Remove this block to sample the whole path, as the Python harness."
+    "note": "Heap (2026-10-10): the guidance samples its CS approach path's straights every delta_d_m (0.5 m) only for the first fine_m metres of the path (the carrot is read 30 m along it; AH replans every tick) and every coarse_m after, so a far approach no longer costs about 1.25 kB per metre. Leaves the guidance unchanged (tests/unit/test_hardware_val_merged.py). Remove this block to sample the whole path, as the Python harness."
   },
   "arms": {
     "0H": {
