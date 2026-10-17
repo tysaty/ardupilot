@@ -1906,7 +1906,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                 now = self.get_sim_time_cached()
                 if now - tstart > 60:
                     raise NotAchievedException("Did not get correct required terrain")
-                for i in range(steps):
+                for i in range(steps+1):
                     lat = loc1.lat + i * (loc2.lat-loc1.lat)/steps
                     lon = loc1.lng + i * (loc2.lng-loc1.lng)/steps
                     self.mav.mav.terrain_check_send(int(lat*1.0e7), int(lon*1.0e7))
@@ -1915,26 +1915,24 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
                 self.progress("Terrain pending=%u" % report.pending)
                 if report.pending == 0:
                     break
+                self.delay_sim_time(1, reason="vehicle to fetch terrain data")
             self.progress("Got required terrain")
 
         self.wait_ready_to_arm()
         homeloc = self.get_location()
-        homeloc_alt_amsl = homeloc.get_alt_m(AltFrame.ABSOLUTE)
 
-        guided_loc = Location(-35.39723762, 149.07284612, homeloc_alt_amsl+99.0, AltFrame.ABSOLUTE)
-        rally_loc = Location(-35.3654952000, 149.1558698000, homeloc_alt_amsl+100, AltFrame.ABSOLUTE)
-
-        # the reposition and rally altitudes below go out in the terrain
-        # frame while carrying these AMSL magnitudes; that mismatch is the
-        # alt-frame confusion this (disabled) test is filed against, so it
-        # is preserved rather than fixed here
-        guided_loc_terrain = guided_loc.copy()
-        guided_loc_terrain.set_alt_m(homeloc_alt_amsl+99.0, AltFrame.ABOVE_TERRAIN)
+        guided_loc = Location(-35.39723762, 149.07284612, 99.0, AltFrame.ABOVE_TERRAIN)
+        # uploaded relative to home; TERRAIN_FOLLOW makes RTL follow
+        # terrain on the way, but it arrives at the same AMSL height
+        rally_loc_relhome = Location(-35.3654952000, 149.1558698000, 100, AltFrame.ABOVE_HOME)
+        rally_loc = rally_loc_relhome.copy()
+        rally_loc.set_alt_m(100, AltFrame.ABOVE_TERRAIN)
 
         terrain_wait_path(homeloc, rally_loc, 10)
+        terrain_wait_path(homeloc, guided_loc, 10)
 
         # set a rally point to the west of home
-        self.upload_rally_points_from_locations([rally_loc])
+        self.upload_rally_points_from_locations([rally_loc_relhome])
 
         self.set_parameter("TKOFF_ALT", 100)
         self.change_mode("TAKEOFF")
@@ -1947,7 +1945,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.install_message_hook_context(terrain_following_above_80m)
 
         self.change_mode("GUIDED")
-        self.send_do_reposition(guided_loc_terrain)
+        self.send_do_reposition(guided_loc)
         self.progress("Flying to guided location")
         self.wait_location(
             guided_loc,
@@ -1961,31 +1959,23 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
         self.change_mode("RTL")
         self.progress("Flying to rally point")
         self.wait_location(
-            rally_loc,
+            rally_loc_relhome,
             accuracy=200,
             timeout=600,
             height_accuracy=10,
+            minimum_duration=10,
         )
         self.progress("Reached rally point with TERRAIN_FOLLOW")
 
         # Fly back to guided location
         self.change_mode("GUIDED")
-        self.send_do_reposition(guided_loc_terrain)
+        self.send_do_reposition(guided_loc)
         self.progress("Flying to back to guided location")
 
         # Disable terrain following and re-load rally point with relative to terrain altitude
         self.set_parameter("TERRAIN_FOLLOW", 0)
 
-        rally_item = [self.create_MISSION_ITEM_INT(
-            mavutil.mavlink.MAV_CMD_NAV_RALLY_POINT,
-            x=int(rally_loc.lat*1e7),
-            y=int(rally_loc.lng*1e7),
-            z=rally_loc.get_alt_m(AltFrame.ABSOLUTE),
-            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT,
-            mission_type=mavutil.mavlink.MAV_MISSION_TYPE_RALLY
-        )]
-        self.correct_wp_seq_numbers(rally_item)
-        self.check_rally_upload_download(rally_item)
+        self.upload_rally_points_from_locations([rally_loc])
 
         # Once back at guided location re-trigger RTL
         self.wait_location(
@@ -2002,6 +1992,7 @@ class AutoTestPlane(vehicle_test_suite.TestSuite):
             accuracy=200,
             timeout=600,
             height_accuracy=10,
+            minimum_duration=10,
         )
         self.progress("Reached rally point with terrain alt frame")
 
@@ -4830,6 +4821,251 @@ return update()
                     "Active backend is %s, expected %s" % (announced, shortname))
             # announcements from this stage are not evidence for the next:
             self.context_clear_collection("STATUSTEXT")
+
+    def SyntheticAirspeedNoSensor(self):
+        '''with no usable airspeed sensor and EKF3 active, the airspeed
+        estimate is EKF3's own synthetic value (derived from its velocity
+        and wind estimates), logged as EKF3_SYNTHETIC and not the DCM
+        backend's DCM_SYNTHETIC, while remaining a plausible airspeed'''
+        # CTUN.AsT values (AirspeedEstimateType):
+        NO_NEW_ESTIMATE = 0
+        DCM_SYNTHETIC = 2
+        EKF3_SYNTHETIC = 3
+        self.set_parameters({
+            "ARSPD_USE": 0,        # do not consume the airspeed sensor
+            "AHRS_EKF_TYPE": 3,
+            "SIM_WIND_SPD": 6,
+            "SIM_WIND_DIR": 45,
+        })
+        self.reboot_sitl()
+        self.wait_ready_to_arm()
+        self.takeoff(70)  # default sim wind ramps up to 60m
+        self.change_mode('LOITER')
+
+        # hold a plausible airspeed for a good window: this keeps the plane
+        # flying and bounds the window for the log check below.  wait_airspeed()
+        # reads VFR_HUD (the live pitot), so it does not itself prove the
+        # synthetic value is used - the CTUN.AsT/As log check below does, and in
+        # flight the speed scaler consumes the AHRS (synthetic) estimate:
+        t_start = self.get_sim_time()
+        self.wait_airspeed(8, 35, minimum_duration=20, timeout=120)
+        t_end = self.get_sim_time()
+        self.fly_home_land_and_disarm()
+
+        # over that window CTUN.AsT must be EKF3's own synthetic (a
+        # transient NO_NEW_ESTIMATE before the estimate settles is
+        # tolerated).  It must never be DCM_SYNTHETIC: that would mean
+        # EKF3 fell back to the DCM backend's estimate, and with the
+        # sensor disabled it must never be AIRSPEED_SENSOR either.  The
+        # AHRS may briefly fall back to DCM itself (e.g. on an EKF3 fault),
+        # where DCM_SYNTHETIC is correct, so skip the DCM-active cycles:
+        self.progress("Checking logged airspeed estimate type")
+        dfreader = self.dfreader_for_current_onboard_log()
+        seen = set()
+        count = 0
+        dcm_active = False
+        dcm_count = 0
+        synthetic_values = []
+        while True:
+            m = dfreader.recv_match(type=['MSG', 'CTUN'])
+            if m is None:
+                break
+            if m.get_type() == 'MSG':
+                if m.Message == "AHRS: DCM active":
+                    dcm_active = True
+                elif m.Message.startswith("AHRS: ") and m.Message.endswith(" active"):
+                    dcm_active = False
+                continue
+            t = m.TimeUS * 1e-6
+            if t < t_start or t > t_end:
+                continue
+            if dcm_active:
+                dcm_count += 1
+                continue
+            seen.add(m.AsT)
+            if m.AsT == EKF3_SYNTHETIC:
+                synthetic_values.append(m.As)
+            count += 1
+        self.progress("Skipped %u DCM-active CTUN samples" % dcm_count)
+        if count == 0:
+            raise NotAchievedException("No CTUN messages found in the cruise window")
+        if DCM_SYNTHETIC in seen:
+            raise NotAchievedException(
+                "EKF3 borrowed the DCM synthetic airspeed (saw AsT=DCM_SYNTHETIC)")
+        if EKF3_SYNTHETIC not in seen:
+            raise NotAchievedException(
+                "EKF3 never produced its own synthetic airspeed (AsT values seen: %s)" %
+                sorted(seen))
+        unexpected = seen - {NO_NEW_ESTIMATE, EKF3_SYNTHETIC}
+        if unexpected:
+            raise NotAchievedException(
+                "Unexpected airspeed estimate type(s) with the sensor disabled "
+                "and EKF3 active: %s" % sorted(unexpected))
+        # CTUN.As is the AHRS airspeed estimate (EAS).  VFR_HUD still reports the
+        # live pitot even with ARSPD_USE=0, so check the logged estimate itself
+        # is a plausible airspeed on the EKF3_SYNTHETIC cycles - i.e. the plane
+        # really flew on EKF3's own synthetic value.  Use the median, which
+        # ignores the brief overshoot while the wind estimate is still settling:
+        median_synthetic = sorted(synthetic_values)[len(synthetic_values) // 2]
+        if median_synthetic < 8 or median_synthetic > 45:
+            raise NotAchievedException(
+                "EKF3 synthetic airspeed implausible: median %.1f over %u samples (range [%.1f, %.1f])" %
+                (median_synthetic, len(synthetic_values), min(synthetic_values), max(synthetic_values)))
+
+    def DCMFallbackAirspeedSensor(self):
+        '''when the AHRS falls back to DCM, DCM takes its airspeed from a
+        healthy, in-use airspeed sensor even if the EKF3 it fell back
+        from is rejecting that sensor: the EKF3 airspeed-rejection veto
+        belongs to the EKF3 backend, not to DCM'''
+        # CTUN.AsT values (AirspeedEstimateType):
+        AIRSPEED_SENSOR = 1
+        # NavFilterStatusBit values in XKF4.SS:
+        REJECTING_AIRSPEED = 1 << 17
+        DEAD_RECKONING = 1 << 18
+        self.set_parameters({
+            "AHRS_EKF_TYPE": 3,
+            "EK3_IMU_MASK": 1,  # a single core, so XKF4 C=0 is the primary
+            # stop the airspeed library itself disabling the sensor EKF3
+            # rejects; this test is about the AHRS veto:
+            "ARSPD_OPTIONS": 0,
+        })
+        self.reboot_sitl()
+        self.wait_ready_to_arm()
+        self.takeoff(50)
+        self.change_mode('CIRCLE')
+
+        AIRSPEED_SENSOR_UNHEALTHY = 1
+        AIRSPEED_SENSOR_USING = 2
+
+        def wait_ekf3_rejecting_airspeed():
+            '''with the sensor healthy and in use, the AHRS stops
+            reporting it as in use exactly when the EKF3 veto applies'''
+            self.progress("Waiting for EKF3 to be rejecting the airspeed sensor")
+            tstart = self.get_sim_time()
+            rejecting_start = None
+            while True:
+                now = self.get_sim_time_cached()
+                if now - tstart > 60:
+                    raise NotAchievedException("EKF3 did not reject the airspeed sensor")
+                a = self.assert_receive_message('AIRSPEED', instance=0)
+                if a.flags & (AIRSPEED_SENSOR_UNHEALTHY | AIRSPEED_SENSOR_USING):
+                    rejecting_start = None
+                    continue
+                if rejecting_start is None:
+                    rejecting_start = now
+                if now - rejecting_start >= 5:
+                    return
+
+        def vetoed_dcm_airspeed_types():
+            '''return CTUN.AsT on the cycles logged so far where DCM is
+            active and EKF3 is rejecting airspeed while not dead
+            reckoning (the base veto condition)'''
+            dfreader = self.dfreader_for_current_onboard_log()
+            dcm_active = False
+            ekf3_status = None
+            ret = []
+            while True:
+                m = dfreader.recv_match(type=['MSG', 'XKF4', 'CTUN'])
+                if m is None:
+                    break
+                mtype = m.get_type()
+                if mtype == 'MSG':
+                    if m.Message == "AHRS: DCM active":
+                        dcm_active = True
+                    elif m.Message.startswith("AHRS: ") and m.Message.endswith(" active"):
+                        dcm_active = False
+                    continue
+                if mtype == 'XKF4':
+                    if m.C == 0:
+                        ekf3_status = m.SS
+                    continue
+                if not dcm_active or ekf3_status is None:
+                    continue
+                if (ekf3_status & REJECTING_AIRSPEED) and not (ekf3_status & DEAD_RECKONING):
+                    ret.append(m.AsT)
+            return ret
+
+        # AP_AHRS only announces backend changes, so track the latest
+        # one rather than searching for a matching statustext:
+        active_backend = ["EKF3"]
+
+        def record_active_backend(mav, m):
+            if m.get_type() != 'STATUSTEXT':
+                return
+            if m.text.startswith("AHRS: ") and m.text.endswith(" active"):
+                active_backend[0] = m.text[len("AHRS: "):-len(" active")]
+
+        def wait_active_backend(name, minimum_duration=0, timeout=60):
+            self.progress("Waiting for %s to be the active AHRS backend" % name)
+            tstart = self.get_sim_time()
+            pass_start = None
+            while True:
+                now = self.get_sim_time_cached()
+                if now - tstart > timeout:
+                    raise NotAchievedException(
+                        "%s did not become the active AHRS backend (latest: %s)" %
+                        (name, active_backend[0]))
+                self.assert_receive_message('HEARTBEAT')
+                if active_backend[0] != name:
+                    pass_start = None
+                    continue
+                if pass_start is None:
+                    pass_start = now
+                if now - pass_start >= minimum_duration:
+                    return
+
+        self.context_push()
+        self.install_message_hook_context(record_active_backend)
+        try:
+            self.start_subtest("Freeze the airspeed sensor low so EKF3 rejects it")
+            # a low reading makes TECS add throttle rather than stall
+            # the plane when DCM uses the sensor below:
+            m = self.assert_receive_message('VFR_HUD')
+            self.set_parameter("SIM_ARSPD_FAIL", max(m.airspeed - 8, 5))
+
+            # EKF3 force-fuses airspeed once both its airspeed and
+            # position have timed out, so after the GPS upset its
+            # rejection comes and goes and may not overlap DCM being
+            # active; retry the upset until the log shows they did:
+            vetoed_types = []
+            for attempt in range(3):
+                wait_ekf3_rejecting_airspeed()
+                self.start_subtest("Upset the EKF's GPS fusion to force a DCM fallback (attempt %u)" %
+                                   (attempt+1))
+                self.set_parameters({
+                    "EK3_POS_I_GATE": 0,
+                    "SIM_GPS1_HZ": 1,
+                    "SIM_GPS1_LAG_MS": 1000,
+                })
+                wait_active_backend("DCM")
+                self.delay_sim_time(20, reason="fly with DCM falling back")
+                self.set_parameters({
+                    "EK3_POS_I_GATE": 500,
+                    "SIM_GPS1_HZ": 5,
+                    "SIM_GPS1_LAG_MS": 100,
+                })
+                wait_active_backend("EKF3", minimum_duration=5)
+                vetoed_types = vetoed_dcm_airspeed_types()
+                self.progress("DCM-active CTUN samples with EKF3 rejecting airspeed: %u" %
+                              len(vetoed_types))
+                unexpected = set(vetoed_types) - {AIRSPEED_SENSOR}
+                if unexpected:
+                    raise NotAchievedException(
+                        "DCM did not use the airspeed sensor EKF3 was rejecting (AsT values seen: %s)" %
+                        sorted(set(vetoed_types)))
+                if len(vetoed_types) >= 10:
+                    break
+            self.set_parameter("SIM_ARSPD_FAIL", 0)
+        except Exception:
+            self.disarm_vehicle(force=True)
+            raise
+        self.context_pop()
+        self.disarm_vehicle(force=True)
+
+        if len(vetoed_types) < 10:
+            raise NotAchievedException(
+                "Too few DCM-active samples with EKF3 rejecting airspeed (%u)" %
+                len(vetoed_types))
 
     def FenceAltCeilFloor(self):
         '''Tests the fence ceiling and floor'''
@@ -10537,6 +10773,8 @@ return update()
             self.EKF3AirspeedAffinity,
             self.EKF3AirspeedAffinityDCM,
             self.AHRSActiveAirspeedIndex,
+            self.SyntheticAirspeedNoSensor,
+            self.DCMFallbackAirspeedSensor,
             self.RTL_CLIMB_MIN,
             self.SmartBattery,
             self.FlyEachFrame,
@@ -10907,7 +11145,6 @@ return update()
     def disabled_tests(self):
         ret = {
             "LandingDrift": "Flapping test. See https://github.com/ArduPilot/ardupilot/issues/20054",
-            "TerrainRally": "Passes vacuously due to helper alt-frame bugs. See https://github.com/ArduPilot/ardupilot/issues/33740",  # noqa
             "InteractTest": "requires user interaction",
             "ClimbThrottleSaturation": "requires https://github.com/ArduPilot/ardupilot/pull/27106 to pass",
             "SoaringClimbRate": "very bad sink rate",
